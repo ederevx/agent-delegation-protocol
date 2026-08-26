@@ -46,6 +46,14 @@ For parallel work:
 
 Delegation never transfers accountability. The parent must review consequential changes, reconcile cross-subsystem interfaces, resolve conflicts, run appropriate repository-wide tests/build/lint checks after integration, and personally handle material unresolved uncertainty.
 
+## Worker conflict escalation
+
+Workers share the parent's working tree and cannot see its uncommitted state. A worker must ask the parent before any action outside its assigned ownership — repository-wide version-control state (`git stash`, `git checkout --`, `git reset`, `git clean`, index or branch changes), another worker's files, the parent's uncommitted work, dependency installs or removals, and anything that leaves the machine such as a push or a deploy. It asks over whatever channel the runtime provides for reaching the parent; where none exists, it stops and reports instead of proceeding.
+
+The parent must answer those requests rather than let a worker stall or guess, and is the only party that may escalate the question to the user. Permission granted for one action does not extend to the next.
+
+Reduce the need for these requests up front: commit or set aside uncommitted work before delegating into a dirty tree, give each worker explicit ownership boundaries, and keep repository-wide state out of worker briefs.
+
 ## Worker lifecycle
 
 A worker does not disappear when its task ends. It goes idle and keeps holding a concurrency slot until it is explicitly dismissed, so a turn that spawns workers and never dismisses them steadily consumes the budget for the rest of the session.

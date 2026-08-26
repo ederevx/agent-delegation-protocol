@@ -32,6 +32,14 @@ The installed hooks, agent definitions, and rules are symlinks back into this re
 
 Ad-hoc local edits are lost on reinstall, diverge silently between machines, and leave the other agent's half inconsistent. If a change is worth making locally, it is worth committing and pushing here.
 
+## Worker conflict escalation
+
+Workers share the parent's working tree and cannot see its uncommitted state, so they are required to ask before acting outside their assigned ownership — repository-wide version-control state, another worker's files, the parent's uncommitted work, dependency changes, or anything that leaves the machine. Workers ask over `SendMessage`; the parent is addressable by the name `ListAgents` reports.
+
+The parent must answer those requests rather than let a worker stall or guess, and is the only party that may escalate the question to the user. Granting permission for one action does not grant it for the next.
+
+Reduce the need for these requests up front: commit or set aside uncommitted work before delegating into a dirty tree, give each worker explicit ownership boundaries, and keep repository-wide state out of worker briefs.
+
 ## Hook interaction
 
 The installed Claude hook may:
