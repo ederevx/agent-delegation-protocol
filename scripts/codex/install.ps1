@@ -5,7 +5,12 @@ $CodexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME '.c
 $StateDir = Join-Path $CodexHome '.delegation-protocol'
 $RuntimeDir = Join-Path $RepoRoot '.runtime\codex'
 
-New-Item -ItemType Directory -Force -Path $CodexHome, $StateDir, $RuntimeDir | Out-Null
+$Python = Get-Command python -ErrorAction SilentlyContinue
+if (-not $Python) { $Python = Get-Command py -ErrorAction SilentlyContinue }
+if (-not $Python) { throw 'Python 3 is required for Codex hook enforcement.' }
+$PythonExe = $Python.Source
+
+New-Item -ItemType Directory -Force -Path $CodexHome, (Join-Path $CodexHome 'agents'), (Join-Path $CodexHome 'hooks'), $StateDir, $RuntimeDir | Out-Null
 
 function New-SafeSymlink([string]$Source, [string]$Destination) {
     if (Test-Path -LiteralPath $Destination) {
@@ -23,40 +28,56 @@ $State = Join-Path $StateDir 'state'
 $Backup = Join-Path $StateDir 'original-active-global.md'
 $Composed = Join-Path $RuntimeDir 'AGENTS.composed.md'
 
+$InstructionsReady = $false
 if ((Test-Path $Agents) -and -not (Test-Path $Override)) {
     $item = Get-Item $Agents -Force
     if ($item.LinkType -eq 'SymbolicLink' -and $item.Target -contains $Protocol) {
         Set-Content -Path $State -Value "mode=direct`n"
-        Write-Host 'Installed Codex delegation protocol only. Restart Codex sessions.'
-        exit 0
+        $InstructionsReady = $true
     }
 }
 
-if ((Test-Path $Override) -and (Test-Path $State)) {
+if (-not $InstructionsReady -and (Test-Path $Override) -and (Test-Path $State)) {
     $item = Get-Item $Override -Force
     if ($item.LinkType -eq 'SymbolicLink' -and $item.Target -contains $Composed) {
         $existing = if (Test-Path $Backup) { Get-Content -Raw $Backup } else { '' }
         Set-Content -Path $Composed -Value ($existing + "`r`n`r`n" + (Get-Content -Raw $Protocol))
-        Write-Host 'Installed Codex delegation protocol only. Restart Codex sessions.'
-        exit 0
+        $InstructionsReady = $true
     }
 }
 
-if (-not (Test-Path $Override) -and -not (Test-Path $Agents)) {
-    New-SafeSymlink $Protocol $Agents
-    Set-Content -Path $State -Value "mode=direct`n"
-} else {
-    if (Test-Path $Override) {
-        Copy-Item -LiteralPath $Override -Destination $Backup -Force
-        Move-Item -LiteralPath $Override -Destination (Join-Path $StateDir 'original-AGENTS.override.md.path-backup')
-        $source = 'override'
+if (-not $InstructionsReady) {
+    if (-not (Test-Path $Override) -and -not (Test-Path $Agents)) {
+        New-SafeSymlink $Protocol $Agents
+        Set-Content -Path $State -Value "mode=direct`n"
     } else {
-        Copy-Item -LiteralPath $Agents -Destination $Backup -Force
-        $source = 'agents'
+        if (Test-Path $Override) {
+            Copy-Item -LiteralPath $Override -Destination $Backup -Force
+            Move-Item -LiteralPath $Override -Destination (Join-Path $StateDir 'original-AGENTS.override.md.path-backup')
+            $source = 'override'
+        } else {
+            Copy-Item -LiteralPath $Agents -Destination $Backup -Force
+            $source = 'agents'
+        }
+        Set-Content -Path $Composed -Value ((Get-Content -Raw $Backup) + "`r`n`r`n" + (Get-Content -Raw $Protocol))
+        New-SafeSymlink $Composed $Override
+        Set-Content -Path $State -Value "mode=composed`nsource=$source`n"
     }
-    Set-Content -Path $Composed -Value ((Get-Content -Raw $Backup) + "`r`n`r`n" + (Get-Content -Raw $Protocol))
-    New-SafeSymlink $Composed $Override
-    Set-Content -Path $State -Value "mode=composed`nsource=$source`n"
 }
 
-Write-Host 'Installed Codex delegation protocol only. Restart Codex sessions.'
+$BulkSource = Join-Path $RepoRoot 'codex\agents\bulk-worker.toml'
+$BalancedSource = Join-Path $RepoRoot 'codex\agents\balanced-worker.toml'
+$HookSource = Join-Path $RepoRoot 'codex\hooks\delegation-enforcer.py'
+$BulkDest = Join-Path $CodexHome 'agents\bulk-worker.toml'
+$BalancedDest = Join-Path $CodexHome 'agents\balanced-worker.toml'
+$HookDest = Join-Path $CodexHome 'hooks\delegation-enforcer.py'
+
+New-SafeSymlink $BulkSource $BulkDest
+New-SafeSymlink $BalancedSource $BalancedDest
+New-SafeSymlink $HookSource $HookDest
+
+& $PythonExe (Join-Path $RepoRoot 'scripts\codex\manage-hooks.py') install --codex-home $CodexHome --hook-path $HookDest --python $PythonExe
+if ($LASTEXITCODE -ne 0) { throw "Codex hook installation failed with exit code $LASTEXITCODE" }
+
+Write-Host 'Installed Codex delegation protocol only: supplementary AGENTS instructions, custom worker tiers, and lifecycle hooks.'
+Write-Host 'Restart Codex, run /hooks, and review/trust the Agent Delegation Protocol hooks before relying on mechanical enforcement.'
