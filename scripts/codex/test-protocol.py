@@ -140,6 +140,10 @@ def test_worker_dismissal(home: Path) -> None:
     result = call_hook(home, "stop", {"session_id": session, "turn_id": "t1", "stop_hook_active": False})
     require(result is not None and result.get("decision") == "block", "stop did not block after dismissal-tool marker with outstanding worker")
 
+    # ...but only once, so an undismissable worker cannot loop the stop hook
+    again = call_hook(home, "stop", {"session_id": session, "turn_id": "t1", "stop_hook_active": False})
+    require(again is None or again.get("decision") != "block", "stop blocked a second time on the same debt")
+
     # Test 3: dismissing that specific worker clears it -> stop passes
     call_hook(home, "pretool", {"session_id": session, "turn_id": "t1", "tool_name": "TaskStop", "tool_input": {"agent_id": "w1@session"}})
     result = call_hook(home, "stop", {"session_id": session, "turn_id": "t1", "stop_hook_active": False})

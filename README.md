@@ -42,7 +42,7 @@ parent dismisses worker (TaskStop / build's stop-task call)
    slot released → available for the next worker
 ```
 
-Both hooks record each finished-but-undismissed worker and gate on it: new spawns are denied and turn completion is blocked until the outstanding workers are dismissed. The record is per-turn and cleared by the next prompt, so a worker that never reports cannot wedge the session.
+Both hooks record each finished-but-undismissed worker and gate on it: new spawns are denied and turn completion is blocked until the outstanding workers are dismissed. The record is per-turn and cleared by the next prompt, and the stop gate blocks at most once per turn, so a worker that never reports — or one the runtime already tore down — cannot wedge the session.
 
 ## Changes belong in this repository
 
