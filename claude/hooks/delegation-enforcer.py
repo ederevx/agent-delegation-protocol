@@ -219,7 +219,7 @@ def reset_evidence(session_id: Any) -> None:
     for directory in (active_dir(session_id), finished_dir(session_id), dismissed_dir(session_id)):
         if directory.exists():
             shutil.rmtree(directory, ignore_errors=True)
-    for name in ("delegated", "fanout", "unavailable", "multi-unavailable"):
+    for name in ("delegated", "fanout", "unavailable", "multi-unavailable", "dismissal-nagged"):
         try:
             marker(session_id, name).unlink()
         except FileNotFoundError:
@@ -546,10 +546,28 @@ def handle_stop(event: dict[str, Any]) -> None:
 
     outstanding = outstanding_workers(session_id)
     if outstanding:
+        # Block once, then let the turn end. A worker that the runtime has already
+        # torn down can never be dismissed, so an unconditional block would loop the
+        # Stop hook forever on a debt nothing can pay.
+        nagged = marker(session_id, "dismissal-nagged")
+        if not nagged.exists():
+            touch(nagged)
+            emit(
+                {
+                    "decision": "block",
+                    "reason": dismissal_reason(outstanding, "before ending the turn"),
+                }
+            )
+            return
         emit(
             {
-                "decision": "block",
-                "reason": dismissal_reason(outstanding, "before ending the turn"),
+                "hookSpecificOutput": {
+                    "hookEventName": "Stop",
+                    "additionalContext": dismissal_reason(
+                        outstanding,
+                        "if they are still alive; they are released at session end otherwise",
+                    ),
+                }
             }
         )
         return
