@@ -256,6 +256,10 @@ def test_dismissal_lifecycle(home: Path) -> None:
     blocked = call_hook(home, "stop", {"session_id": session1})
     require(blocked is not None and blocked.get("decision") == "block", "stop did not block for outstanding worker")
 
+    # Case 1a: it blocks at most once, so an undismissable worker cannot loop the hook
+    again = call_hook(home, "stop", {"session_id": session1})
+    require(again is None or again.get("decision") != "block", "stop blocked a second time on the same debt")
+
     # Case 1b: a runtime id (`a<name>-<hex>`) is cleared by TaskStop on the bare name
     session1b = "dismissal-case1b"
     call_hook(home, "prompt", {"session_id": session1b, "prompt": "Do some work"})

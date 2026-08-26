@@ -190,7 +190,7 @@ def reset_evidence(session_id: Any) -> None:
     for directory in (active_dir(session_id), finished_dir(session_id), dismissed_dir(session_id)):
         if directory.exists():
             shutil.rmtree(directory, ignore_errors=True)
-    for name in ("delegated", "fanout", "unavailable", "multi-unavailable", "dismissal-tool"):
+    for name in ("delegated", "fanout", "unavailable", "multi-unavailable", "dismissal-tool", "dismissal-nagged"):
         try:
             marker(session_id, name).unlink()
         except FileNotFoundError:
@@ -426,7 +426,11 @@ def handle_stop(event: dict[str, Any]) -> None:
     if held:
         # Only hard-block once this build has been observed to expose a dismissal tool.
         # Otherwise there is no way to satisfy the requirement, so warn instead of wedging.
-        if marker(session, "dismissal-tool").exists():
+        # Block at most once. A worker the runtime already tore down can never be
+        # dismissed, so an unconditional block would loop the stop hook forever.
+        nagged = marker(session, "dismissal-nagged")
+        if marker(session, "dismissal-tool").exists() and not nagged.exists():
+            touch(nagged)
             emit({"decision": "block", "reason": f"{CONTINUATION_PREFIX} {dismissal_reason(held, 'before ending the turn')}"})
             return
         emit({"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": dismissal_reason(
