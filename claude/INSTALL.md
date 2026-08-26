@@ -7,7 +7,7 @@ Claude is installed independently from Codex. The Claude installer touches only 
 macOS/Linux:
 
 ```bash
-./scripts/claude/install.sh
+bash scripts/claude/install.sh
 ```
 
 Windows PowerShell:
@@ -33,7 +33,7 @@ The installer refuses to overwrite an unrelated file or symlink at any destinati
   -> <clone>/claude/hooks/delegation-enforcer.py
 ```
 
-The Markdown rule remains a semantic/supporting policy layer. Mechanical enforcement is performed by hooks and settings.
+The Markdown rule is a semantic/supporting policy layer. Mechanical enforcement is performed by hooks and settings.
 
 ## Hooks installed into settings.json
 
@@ -48,7 +48,7 @@ The hook participates in these lifecycle events:
 - `PreToolUse` for core mutation tools — denies parent mutation on an eligible bulk task until required delegation has occurred.
 - `Stop` — blocks the parent from ending an eligible turn until required delegation has occurred.
 
-For multi-subsystem work, enforcement requires evidence that at least two subagents actually overlapped in time, not merely that two workers ran sequentially. The hook records this with atomic per-agent marker files so simultaneous `SubagentStart` hook processes do not race on a shared counter.
+For multi-subsystem work, enforcement requires evidence that at least two subagents actually overlapped in time, not merely that two workers ran sequentially. Atomic per-agent marker files avoid races between simultaneous lifecycle hook processes.
 
 ## Settings configured
 
@@ -64,9 +64,9 @@ When the following environment entries are absent from `settings.json`, the inst
 }
 ```
 
-These values enable optional agent teams and make the current nested/concurrent subagent capacities explicit. Existing values are preserved rather than overwritten; the installer prints a warning when an existing value conflicts with the protocol default.
+Existing values are preserved rather than overwritten; the installer warns when an existing value conflicts with the protocol default.
 
-The installer deliberately does **not** set `CLAUDE_CODE_SUBAGENT_MODEL`. That variable has higher precedence than per-invocation and agent-definition model selection, so setting it globally to Haiku would prevent the parent from escalating a difficult delegated unit to a stronger model. Instead, `bulk-worker.md` specifies `model: haiku`, while the parent remains free to choose a stronger model when necessary.
+The installer deliberately does **not** set `CLAUDE_CODE_SUBAGENT_MODEL`. That variable outranks per-invocation and agent-definition model selection, so globally pinning it to Haiku would prevent escalation. Instead, `bulk-worker.md` specifies `model: haiku`, while the parent remains free to choose a stronger model when necessary.
 
 Agent teams are optional. The mandatory baseline uses ordinary subagents because they are broadly available and directly observable through `SubagentStart`/`SubagentStop`. Teams may be used for complex independent subsystems that benefit from peer-to-peer coordination.
 
@@ -80,11 +80,11 @@ The protocol is supplementary:
 - the installer saves a safety copy of the pre-install settings on the first install under `~/.claude/.delegation-protocol/`;
 - uninstall removes only hook handlers and settings values that this protocol added and that have not subsequently been changed by the user.
 
-If `disableAllHooks: true` is already configured, the installer does not silently override it and emits a warning. Managed organization policy can also prevent user-level hooks from running; no user-level repository can override managed policy.
+If `disableAllHooks: true` is already configured, the installer does not silently override it and emits a warning. Managed organization policy can also prevent user-level hooks from running.
 
 ## Enforcement scope
 
-The hook intentionally uses a conservative deterministic classifier. It mechanically gates clear bulk/high-volume or independently sharded implementation requests, while the Markdown rule supplies broader semantic guidance to Claude.
+The hook uses a conservative deterministic classifier. It mechanically gates clear bulk/high-volume or independently sharded implementation requests, while the Markdown rule supplies broader semantic guidance.
 
 The `PreToolUse` gate covers Claude Code's core file mutation tools and common mutating shell/PowerShell operations. The `Stop` gate is the backstop: an eligible turn cannot normally finish without the required delegation evidence even if a mutation path was not recognized by the pre-tool heuristic.
 
@@ -92,7 +92,15 @@ A direct higher-priority user/system restriction against delegation, unavailable
 
 ## Verify
 
-After installation, start a fresh Claude Code session and confirm:
+First run the isolated self-test:
+
+```bash
+python3 scripts/claude/test-protocol.py
+```
+
+It uses temporary configuration directories and verifies non-destructive settings merge/unmerge plus single-worker and concurrent-fan-out gating.
+
+Then start a fresh Claude Code session and confirm:
 
 1. `~/.claude/settings.json` contains the protocol hook handlers alongside existing hooks.
 2. `bulk-worker` is visible as a custom subagent.
@@ -105,7 +113,7 @@ After installation, start a fresh Claude Code session and confirm:
 macOS/Linux:
 
 ```bash
-./scripts/claude/uninstall.sh
+bash scripts/claude/uninstall.sh
 ```
 
 Windows PowerShell:
