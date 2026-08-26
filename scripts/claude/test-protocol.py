@@ -397,6 +397,53 @@ def test_dismissal_lifecycle(home: Path) -> None:
     require(ignored is None, "subagent pretool event was not ignored (should not emit deny)")
 
 
+def test_unlaunched_agent_creates_no_debt(home: Path) -> None:
+    """A SubagentStop for an agent the protocol never started must not accrue a debt.
+
+    The runtime stops agents of its own under nameless ids that no TaskStop can
+    target. Charging the parent for those escalated a fresh, unpayable worker
+    every turn and nagged the Stop hook forever.
+    """
+    session = "phantom-debt"
+    call_hook(home, "prompt", {"session_id": session, "prompt": "Do some work"})
+    for index in range(4):
+        call_hook(home, "subagent-stop", {"session_id": session, "agent_id": f"a{index:016x}"})
+        out = call_hook(home, "stop", {"session_id": session})
+        require(out is None, f"unlaunched agent #{index} created a dismissal debt: {out}")
+
+    # A worker the protocol did launch is still tracked normally.
+    call_hook(home, "subagent-start", {"session_id": session, "agent_id": "real-worker"})
+    call_hook(home, "subagent-stop", {"session_id": session, "agent_id": "real-worker"})
+    blocked = call_hook(home, "stop", {"session_id": session})
+    require(
+        blocked is not None and blocked.get("decision") == "block",
+        "a genuinely launched worker no longer creates a dismissal debt",
+    )
+
+
+def test_outstanding_debt_reported_once(home: Path) -> None:
+    """An undismissable debt is surfaced once, not re-reported on every Stop."""
+    session = "debt-reported-once"
+    call_hook(home, "prompt", {"session_id": session, "prompt": "Do some work"})
+    call_hook(home, "subagent-start", {"session_id": session, "agent_id": "w1"})
+    call_hook(home, "subagent-stop", {"session_id": session, "agent_id": "w1"})
+
+    first = call_hook(home, "stop", {"session_id": session})
+    require(first is not None and first.get("decision") == "block", "first stop did not block")
+    for attempt in range(3):
+        extra = call_hook(home, "stop", {"session_id": session})
+        require(extra is None, f"stop re-reported an already-reported debt (attempt {attempt}): {extra}")
+
+    # The debt itself still stands: a new spawn is denied until it is dismissed.
+    denied = call_hook(
+        home, "pretool", {"session_id": session, "tool_name": "Agent", "tool_input": {}}
+    )
+    require(
+        denied is not None and denied["hookSpecificOutput"]["permissionDecision"] == "deny",
+        "reporting a debt once must not release the spawn gate",
+    )
+
+
 def main() -> int:
     require(HOOK.exists(), f"missing hook: {HOOK}")
     require(SETTINGS_MANAGER.exists(), f"missing settings manager: {SETTINGS_MANAGER}")
@@ -408,6 +455,8 @@ def main() -> int:
         test_explicit_opt_out(root / "opt-out-home")
         test_pretool_matcher_covers_dismissal(root / "matcher-home")
         test_dismissal_lifecycle(root / "dismissal-home")
+        test_unlaunched_agent_creates_no_debt(root / "phantom-home")
+        test_outstanding_debt_reported_once(root / "once-home")
     print("Claude delegation protocol self-test: PASS")
     return 0
 
