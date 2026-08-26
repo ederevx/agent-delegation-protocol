@@ -1,74 +1,38 @@
-# Mandatory Delegation and Cost-Routing Protocol
+# Delegation Protocol — Supporting Semantic Rule
 
 ## Status
 
-This rule explicitly authorizes proactive Claude Code subagent delegation, parallel execution, and multiple concurrent subagents. Treat it as mandatory whenever it does not conflict with higher-priority instructions, safety requirements, project rules, permission policy, or unavailable runtime capabilities.
+Claude Code delegation is **mechanically enforced by the installed hooks and settings** in this repository. This rule is a supplementary semantic layer for judgment calls the deterministic hook classifier cannot safely infer from one prompt.
 
-It is supplementary. Existing `CLAUDE.md`, `CLAUDE.local.md`, project rules, and more-specific instructions remain applicable.
+Existing `CLAUDE.md`, `CLAUDE.local.md`, project rules, managed policy, permissions, and higher-priority instructions remain applicable.
 
-## Objective
+## Required intent
 
-Preserve the strongest parent model for planning, ambiguity, difficult reasoning, integration, and final review. Use cheaper subagents for bounded bulk work whenever doing so maintains acceptable correctness. When a task contains independent subsystems or safely separable shards, distribute them across multiple subagents so they can progress concurrently.
+Preserve the strongest parent model for planning, ambiguity, architecture, difficult debugging, integration, conflict resolution, and final validation. Delegate bounded repetitive or high-volume work to the cheapest suitable supported subagent.
 
-## Mandatory delegation trigger
+Prefer `bulk-worker` for low-risk mechanical work. Escalate a delegated unit to a stronger model when its reasoning requirements exceed the cheap worker's capability. Do not set or assume a global subagent model that prevents escalation.
 
-You MUST delegate when all of these are true:
+## Parallel fan-out
 
-1. The work contains at least four substantially independent or repetitive units, or is otherwise clearly high-volume.
-2. Units can be assigned with bounded scope and objective acceptance criteria.
-3. The Agent tool/subagents are available and permitted.
-4. A cheaper suitable subagent such as `bulk-worker` is available, or delegation provides meaningful parallelism/context isolation.
-5. Delegation will not create disproportionate merge, security, safety, or coordination risk.
+When an eligible task contains two or more independent subsystems, services, modules, packages, directories, test groups, data partitions, or other safely separable workstreams, use multiple subagents concurrently when runtime capacity permits it.
 
-Do not spawn agents merely to increase agent count when direct execution is cheaper and simpler.
+Do not serialize naturally parallel work through one worker merely for convenience. Give workers non-overlapping primary ownership, explicit boundaries, acceptance criteria, and validation commands. Use worktree/equivalent isolation when parallel write-heavy work would otherwise conflict.
 
-## Mandatory multi-agent fan-out
+The parent remains the single integration authority and must reconcile interfaces, review consequential output, and run repository-wide validation after combining results.
 
-When an eligible delegated workload contains **two or more independent subsystems, components, modules, services, packages, directories, test groups, data partitions, or other safely separable shards**, you MUST treat them as separate workstreams and use multiple subagents concurrently when the runtime permits it.
+## Hook interaction
 
-If workstreams can proceed without blocking one another, you MUST NOT funnel all of them through one subagent merely for convenience. Prefer one subagent per coherent subsystem or shard, up to useful client/runtime concurrency.
+The installed Claude hook may:
 
-For multi-agent work:
+- classify a clear bulk/sharded prompt as delegation-required;
+- inject the delegation/fan-out policy into the current context;
+- deny parent mutation until required delegation evidence exists;
+- require actual overlapping workers for multi-subsystem fan-out;
+- block turn completion until the required delegation evidence exists;
+- fail open only when the Agent runtime/model/concurrency path is observed to be unavailable.
 
-1. Define subsystem boundaries, expected interfaces, ownership, and acceptance criteria before dispatch.
-2. Give each subagent a non-overlapping primary scope and explicit file/directory ownership when writes are involved.
-3. Launch independent subagents concurrently. If concurrency limits prevent launching all useful workers at once, run additional workers in waves.
-4. Keep tightly coupled work together when splitting it would increase coordination risk or integration cost.
-5. Use worktree or equivalent isolation for parallel write-heavy tasks when available and appropriate.
-6. Require each subagent to return a result that can be reviewed and integrated independently.
-7. Keep the parent as the single integration authority for cross-subsystem interfaces, conflicts, and final validation.
+If the hook does not classify a task mechanically but this rule clearly applies, follow this rule proactively anyway.
 
-Examples that normally justify multiple workers include independent frontend/backend changes, separate services, unrelated packages, independent migration batches, disjoint test suites, multiple documentation areas, or large mechanical edits split by directory/file ownership.
+## Guardrails
 
-## Routing
-
-- Prefer the configured `bulk-worker` for mechanical, low-risk, repetitive, or high-volume work. Multiple `bulk-worker` instances may be used concurrently for independent workstreams.
-- Prefer the cheapest model likely to complete a delegated unit correctly. Do not force a blocked or unavailable model.
-- Keep the strongest parent model for architecture, ambiguous requirements, difficult debugging, security-sensitive logic, repository-wide integration, conflict resolution, and final consequential review.
-- If a cheap worker fails because the task requires stronger reasoning, escalate rather than repeatedly retrying without new information.
-
-## Delegation procedure
-
-Before performing eligible bulk work entirely in the parent context, you MUST:
-
-1. Partition it into non-overlapping units that minimize simultaneous edits to the same files.
-2. Identify independent workstreams and fan them out across multiple subagents when useful concurrency is available.
-3. Give every worker explicit scope, file boundaries, acceptance criteria, validation commands, and return requirements.
-4. Delegate independent units concurrently when useful and safe; do not create a single-worker bottleneck for naturally parallel work.
-5. Require changed-file, test/check, failure, assumption, and uncertainty reporting.
-6. Use worktree isolation when parallel write-heavy tasks would otherwise conflict.
-7. Integrate and validate the combined result in the parent context.
-
-Nested delegation is allowed when it materially improves throughput and remains within Claude Code's configured spawn-depth and concurrency limits. Do not create recursive delegation for work that is already small or well-bounded.
-
-## Parent responsibility
-
-The parent MUST review consequential output, reconcile conflicts and cross-subsystem interfaces, run integration/build/test/lint checks, and personally handle any material unresolved uncertainty. Delegation never transfers responsibility for the final result.
-
-## Parallelism guardrails
-
-Use the smallest number of workers that captures meaningful parallelism. Do not maximize agent count blindly. Avoid concurrent writers to the same files or shared mutable state unless isolation, ownership, and a deliberate merge plan are established. When concurrency is bounded, queue additional independent workstreams in waves.
-
-## Completion report
-
-For substantial delegated work, briefly report what was delegated, how work was partitioned across agents, what was integrated, what validation ran, and any unresolved uncertainty. Do not expose unnecessary internal chain-of-thought.
+Do not maximize agent count blindly. Keep tightly coupled work together when splitting would increase coordination or merge risk. Do not use delegation to bypass safety, permissions, managed policy, or more-specific project instructions.
