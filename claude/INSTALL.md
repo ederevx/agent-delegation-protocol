@@ -47,10 +47,10 @@ The hook participates in these lifecycle events:
 
 - `UserPromptSubmit` — conservatively classifies the turn and injects the mandatory delegation/fan-out policy into Claude's context.
 - `SubagentStart` — records delegation, tracks active workers, and injects bounded-worker requirements into each spawned subagent.
-- `SubagentStop` — removes the worker from the active set.
+- `SubagentStop` — removes the worker from the active set and records it as finished but still held.
 - `PostToolUseFailure` for `Agent` — detects runtime/model/concurrency failures so enforcement can fail open only when delegation is actually unavailable.
-- `PreToolUse` for core mutation tools — denies parent mutation on an eligible bulk task until required delegation has occurred.
-- `Stop` — blocks the parent from ending an eligible turn until required delegation has occurred.
+- `PreToolUse` for core mutation tools, `Agent`, and `TaskStop` — denies parent mutation on an eligible bulk task until required delegation has occurred, denies new worker spawns while finished workers are still held, and records each `TaskStop` as a dismissal.
+- `Stop` — blocks the parent from ending an eligible turn until required delegation has occurred and every finished worker has been dismissed.
 
 For multi-subsystem work, enforcement requires evidence that at least two subagents actually overlapped in time, not merely that two workers ran sequentially. Atomic per-agent marker files avoid races between simultaneous lifecycle hook processes.
 

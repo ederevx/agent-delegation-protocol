@@ -218,6 +218,24 @@ def test_explicit_opt_out(home: Path) -> None:
     require(result is None, "explicit no-delegation instruction was not respected")
 
 
+def test_pretool_matcher_covers_dismissal(home: Path) -> None:
+    """The gate is unreachable unless the installed matcher routes Agent and TaskStop."""
+    home.mkdir(parents=True, exist_ok=True)
+    result = run([sys.executable, str(SETTINGS_MANAGER), "install", "--claude-home", str(home),
+                  "--hook-path", str(HOOK), "--python", sys.executable])
+    require(result.returncode == 0, f"settings install failed: {result.stderr}")
+    settings = json.loads((home / "settings.json").read_text(encoding="utf-8"))
+    matchers = [
+        g.get("matcher", "")
+        for g in settings.get("hooks", {}).get("PreToolUse", [])
+        if any(str(h.get("statusMessage", "")).startswith("Delegation protocol:") for h in g.get("hooks", []))
+    ]
+    require(bool(matchers), "no protocol-owned PreToolUse hook was installed")
+    joined = "|".join(matchers).split("|")
+    for tool in ("Edit", "Write", "Bash", "Agent", "TaskStop"):
+        require(tool in joined, f"PreToolUse matcher does not route {tool}")
+
+
 def test_dismissal_lifecycle(home: Path) -> None:
     """Test worker dismissal enforcement across all lifecycle cases."""
 
@@ -384,6 +402,7 @@ def main() -> int:
         test_single_agent_gate(root / "single-home")
         test_multi_agent_overlap_gate(root / "multi-home")
         test_explicit_opt_out(root / "opt-out-home")
+        test_pretool_matcher_covers_dismissal(root / "matcher-home")
         test_dismissal_lifecycle(root / "dismissal-home")
     print("Claude delegation protocol self-test: PASS")
     return 0
