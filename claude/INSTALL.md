@@ -2,6 +2,10 @@
 
 Claude is installed independently from Codex. The Claude installer touches only the configured Claude home (normally `~/.claude`) and this cloned repository.
 
+## Migration from an older structure
+
+If you are Claude Code upgrading a text-only, partially migrated, or legacy combined installation, you MUST follow [`MIGRATE.md`](MIGRATE.md) before improvising cleanup. The migration runbook is written directly for the agent and requires preflight inventory, preservation of existing configuration, independent Claude-only installation, verification, failure handling, and rollback.
+
 ## Install
 
 macOS/Linux:
