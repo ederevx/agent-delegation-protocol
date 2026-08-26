@@ -24,6 +24,10 @@ parent integration + repository-wide validation
 
 Use non-overlapping ownership where practical, explicit interfaces/acceptance criteria, isolation for conflicting write-heavy work, and parent-controlled integration. The goal is useful parallelism, not maximum agent count.
 
+## Workers ask before conflicting
+
+Workers run in the parent's working tree and cannot see its uncommitted state, so a worker that reaches for repository-wide state on its own can silently destroy the parent's work. Before acting outside its assigned ownership — repo-wide version-control state, another worker's files, the parent's uncommitted work, dependency changes, or anything that leaves the machine — a worker must ask the parent and wait for an answer. The parent answers; only the parent may take the question to the user.
+
 ## Worker lifecycle
 
 A worker does not disappear when its task ends. It goes idle and keeps holding a concurrency slot, so the parent must dismiss it once its report has been read:
