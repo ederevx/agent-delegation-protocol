@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 CONTINUATION_PREFIX = "DELEGATION_PROTOCOL_CONTINUE:"
 
 BULK_WORDS = (
@@ -63,6 +63,13 @@ SPAWN_UNAVAILABLE = re.compile(
 )
 
 
+DISMISSAL_TOOL = re.compile(
+    r"(?:stop|kill|end|dismiss|terminate|cancel).*(?:task|agent|worker)"
+    r"|(?:task|agent|worker).*(?:stop|kill|end|dismiss|terminate|cancel)",
+    re.IGNORECASE,
+)
+
+
 def codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
 
@@ -94,6 +101,51 @@ def marker(session_id: Any, name: str) -> Path:
     return Path(str(base(session_id)) + f".{name}")
 
 
+def finished_dir(session_id: Any) -> Path:
+    return Path(str(base(session_id)) + ".finished")
+
+
+def dismissed_dir(session_id: Any) -> Path:
+    return Path(str(base(session_id)) + ".dismissed")
+
+
+def worker_key(value: Any) -> str:
+    """Normalize an agent identity so a spawn id and a dismissal target compare equal."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return safe(raw.split("@", 1)[0].lower())
+
+
+def is_dismissal_tool(name: str) -> bool:
+    """Codex's dismissal primitive is not fixed across builds, so match the shape.
+
+    Any tool whose name pairs a stop/kill/dismiss verb with a task/agent noun counts.
+    """
+    return bool(DISMISSAL_TOOL.search(name))
+
+
+def outstanding_workers(session_id: Any) -> list[str]:
+    """Workers whose task finished but which were never dismissed, oldest first."""
+    finished = finished_dir(session_id)
+    if not finished.exists():
+        return []
+    dismissed = dismissed_dir(session_id)
+    rows = []
+    for path in finished.iterdir():
+        if path.is_file() and not (dismissed / path.name).exists():
+            rows.append((path.stat().st_mtime, path.name))
+    return [name for _, name in sorted(rows)]
+
+
+def dismissal_reason(names: list[str], action: str) -> str:
+    return (
+        f"Delegation protocol: {len(names)} finished worker(s) are still held and occupying subagent "
+        f"capacity ({', '.join(names)}). A worker stays alive and idle after its task completes; it is "
+        f"only released by an explicit stop/dismiss call. Dismiss each one {action}."
+    )
+
+
 def load_state(session_id: Any) -> dict[str, Any]:
     p = state_path(session_id)
     if not p.exists():
@@ -119,10 +171,10 @@ def save_state(session_id: Any, value: dict[str, Any]) -> None:
 
 
 def reset_evidence(session_id: Any) -> None:
-    d = active_dir(session_id)
-    if d.exists():
-        shutil.rmtree(d, ignore_errors=True)
-    for name in ("delegated", "fanout", "unavailable", "multi-unavailable"):
+    for directory in (active_dir(session_id), finished_dir(session_id), dismissed_dir(session_id)):
+        if directory.exists():
+            shutil.rmtree(directory, ignore_errors=True)
+    for name in ("delegated", "fanout", "unavailable", "multi-unavailable", "dismissal-tool"):
         try:
             marker(session_id, name).unlink()
         except FileNotFoundError:
@@ -269,11 +321,18 @@ def handle_subagent_start(event: dict[str, Any]) -> None:
 
 
 def handle_subagent_stop(event: dict[str, Any]) -> None:
-    p = active_dir(event.get("session_id")) / safe(event.get("agent_id") or "unknown-agent")
+    session = event.get("session_id")
+    aid = event.get("agent_id") or "unknown-agent"
+    p = active_dir(session) / safe(aid)
     try:
         p.unlink()
     except FileNotFoundError:
         pass
+
+    # The task ended, but the worker itself is still alive until it is dismissed.
+    key = worker_key(aid)
+    if key:
+        touch(finished_dir(session) / key)
 
 
 def handle_agent_result(event: dict[str, Any]) -> None:
@@ -308,9 +367,32 @@ def unmet(session: Any, state: dict[str, Any]) -> str | None:
 
 
 def handle_pretool(event: dict[str, Any]) -> None:
-    if not is_parent(event) or not mutating_tool(event):
+    if not is_parent(event):
         return
     session = event.get("session_id")
+    name = str(event.get("tool_name") or "")
+    data = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
+
+    # Observe dismissals at intent rather than at outcome, so a failed stop cannot wedge the turn.
+    if is_dismissal_tool(name):
+        touch(marker(session, "dismissal-tool"))
+        for key in ("task_id", "agent_id", "id", "name", "target"):
+            k = worker_key(data.get(key))
+            if k:
+                touch(dismissed_dir(session) / k)
+                break
+        return
+
+    # Reclaim finished workers before creating new ones.
+    if name == "Agent":
+        held = outstanding_workers(session)
+        if held and marker(session, "dismissal-tool").exists():
+            emit({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                         "permissionDecisionReason": dismissal_reason(held, "before spawning another worker")}})
+        return
+
+    if not mutating_tool(event):
+        return
     reason = unmet(session, load_state(session))
     if reason:
         emit({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}})
@@ -323,6 +405,18 @@ def handle_stop(event: dict[str, Any]) -> None:
     if reason:
         emit({"decision": "block", "reason": f"{CONTINUATION_PREFIX} {reason} Continue the task after satisfying delegation."})
         return
+
+    held = outstanding_workers(session)
+    if held:
+        # Only hard-block once this build has been observed to expose a dismissal tool.
+        # Otherwise there is no way to satisfy the requirement, so warn instead of wedging.
+        if marker(session, "dismissal-tool").exists():
+            emit({"decision": "block", "reason": f"{CONTINUATION_PREFIX} {dismissal_reason(held, 'before ending the turn')}"})
+            return
+        emit({"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": dismissal_reason(
+            held, "when this build exposes a stop/dismiss call; otherwise they are released at session end")}})
+        return
+
     if state:
         state["completed"] = True
         save_state(session, state)
