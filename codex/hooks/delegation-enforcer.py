@@ -125,15 +125,31 @@ def is_dismissal_tool(name: str) -> bool:
     return bool(DISMISSAL_TOOL.search(name))
 
 
+def keys_match(finished: str, target: str) -> bool:
+    """Whether a dismissal target names a finished worker.
+
+    The two never have to be identical: a runtime id wraps the worker name in a
+    prefix and a random suffix, so containment either way is the reliable test.
+    Short targets are required to match exactly so a stray id cannot clear
+    everything.
+    """
+    if finished == target:
+        return True
+    if len(target) < 4 or len(finished) < 4:
+        return False
+    return target in finished or finished in target
+
+
 def outstanding_workers(session_id: Any) -> list[str]:
     """Workers whose task finished but which were never dismissed, oldest first."""
     finished = finished_dir(session_id)
     if not finished.exists():
         return []
     dismissed = dismissed_dir(session_id)
+    targets = [p.name for p in dismissed.iterdir() if p.is_file()] if dismissed.exists() else []
     rows = []
     for path in finished.iterdir():
-        if path.is_file() and not (dismissed / path.name).exists():
+        if path.is_file() and not any(keys_match(path.name, target) for target in targets):
             rows.append((path.stat().st_mtime, path.name))
     return [name for _, name in sorted(rows)]
 
