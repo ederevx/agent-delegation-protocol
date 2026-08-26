@@ -100,22 +100,27 @@ def strip_owned(settings: dict[str, Any]) -> None:
         settings.pop("hooks", None)
 
 
-def detect_disabled_hooks(codex_home: Path) -> bool:
+def inspect_config(codex_home: Path) -> tuple[bool, bool]:
+    """Return (hooks_disabled, agents_disabled) without modifying config.toml."""
     config = codex_home / "config.toml"
     if not config.exists():
-        return False
+        return False, False
     try:
         import tomllib
         data = tomllib.loads(config.read_text(encoding="utf-8"))
-        features = data.get("features", {}) if isinstance(data, dict) else {}
-        if isinstance(features, dict):
-            if features.get("hooks") is False:
-                return True
-            if "hooks" not in features and features.get("codex_hooks") is False:
-                return True
     except Exception:
-        pass
-    return False
+        return False, False
+    if not isinstance(data, dict):
+        return False, False
+    features = data.get("features", {})
+    hooks_disabled = False
+    if isinstance(features, dict):
+        hooks_disabled = features.get("hooks") is False or (
+            "hooks" not in features and features.get("codex_hooks") is False
+        )
+    agents = data.get("agents", {})
+    agents_disabled = isinstance(agents, dict) and agents.get("enabled") is False
+    return hooks_disabled, agents_disabled
 
 
 def install(codex_home: Path, hooks_path: Path, state_dir: Path, hook_path: Path, python_exe: str) -> None:
@@ -143,8 +148,11 @@ def install(codex_home: Path, hooks_path: Path, state_dir: Path, hook_path: Path
         "python": python_exe,
     })
 
-    if detect_disabled_hooks(codex_home):
-        print("WARNING: Codex hooks appear explicitly disabled in config.toml; protocol hooks will not run until hooks are enabled.", file=sys.stderr)
+    hooks_disabled, agents_disabled = inspect_config(codex_home)
+    if hooks_disabled:
+        print("WARNING: Codex hooks are explicitly disabled in config.toml; mechanical protocol enforcement will not run until hooks are enabled.", file=sys.stderr)
+    if agents_disabled:
+        print("WARNING: Codex multi-agent tools are explicitly disabled in config.toml; delegation cannot run until agents.enabled is restored/enabled.", file=sys.stderr)
     print("IMPORTANT: Codex requires non-managed hooks to be reviewed/trusted. Start Codex and use /hooks to trust the Agent Delegation Protocol hook definition.", file=sys.stderr)
 
 
