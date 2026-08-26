@@ -2,6 +2,10 @@
 
 Codex is installed independently from Claude. The Codex installer touches only `$CODEX_HOME` (normally `~/.codex`) plus the clone's ignored `.runtime/codex` composition file when existing global instructions must be preserved.
 
+## Migration from an older structure
+
+If you are Codex upgrading an AGENTS-only, partially migrated, or legacy combined installation, you MUST follow [`MIGRATE.md`](MIGRATE.md) before improvising cleanup. The migration runbook is written directly for the agent and requires preflight inventory, preservation of existing configuration, independent Codex-only installation, verification, failure handling, and rollback.
+
 ## Why the implementation uses three layers
 
 Current Codex supports stronger enforcement than an `AGENTS.md`-only design, but `AGENTS.md` still serves an important purpose.
