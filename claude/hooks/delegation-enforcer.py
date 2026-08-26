@@ -1,28 +1,29 @@
 #!/usr/bin/env python3
-"""Claude Code delegation protocol hook.
+"""Claude Code delegation protocol enforcement hook.
 
 Modes:
-  prompt           Classify each user prompt, persist enforcement state, inject policy context.
-  subagent-start   Track active subagents and inject bounded-worker context.
-  subagent-stop    Track active subagents as they finish.
-  agent-failure    Record Agent-tool failures and fail open only when spawning is unavailable.
-  pretool          Block parent write/mutation tools until required delegation has occurred.
-  stop             Prevent the parent from stopping before required delegation has occurred.
+  prompt           Classify the user turn and inject the delegation policy.
+  subagent-start   Record actual worker overlap and inject worker constraints.
+  subagent-stop    Remove the worker from the active set.
+  agent-failure    Record spawn/runtime unavailability for fail-open handling.
+  pretool          Block parent mutation before required delegation occurs.
+  stop             Prevent completion before required delegation occurs.
 
-The hook uses conservative deterministic classification. The injected policy remains the semantic
-layer for cases that cannot be inferred reliably from a single prompt.
+Classification is intentionally conservative and deterministic. The supporting rule is still loaded
+as a semantic policy layer for cases that cannot be inferred reliably from a single prompt.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 
 BULK_WORDS = (
     "bulk", "batch", "high-volume", "high volume", "many files", "many modules",
@@ -94,7 +95,7 @@ def claude_home() -> Path:
     return Path(configured).expanduser() if configured else Path.home() / ".claude"
 
 
-def state_dir() -> Path:
+def state_root() -> Path:
     root = claude_home() / ".delegation-protocol" / "sessions"
     root.mkdir(parents=True, exist_ok=True)
     return root
@@ -105,8 +106,20 @@ def safe_session_id(value: Any) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", raw)[:160] or "unknown"
 
 
+def turn_base(session_id: Any) -> Path:
+    return state_root() / safe_session_id(session_id)
+
+
 def state_path(session_id: Any) -> Path:
-    return state_dir() / f"{safe_session_id(session_id)}.json"
+    return turn_base(session_id).with_suffix(".json")
+
+
+def active_dir(session_id: Any) -> Path:
+    return Path(str(turn_base(session_id)) + ".active")
+
+
+def marker(session_id: Any, name: str) -> Path:
+    return Path(str(turn_base(session_id)) + f".{name}")
 
 
 def load_state(session_id: Any) -> dict[str, Any]:
@@ -135,6 +148,22 @@ def save_state(session_id: Any, data: dict[str, Any]) -> None:
                 os.unlink(tmp)
         except OSError:
             pass
+
+
+def reset_evidence(session_id: Any) -> None:
+    directory = active_dir(session_id)
+    if directory.exists():
+        shutil.rmtree(directory, ignore_errors=True)
+    for name in ("delegated", "fanout", "unavailable", "multi-unavailable"):
+        try:
+            marker(session_id, name).unlink()
+        except FileNotFoundError:
+            pass
+
+
+def touch(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch(exist_ok=True)
 
 
 def read_input() -> dict[str, Any]:
@@ -194,12 +223,8 @@ def classify(prompt: str, previous: dict[str, Any]) -> dict[str, Any]:
     distinct_domains = sum(
         1
         for family in (
-            ("frontend", "front-end"),
-            ("backend", "back-end"),
-            ("database",),
-            ("api",),
-            ("docs", "documentation"),
-            ("tests", "test suite", "test suites"),
+            ("frontend", "front-end"), ("backend", "back-end"), ("database",),
+            ("api",), ("docs", "documentation"), ("tests", "test suite", "test suites"),
         )
         if any(token in lower for token in family)
     )
@@ -221,7 +246,6 @@ def classify(prompt: str, previous: dict[str, Any]) -> dict[str, Any]:
 
     followup = len(words) <= 12 and any(re.search(p, lower) for p in FOLLOWUP_PATTERNS)
     carry = bool(previous.get("requires_delegation")) and not bool(previous.get("completed")) and followup
-
     requires = False if explicit_no else ((action and (bulk_signal or shard_signal)) or carry)
     multi = False if explicit_no else (
         requires and (shard_signal or bool(previous.get("requires_multi") and carry))
@@ -238,10 +262,7 @@ def classify(prompt: str, previous: dict[str, Any]) -> dict[str, Any]:
         reasons.append("short continuation of an unfinished delegated turn")
 
     capacity = concurrency_capacity()
-    min_agents = 0
-    if requires:
-        min_agents = 2 if multi and capacity >= 2 else 1
-
+    min_agents = 0 if not requires else (2 if multi and capacity >= 2 else 1)
     return {
         "requires_delegation": requires,
         "requires_multi": multi,
@@ -254,31 +275,25 @@ def classify(prompt: str, previous: dict[str, Any]) -> dict[str, Any]:
 
 def policy_context(classification: dict[str, Any]) -> str:
     base = (
-        "DELEGATION PROTOCOL (hook-enforced): preserve the parent frontier model for planning, "
-        "ambiguity, integration, conflict resolution, and final validation. For bounded repetitive "
-        "or high-volume work, delegate to the cheapest suitable supported subagent. Prefer the "
-        "`bulk-worker` (Haiku) for low-risk mechanical work; escalate individual units when stronger "
-        "reasoning is needed. For independent subsystems/shards, fan out multiple agents concurrently "
-        "rather than serializing naturally parallel work. Give workers non-overlapping scope, acceptance "
-        "criteria, validation commands, and require concise result reports. The parent remains the single "
-        "integration authority. Agent teams may be used when enabled and beneficial, but ordinary subagents "
-        "remain the required baseline because they are broadly available."
+        "DELEGATION PROTOCOL (hook-enforced): preserve the parent frontier model for planning, ambiguity, "
+        "integration, conflict resolution, and final validation. For bounded repetitive or high-volume work, "
+        "delegate to the cheapest suitable supported subagent. Prefer `bulk-worker` (Haiku) for low-risk "
+        "mechanical work; escalate individual units when stronger reasoning is needed. For independent "
+        "subsystems/shards, fan out multiple agents concurrently rather than serializing naturally parallel "
+        "work. Give workers non-overlapping scope, acceptance criteria, validation commands, and require "
+        "concise result reports. The parent remains the single integration authority. Agent teams may be used "
+        "when enabled and beneficial, but ordinary subagents remain the required baseline."
     )
     if classification.get("requires_delegation"):
         minimum = int(classification.get("min_agents", 1))
         reasons = ", ".join(classification.get("classification_reasons", [])) or "bulk task"
-        multi_note = (
-            " Reach the required worker count concurrently, not merely sequentially."
-            if minimum > 1
-            else ""
-        )
+        overlap = " Workers must overlap in time." if minimum > 1 else ""
         return (
             base
-            + f"\nHOOK CLASSIFICATION: this prompt is delegation-eligible ({reasons}). "
-            f"Before the parent performs mutating implementation work, spawn at least {minimum} "
-            f"{'independent subagents' if minimum > 1 else 'subagent'} when the Agent tool is available."
-            + multi_note
-            + " If delegation is unavailable, attempt it so the hook can detect the runtime failure."
+            + f"\nHOOK CLASSIFICATION: this prompt is delegation-eligible ({reasons}). Before parent mutation, "
+            f"spawn at least {minimum} {'independent subagents' if minimum > 1 else 'subagent'} when available."
+            + overlap
+            + " If spawning is unavailable, attempt it so the hook can observe the runtime failure."
         )
     return base
 
@@ -305,20 +320,16 @@ def handle_prompt(event: dict[str, Any]) -> None:
     session_id = event.get("session_id")
     previous = load_state(session_id)
     classification = classify(str(event.get("prompt") or ""), previous)
-    new_state = {
-        "version": PROTOCOL_VERSION,
-        "prompt": str(event.get("prompt") or ""),
-        **classification,
-        "subagents_started": 0,
-        "active_agent_ids": [],
-        "max_concurrent_agents": 0,
-        "agent_types": [],
-        "agent_failures": 0,
-        "delegation_unavailable": False,
-        "multi_unavailable": False,
-        "completed": False,
-    }
-    save_state(session_id, new_state)
+    reset_evidence(session_id)
+    save_state(
+        session_id,
+        {
+            "version": PROTOCOL_VERSION,
+            "prompt": str(event.get("prompt") or ""),
+            **classification,
+            "completed": False,
+        },
+    )
     emit(
         {
             "hookSpecificOutput": {
@@ -331,34 +342,27 @@ def handle_prompt(event: dict[str, Any]) -> None:
 
 def handle_subagent_start(event: dict[str, Any]) -> None:
     session_id = event.get("session_id")
-    state = load_state(session_id)
-    state.setdefault("version", PROTOCOL_VERSION)
-    state["subagents_started"] = int(state.get("subagents_started", 0)) + 1
-
-    active = list(state.get("active_agent_ids") or [])
-    agent_id = str(event.get("agent_id") or "")
-    if agent_id and agent_id not in active:
-        active.append(agent_id)
-    state["active_agent_ids"] = active
-    state["max_concurrent_agents"] = max(int(state.get("max_concurrent_agents", 0)), len(active))
-
-    types = list(state.get("agent_types") or [])
-    agent_type = str(event.get("agent_type") or "unknown")
-    types.append(agent_type)
-    state["agent_types"] = types[-100:]
-    save_state(session_id, state)
+    agent_id = safe_session_id(event.get("agent_id") or "unknown-agent")
+    directory = active_dir(session_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    touch(directory / agent_id)
+    touch(marker(session_id, "delegated"))
+    try:
+        if sum(1 for p in directory.iterdir() if p.is_file()) >= 2:
+            touch(marker(session_id, "fanout"))
+    except FileNotFoundError:
+        pass
 
     emit(
         {
             "hookSpecificOutput": {
                 "hookEventName": "SubagentStart",
                 "additionalContext": (
-                    "You are a delegated worker under the delegation protocol. Stay within the assigned "
-                    "scope; do not redesign unrelated systems. Run requested validation. Report work completed, "
-                    "files changed/inspected, checks run, assumptions, failures/blockers, and uncertainty. "
-                    "If your assigned task itself splits into genuinely independent workstreams and the Agent "
-                    "tool is available within spawn-depth limits, nested delegation is allowed; otherwise complete "
-                    "the bounded unit yourself."
+                    "You are a delegated worker under the delegation protocol. Stay within assigned scope; "
+                    "do not redesign unrelated systems. Run requested validation. Report work completed, files "
+                    "changed/inspected, checks run, assumptions, failures/blockers, and uncertainty. If this "
+                    "bounded assignment itself splits into independent workstreams and Agent is available within "
+                    "spawn-depth limits, nested delegation is allowed."
                 ),
             }
         }
@@ -366,80 +370,74 @@ def handle_subagent_start(event: dict[str, Any]) -> None:
 
 
 def handle_subagent_stop(event: dict[str, Any]) -> None:
-    session_id = event.get("session_id")
-    state = load_state(session_id)
-    active = list(state.get("active_agent_ids") or [])
-    agent_id = str(event.get("agent_id") or "")
-    if agent_id in active:
-        active.remove(agent_id)
-    state["active_agent_ids"] = active
-    save_state(session_id, state)
+    path = active_dir(event.get("session_id")) / safe_session_id(event.get("agent_id") or "unknown-agent")
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def handle_agent_failure(event: dict[str, Any]) -> None:
     session_id = event.get("session_id")
-    state = load_state(session_id)
-    state["agent_failures"] = int(state.get("agent_failures", 0)) + 1
     error = str(event.get("error") or "")
-    started = int(state.get("subagents_started", 0))
-    if started == 0 and SPAWN_UNAVAILABLE.search(error):
-        state["delegation_unavailable"] = True
-    elif state.get("requires_multi") and started > 0 and SPAWN_UNAVAILABLE.search(error):
-        state["multi_unavailable"] = True
-    save_state(session_id, state)
+    if not SPAWN_UNAVAILABLE.search(error):
+        return
+    if not marker(session_id, "delegated").exists():
+        touch(marker(session_id, "unavailable"))
+    else:
+        touch(marker(session_id, "multi-unavailable"))
 
 
-def unmet_reason(state: dict[str, Any]) -> str | None:
+def unmet_reason(session_id: Any, state: dict[str, Any]) -> str | None:
     if not state.get("requires_delegation"):
         return None
-    if state.get("delegation_unavailable"):
+    if marker(session_id, "unavailable").exists():
         return None
 
     minimum = int(state.get("min_agents", 1))
-    started = int(state.get("subagents_started", 0))
-    max_concurrent = int(state.get("max_concurrent_agents", 0))
+    delegated = marker(session_id, "delegated").exists()
+    fanout = marker(session_id, "fanout").exists()
 
     if minimum <= 1:
-        if started >= 1:
+        if delegated:
             return None
         return (
             "Delegation protocol requires a subagent for this bulk/high-volume turn, but none has been started. "
             "Spawn a bounded worker (prefer `bulk-worker` for mechanical work) before parent implementation."
         )
 
-    if state.get("multi_unavailable") and started >= 1:
+    if fanout:
         return None
-    if max_concurrent >= minimum:
+    if delegated and marker(session_id, "multi-unavailable").exists():
         return None
     return (
-        f"Delegation protocol requires concurrent multi-agent fan-out for this turn: peak concurrency was "
-        f"{max_concurrent}/{minimum}. Launch separate workers for independent subsystems/shards and allow them "
-        "to overlap (prefer `bulk-worker` for mechanical work) before parent implementation."
+        "Delegation protocol requires concurrent multi-agent fan-out for this turn, but two workers have not "
+        "yet been observed running at the same time. Launch separate workers for independent subsystems/shards "
+        "and allow them to overlap before parent implementation."
     )
 
 
 def handle_pretool(event: dict[str, Any]) -> None:
     if not is_main_agent(event) or not tool_is_mutating(event):
         return
-    state = load_state(event.get("session_id"))
-    reason = unmet_reason(state)
-    if not reason:
-        return
-    emit(
-        {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
+    session_id = event.get("session_id")
+    reason = unmet_reason(session_id, load_state(session_id))
+    if reason:
+        emit(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
+                }
             }
-        }
-    )
+        )
 
 
 def handle_stop(event: dict[str, Any]) -> None:
     session_id = event.get("session_id")
     state = load_state(session_id)
-    reason = unmet_reason(state)
+    reason = unmet_reason(session_id, state)
     if reason:
         emit({"decision": "block", "reason": reason + " Do not stop yet; satisfy delegation first."})
         return
@@ -455,8 +453,6 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    mode = sys.argv[1]
-    event = read_input()
     handlers = {
         "prompt": handle_prompt,
         "subagent-start": handle_subagent_start,
@@ -465,11 +461,11 @@ def main() -> int:
         "pretool": handle_pretool,
         "stop": handle_stop,
     }
-    handler = handlers.get(mode)
+    handler = handlers.get(sys.argv[1])
     if handler is None:
-        print(f"unknown mode: {mode}", file=sys.stderr)
+        print(f"unknown mode: {sys.argv[1]}", file=sys.stderr)
         return 2
-    handler(event)
+    handler(read_input())
     return 0
 
 
