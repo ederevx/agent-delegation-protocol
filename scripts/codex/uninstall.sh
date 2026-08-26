@@ -6,12 +6,30 @@ codex_home="${CODEX_HOME:-$HOME/.codex}"
 state_dir="$codex_home/.delegation-protocol"
 state="$state_dir/state"
 
+if command -v python3 >/dev/null 2>&1; then
+  python_exe="$(command -v python3)"
+elif command -v python >/dev/null 2>&1; then
+  python_exe="$(command -v python)"
+else
+  echo "Python 3 is required to remove protocol-owned Codex hooks safely." >&2
+  exit 1
+fi
+
 remove_if_ours() {
   local dst="$1" expected="$2"
   if [[ -L "$dst" && "$(readlink "$dst")" == "$expected" ]]; then
     rm "$dst"
   fi
 }
+
+"$python_exe" "$repo_root/scripts/codex/manage-hooks.py" uninstall \
+  --codex-home "$codex_home" \
+  --hook-path "$codex_home/hooks/delegation-enforcer.py" \
+  --python "$python_exe"
+
+remove_if_ours "$codex_home/agents/bulk-worker.toml" "$repo_root/codex/agents/bulk-worker.toml"
+remove_if_ours "$codex_home/agents/balanced-worker.toml" "$repo_root/codex/agents/balanced-worker.toml"
+remove_if_ours "$codex_home/hooks/delegation-enforcer.py" "$repo_root/codex/hooks/delegation-enforcer.py"
 
 if [[ -f "$state" ]]; then
   mode="$(awk -F= '$1=="mode"{print $2}' "$state")"
@@ -27,4 +45,4 @@ if [[ -f "$state" ]]; then
 fi
 
 rm -rf "$state_dir" "$repo_root/.runtime/codex"
-echo "Uninstalled Codex delegation protocol only and restored preserved Codex override when applicable."
+echo "Uninstalled Codex delegation protocol only; unrelated hooks/configuration were preserved and the prior Codex override was restored when applicable."
