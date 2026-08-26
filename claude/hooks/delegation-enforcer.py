@@ -3,13 +3,14 @@
 
 Modes:
   prompt           Classify each user prompt, persist enforcement state, inject policy context.
-  subagent-start   Record spawned subagents and inject bounded-worker context.
-  agent-failure    Record Agent-tool failures so enforcement can fail open when delegation is unavailable.
+  subagent-start   Track active subagents and inject bounded-worker context.
+  subagent-stop    Track active subagents as they finish.
+  agent-failure    Record Agent-tool failures and fail open only when spawning is unavailable.
   pretool          Block parent write/mutation tools until required delegation has occurred.
   stop             Prevent the parent from stopping before required delegation has occurred.
 
-This hook intentionally uses conservative deterministic classification. The injected policy remains
-the semantic layer for cases that cannot be inferred reliably from a single prompt.
+The hook uses conservative deterministic classification. The injected policy remains the semantic
+layer for cases that cannot be inferred reliably from a single prompt.
 """
 from __future__ import annotations
 
@@ -21,97 +22,30 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 
 BULK_WORDS = (
-    "bulk",
-    "batch",
-    "high-volume",
-    "high volume",
-    "many files",
-    "many modules",
-    "many packages",
-    "many services",
-    "many components",
-    "many tasks",
-    "all files",
-    "all modules",
-    "all packages",
-    "all services",
-    "all components",
-    "every file",
-    "every module",
-    "every package",
-    "every service",
-    "across the repo",
-    "across the repository",
-    "repo-wide",
-    "repository-wide",
-    "codebase-wide",
-    "large-scale",
-    "large scale",
+    "bulk", "batch", "high-volume", "high volume", "many files", "many modules",
+    "many packages", "many services", "many components", "many tasks", "all files",
+    "all modules", "all packages", "all services", "all components", "every file",
+    "every module", "every package", "every service", "across the repo",
+    "across the repository", "repo-wide", "repository-wide", "codebase-wide",
+    "large-scale", "large scale",
 )
 
 ACTION_WORDS = (
-    "implement",
-    "build",
-    "create",
-    "add",
-    "change",
-    "update",
-    "edit",
-    "modify",
-    "fix",
-    "refactor",
-    "migrate",
-    "convert",
-    "rewrite",
-    "rename",
-    "process",
-    "analyze",
-    "analyse",
-    "review",
-    "audit",
-    "test",
-    "document",
-    "generate",
-    "apply",
-    "replace",
-    "remove",
-    "delete",
-    "format",
-    "lint",
+    "implement", "build", "create", "add", "change", "update", "edit", "modify",
+    "fix", "refactor", "migrate", "convert", "rewrite", "rename", "process",
+    "analyze", "analyse", "review", "audit", "test", "document", "generate",
+    "apply", "replace", "remove", "delete", "format", "lint",
 )
 
 SHARD_WORDS = (
-    "subsystem",
-    "subsystems",
-    "service",
-    "services",
-    "module",
-    "modules",
-    "package",
-    "packages",
-    "component",
-    "components",
-    "directory",
-    "directories",
-    "workstream",
-    "workstreams",
-    "shard",
-    "shards",
-    "partition",
-    "partitions",
-    "test suite",
-    "test suites",
-    "frontend",
-    "front-end",
-    "backend",
-    "back-end",
-    "api",
-    "database",
-    "docs",
-    "documentation",
+    "subsystem", "subsystems", "service", "services", "module", "modules", "package",
+    "packages", "component", "components", "directory", "directories", "workstream",
+    "workstreams", "shard", "shards", "partition", "partitions", "test suite",
+    "test suites", "frontend", "front-end", "backend", "back-end", "api", "database",
+    "docs", "documentation",
 )
 
 NO_DELEGATION_PATTERNS = (
@@ -144,6 +78,13 @@ MUTATING_BASH = re.compile(
 MUTATING_POWERSHELL = re.compile(
     r"\b(?:Set-Content|Add-Content|Out-File|Remove-Item|Move-Item|Copy-Item|"
     r"New-Item|Rename-Item|Set-Item|Clear-Content)\b",
+    re.IGNORECASE,
+)
+
+SPAWN_UNAVAILABLE = re.compile(
+    r"(?:concurrent subagent limit reached|agent tool.*(?:unavailable|disabled|not available)|"
+    r"subagent.*(?:unavailable|disabled|not available)|model not found|no available model|"
+    r"not permitted|permission denied)",
     re.IGNORECASE,
 )
 
@@ -227,6 +168,17 @@ def explicit_count(text: str) -> int:
     return max(values, default=0)
 
 
+def concurrency_capacity() -> int:
+    raw = os.environ.get("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS")
+    if not raw:
+        return 20
+    try:
+        value = int(raw)
+        return value if value > 0 else 20
+    except ValueError:
+        return 20
+
+
 def classify(prompt: str, previous: dict[str, Any]) -> dict[str, Any]:
     text = (prompt or "").strip()
     lower = text.lower()
@@ -235,7 +187,6 @@ def classify(prompt: str, previous: dict[str, Any]) -> dict[str, Any]:
     explicit_no = any(re.search(pattern, lower) for pattern in NO_DELEGATION_PATTERNS)
     action = contains_any(lower, ACTION_WORDS)
     count = explicit_count(lower)
-
     bulk_signal = contains_any(lower, BULK_WORDS) or count >= 4
     multiple_signal = "multiple" in lower and contains_any(lower, SHARD_WORDS)
     independent_signal = "independent" in lower and contains_any(lower, SHARD_WORDS)
@@ -260,15 +211,9 @@ def classify(prompt: str, previous: dict[str, Any]) -> dict[str, Any]:
     if contains_any(
         lower,
         (
-            "independent subsystems",
-            "independent services",
-            "independent modules",
-            "independent packages",
-            "separate subsystems",
-            "separate services",
-            "separate modules",
-            "separate packages",
-            "parallel workstreams",
+            "independent subsystems", "independent services", "independent modules",
+            "independent packages", "separate subsystems", "separate services",
+            "separate modules", "separate packages", "parallel workstreams",
             "independent workstreams",
         ),
     ):
@@ -292,10 +237,16 @@ def classify(prompt: str, previous: dict[str, Any]) -> dict[str, Any]:
     if carry:
         reasons.append("short continuation of an unfinished delegated turn")
 
+    capacity = concurrency_capacity()
+    min_agents = 0
+    if requires:
+        min_agents = 2 if multi and capacity >= 2 else 1
+
     return {
         "requires_delegation": requires,
         "requires_multi": multi,
-        "min_agents": 2 if multi else (1 if requires else 0),
+        "min_agents": min_agents,
+        "concurrency_capacity": capacity,
         "classification_reasons": reasons,
         "explicit_no_delegation": explicit_no,
     }
@@ -303,24 +254,31 @@ def classify(prompt: str, previous: dict[str, Any]) -> dict[str, Any]:
 
 def policy_context(classification: dict[str, Any]) -> str:
     base = (
-        "DELEGATION PROTOCOL (hook-enforced): Preserve the parent frontier model for planning, "
+        "DELEGATION PROTOCOL (hook-enforced): preserve the parent frontier model for planning, "
         "ambiguity, integration, conflict resolution, and final validation. For bounded repetitive "
         "or high-volume work, delegate to the cheapest suitable supported subagent. Prefer the "
         "`bulk-worker` (Haiku) for low-risk mechanical work; escalate individual units when stronger "
-        "reasoning is needed. For two or more independent subsystems/shards, fan out multiple agents "
-        "concurrently rather than serializing naturally parallel work. Give workers non-overlapping "
-        "scope, acceptance criteria, validation commands, and require concise result reports. "
-        "The parent remains the single integration authority."
+        "reasoning is needed. For independent subsystems/shards, fan out multiple agents concurrently "
+        "rather than serializing naturally parallel work. Give workers non-overlapping scope, acceptance "
+        "criteria, validation commands, and require concise result reports. The parent remains the single "
+        "integration authority. Agent teams may be used when enabled and beneficial, but ordinary subagents "
+        "remain the required baseline because they are broadly available."
     )
     if classification.get("requires_delegation"):
         minimum = int(classification.get("min_agents", 1))
         reasons = ", ".join(classification.get("classification_reasons", [])) or "bulk task"
+        multi_note = (
+            " Reach the required worker count concurrently, not merely sequentially."
+            if minimum > 1
+            else ""
+        )
         return (
             base
             + f"\nHOOK CLASSIFICATION: this prompt is delegation-eligible ({reasons}). "
             f"Before the parent performs mutating implementation work, spawn at least {minimum} "
-            f"{'independent subagents' if minimum > 1 else 'subagent'} when the Agent tool is available. "
-            "If delegation is unavailable, attempt it once so the hook can detect the failure and fail open."
+            f"{'independent subagents' if minimum > 1 else 'subagent'} when the Agent tool is available."
+            + multi_note
+            + " If delegation is unavailable, attempt it so the hook can detect the runtime failure."
         )
     return base
 
@@ -352,9 +310,12 @@ def handle_prompt(event: dict[str, Any]) -> None:
         "prompt": str(event.get("prompt") or ""),
         **classification,
         "subagents_started": 0,
+        "active_agent_ids": [],
+        "max_concurrent_agents": 0,
         "agent_types": [],
         "agent_failures": 0,
         "delegation_unavailable": False,
+        "multi_unavailable": False,
         "completed": False,
     }
     save_state(session_id, new_state)
@@ -373,11 +334,20 @@ def handle_subagent_start(event: dict[str, Any]) -> None:
     state = load_state(session_id)
     state.setdefault("version", PROTOCOL_VERSION)
     state["subagents_started"] = int(state.get("subagents_started", 0)) + 1
+
+    active = list(state.get("active_agent_ids") or [])
+    agent_id = str(event.get("agent_id") or "")
+    if agent_id and agent_id not in active:
+        active.append(agent_id)
+    state["active_agent_ids"] = active
+    state["max_concurrent_agents"] = max(int(state.get("max_concurrent_agents", 0)), len(active))
+
     types = list(state.get("agent_types") or [])
     agent_type = str(event.get("agent_type") or "unknown")
     types.append(agent_type)
     state["agent_types"] = types[-100:]
     save_state(session_id, state)
+
     emit(
         {
             "hookSpecificOutput": {
@@ -386,7 +356,7 @@ def handle_subagent_start(event: dict[str, Any]) -> None:
                     "You are a delegated worker under the delegation protocol. Stay within the assigned "
                     "scope; do not redesign unrelated systems. Run requested validation. Report work completed, "
                     "files changed/inspected, checks run, assumptions, failures/blockers, and uncertainty. "
-                    "If your own assigned task itself splits into genuinely independent workstreams and the Agent "
+                    "If your assigned task itself splits into genuinely independent workstreams and the Agent "
                     "tool is available within spawn-depth limits, nested delegation is allowed; otherwise complete "
                     "the bounded unit yourself."
                 ),
@@ -395,11 +365,27 @@ def handle_subagent_start(event: dict[str, Any]) -> None:
     )
 
 
+def handle_subagent_stop(event: dict[str, Any]) -> None:
+    session_id = event.get("session_id")
+    state = load_state(session_id)
+    active = list(state.get("active_agent_ids") or [])
+    agent_id = str(event.get("agent_id") or "")
+    if agent_id in active:
+        active.remove(agent_id)
+    state["active_agent_ids"] = active
+    save_state(session_id, state)
+
+
 def handle_agent_failure(event: dict[str, Any]) -> None:
     session_id = event.get("session_id")
     state = load_state(session_id)
     state["agent_failures"] = int(state.get("agent_failures", 0)) + 1
-    state["delegation_unavailable"] = True
+    error = str(event.get("error") or "")
+    started = int(state.get("subagents_started", 0))
+    if started == 0 and SPAWN_UNAVAILABLE.search(error):
+        state["delegation_unavailable"] = True
+    elif state.get("requires_multi") and started > 0 and SPAWN_UNAVAILABLE.search(error):
+        state["multi_unavailable"] = True
     save_state(session_id, state)
 
 
@@ -408,19 +394,27 @@ def unmet_reason(state: dict[str, Any]) -> str | None:
         return None
     if state.get("delegation_unavailable"):
         return None
+
     minimum = int(state.get("min_agents", 1))
-    actual = int(state.get("subagents_started", 0))
-    if actual >= minimum:
-        return None
-    if minimum > 1:
+    started = int(state.get("subagents_started", 0))
+    max_concurrent = int(state.get("max_concurrent_agents", 0))
+
+    if minimum <= 1:
+        if started >= 1:
+            return None
         return (
-            f"Delegation protocol requires multi-agent fan-out for this turn: {actual}/{minimum} "
-            "required subagents have been started. Spawn separate workers for independent subsystems/shards "
-            "(prefer `bulk-worker` for mechanical work) before parent implementation."
+            "Delegation protocol requires a subagent for this bulk/high-volume turn, but none has been started. "
+            "Spawn a bounded worker (prefer `bulk-worker` for mechanical work) before parent implementation."
         )
+
+    if state.get("multi_unavailable") and started >= 1:
+        return None
+    if max_concurrent >= minimum:
+        return None
     return (
-        "Delegation protocol requires a subagent for this bulk/high-volume turn, but none has been started. "
-        "Spawn a bounded worker (prefer `bulk-worker` for mechanical work) before parent implementation."
+        f"Delegation protocol requires concurrent multi-agent fan-out for this turn: peak concurrency was "
+        f"{max_concurrent}/{minimum}. Launch separate workers for independent subsystems/shards and allow them "
+        "to overlap (prefer `bulk-worker` for mechanical work) before parent implementation."
     )
 
 
@@ -447,7 +441,7 @@ def handle_stop(event: dict[str, Any]) -> None:
     state = load_state(session_id)
     reason = unmet_reason(state)
     if reason:
-        emit({"decision": "block", "reason": reason + " Do not stop yet; delegate first."})
+        emit({"decision": "block", "reason": reason + " Do not stop yet; satisfy delegation first."})
         return
     if state:
         state["completed"] = True
@@ -457,7 +451,7 @@ def handle_stop(event: dict[str, Any]) -> None:
 def main() -> int:
     if len(sys.argv) != 2:
         print(
-            "usage: delegation-enforcer.py <prompt|subagent-start|agent-failure|pretool|stop>",
+            "usage: delegation-enforcer.py <prompt|subagent-start|subagent-stop|agent-failure|pretool|stop>",
             file=sys.stderr,
         )
         return 2
@@ -466,6 +460,7 @@ def main() -> int:
     handlers = {
         "prompt": handle_prompt,
         "subagent-start": handle_subagent_start,
+        "subagent-stop": handle_subagent_stop,
         "agent-failure": handle_agent_failure,
         "pretool": handle_pretool,
         "stop": handle_stop,
