@@ -238,6 +238,18 @@ def test_dismissal_lifecycle(home: Path) -> None:
     blocked = call_hook(home, "stop", {"session_id": session1})
     require(blocked is not None and blocked.get("decision") == "block", "stop did not block for outstanding worker")
 
+    # Case 1b: a runtime id (`a<name>-<hex>`) is cleared by TaskStop on the bare name
+    session1b = "dismissal-case1b"
+    call_hook(home, "prompt", {"session_id": session1b, "prompt": "Do some work"})
+    call_hook(home, "subagent-start", {"session_id": session1b, "agent_id": "aworker-one-353c3b7231845f11"})
+    call_hook(home, "subagent-stop", {"session_id": session1b, "agent_id": "aworker-one-353c3b7231845f11"})
+    call_hook(home, "pretool", {
+        "session_id": session1b,
+        "tool_name": "TaskStop",
+        "tool_input": {"task_id": "worker-one"},
+    })
+    require(call_hook(home, "stop", {"session_id": session1b}) is None, "bare-name TaskStop did not clear a runtime-id worker")
+
     # Case 2: With outstanding worker, `pretool` Agent spawn is denied
     session2 = "dismissal-case2"
     call_hook(home, "prompt", {

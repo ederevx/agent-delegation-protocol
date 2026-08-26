@@ -145,6 +145,13 @@ def test_worker_dismissal(home: Path) -> None:
     result = call_hook(home, "stop", {"session_id": session, "turn_id": "t1", "stop_hook_active": False})
     require(result is None, "stop still blocked after worker was dismissed")
 
+    # Test 4: a runtime id (`a<name>-<hex>`) is cleared by a dismissal on the bare name
+    call_hook(home, "subagent-start", {"session_id": session, "turn_id": "t1", "agent_id": "aworker-one-353c3b7231845f11", "agent_type": "bulk_worker"})
+    call_hook(home, "subagent-stop", {"session_id": session, "turn_id": "t1", "agent_id": "aworker-one-353c3b7231845f11"})
+    require(call_hook(home, "stop", {"session_id": session, "turn_id": "t1", "stop_hook_active": False}) is not None, "runtime-id worker was not held")
+    call_hook(home, "pretool", {"session_id": session, "turn_id": "t1", "tool_name": "TaskStop", "tool_input": {"task_id": "worker-one"}})
+    require(call_hook(home, "stop", {"session_id": session, "turn_id": "t1", "stop_hook_active": False}) is None, "bare-name dismissal did not clear a runtime-id worker")
+
     # Test 5: new prompt clears stale outstanding workers
     call_hook(home, "prompt", {"session_id": session, "turn_id": "t2", "prompt": "New turn."})
     result = call_hook(home, "stop", {"session_id": session, "turn_id": "t2", "stop_hook_active": False})
