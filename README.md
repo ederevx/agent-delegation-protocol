@@ -68,6 +68,8 @@ For multi-subsystem tasks the Codex hook requires evidence of **actual overlappi
 
 See [`codex/INSTALL.md`](codex/INSTALL.md).
 
+If an agent is upgrading an older AGENTS-only, partial, or legacy combined installation, it MUST follow [`codex/MIGRATE.md`](codex/MIGRATE.md). That runbook is written directly for Codex and requires non-destructive inventory, migration, verification, and rollback without touching Claude.
+
 ## Install Claude only
 
 macOS/Linux:
@@ -95,6 +97,17 @@ Claude enforcement is not text-only. The hook classifies clear bulk/sharded requ
 
 See [`claude/INSTALL.md`](claude/INSTALL.md).
 
+If an agent is upgrading an older text-only, partial, or legacy combined installation, it MUST follow [`claude/MIGRATE.md`](claude/MIGRATE.md). That runbook is written directly for Claude Code and requires non-destructive settings/hook migration without touching Codex.
+
+## Agent-facing migration runbooks
+
+These files are operational instructions for the agents themselves, not merely human release notes:
+
+- [`codex/MIGRATE.md`](codex/MIGRATE.md) — migrate Codex from legacy AGENTS-only/partial structures into AGENTS + custom workers + hooks.
+- [`claude/MIGRATE.md`](claude/MIGRATE.md) — migrate Claude from legacy text-first/partial structures into rule + worker + hooks + merged settings.
+
+Both runbooks make preservation, independent installation, self-test verification, failure handling, and rollback mandatory.
+
 ## Self-tests
 
 These tests use temporary config directories and do not modify your live Codex or Claude configuration:
@@ -119,6 +132,8 @@ bash scripts/claude/install.sh  # Claude only
 
 Codex composed-global mode needs reinstall to refresh the composed instruction file. Both agents' symlinked hook/agent files pick up repository changes immediately, while rerunning the appropriate installer refreshes protocol-owned hook/settings entries.
 
+For upgrades from a materially older installation layout, use the applicable `MIGRATE.md` rather than improvising cleanup.
+
 ## Uninstall independently
 
 Codex only:
@@ -141,6 +156,7 @@ PowerShell equivalents are in the same per-agent directories. Neither uninstalle
 codex/
   AGENTS.md
   INSTALL.md
+  MIGRATE.md
   agents/
     bulk-worker.toml
     balanced-worker.toml
@@ -148,6 +164,7 @@ codex/
     delegation-enforcer.py
 claude/
   INSTALL.md
+  MIGRATE.md
   agents/
     bulk-worker.md
   hooks/
