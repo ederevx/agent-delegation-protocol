@@ -16,7 +16,7 @@ The policy explicitly authorizes proactive delegation and makes cheap-model rout
 Keep the clone in a stable location because the installed metadata is symlinked back to this repository.
 
 ```bash
-git clone git@github.com:<OWNER>/agent-delegation-protocol.git ~/.local/share/agent-delegation-protocol
+git clone git@github.com:ederevx/agent-delegation-protocol.git ~/.local/share/agent-delegation-protocol
 cd ~/.local/share/agent-delegation-protocol
 ./scripts/install.sh
 ```
@@ -24,7 +24,7 @@ cd ~/.local/share/agent-delegation-protocol
 Windows PowerShell users can clone to a stable path and run:
 
 ```powershell
-git clone git@github.com:<OWNER>/agent-delegation-protocol.git "$HOME\agent-delegation-protocol"
+git clone git@github.com:ederevx/agent-delegation-protocol.git "$HOME\agent-delegation-protocol"
 cd "$HOME\agent-delegation-protocol"
 .\scripts\install.ps1
 ```
