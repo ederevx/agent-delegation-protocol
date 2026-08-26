@@ -134,13 +134,30 @@ def dismissed_dir(session_id: Any) -> Path:
 def worker_key(value: Any) -> str:
     """Normalize an agent identity so a spawn id and a dismissal target compare equal.
 
-    Spawned workers are identified as `name@session-xxxx`, while TaskStop accepts either
-    that full id or the bare name. The name is the stable part, so key on it.
+    Runtimes report a worker under an internal id that is not what a dismissal call
+    accepts: Claude Code reports `a<name>-<hex>` on SubagentStop while TaskStop takes
+    the bare name, and other builds use `name@session`. Only the name is common to
+    both, so strip the session suffix here and let matches() handle the rest.
     """
     raw = str(value or "").strip()
     if not raw:
         return ""
     return safe_session_id(raw.split("@", 1)[0].lower())
+
+
+def keys_match(finished: str, target: str) -> bool:
+    """Whether a dismissal target names a finished worker.
+
+    The two never have to be identical: a runtime id wraps the worker name in a
+    prefix and a random suffix, so containment either way is the reliable test.
+    Short targets are required to match exactly so a stray id cannot clear
+    everything.
+    """
+    if finished == target:
+        return True
+    if len(target) < 4 or len(finished) < 4:
+        return False
+    return target in finished or finished in target
 
 
 def outstanding_workers(session_id: Any) -> list[str]:
@@ -149,11 +166,12 @@ def outstanding_workers(session_id: Any) -> list[str]:
     if not finished.exists():
         return []
     dismissed = dismissed_dir(session_id)
+    targets = [p.name for p in dismissed.iterdir() if p.is_file()] if dismissed.exists() else []
     names = []
     for path in finished.iterdir():
         if not path.is_file():
             continue
-        if (dismissed / path.name).exists():
+        if any(keys_match(path.name, target) for target in targets):
             continue
         names.append((path.stat().st_mtime, path.name))
     return [name for _, name in sorted(names)]
