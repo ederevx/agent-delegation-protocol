@@ -1,6 +1,6 @@
 # Agent Delegation Protocol
 
-A private configuration repository for making a frontier coding model act as coordinator while delegating bounded bulk work to cheaper supported workers.
+A configuration protocol that makes a frontier coding model act as coordinator while delegating bounded bulk work to cheaper supported workers, mechanically enforced by lifecycle hooks in both Codex and Claude Code.
 
 Codex and Claude Code are intentionally **independent installations**. There is no combined installer. Installing one agent must not modify the other agent's configuration.
 
@@ -191,3 +191,9 @@ scripts/
 ## Enforcement boundary
 
 Both agents now use mechanical lifecycle hooks plus a supporting semantic policy. Codex retains AGENTS because current Codex subagent workflows still treat direct user requests or applicable `AGENTS.md`/skill instructions as spawning authorization. Neither implementation can override higher-priority system/developer/user instructions, managed organization policy, unavailable tools/models, hook trust requirements, or platform safety controls.
+
+## License
+
+Licensed under [Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/) — see [LICENSE](LICENSE) for the full legal text.
+
+You are free to share and adapt this work for any purpose, including commercially, as long as you give appropriate credit. Attribution must name the original author and be preserved in every copy or derivative, including further edits or forks.
