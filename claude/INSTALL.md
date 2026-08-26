@@ -92,6 +92,8 @@ The hook uses a conservative deterministic classifier. It mechanically gates cle
 
 The `PreToolUse` gate covers Claude Code's core file mutation tools and common mutating shell/PowerShell operations. The `Stop` gate is the backstop: an eligible turn cannot normally finish without the required delegation evidence even if a mutation path was not recognized by the pre-tool heuristic.
 
+The hook also enforces worker dismissal. `SubagentStop` records the worker as finished but still held, since a worker stays alive and idle until it is dismissed. While any such worker is outstanding, `PreToolUse` denies new `Agent` spawns and `Stop` blocks turn completion, so finished workers are released with `TaskStop` before more are created. Dismissal is recorded when the `TaskStop` call is made rather than when it succeeds, so stopping an already-gone worker still clears the obligation. The record is per-turn and a new prompt clears it, so a stuck worker cannot wedge the session.
+
 A direct higher-priority user/system restriction against delegation, unavailable Agent tooling, managed policy, or runtime/model failure can supersede or prevent the protocol. The hook is an execution guardrail, not a security sandbox.
 
 ## Verify

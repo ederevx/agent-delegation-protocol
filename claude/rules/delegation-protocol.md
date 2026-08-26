@@ -20,6 +20,18 @@ Do not serialize naturally parallel work through one worker merely for convenien
 
 The parent remains the single integration authority and must reconcile interfaces, review consequential output, and run repository-wide validation after combining results.
 
+## Worker lifecycle
+
+A worker does not disappear when its task ends. It goes idle and keeps holding a subagent slot until it is explicitly dismissed, so a turn that spawns workers and never dismisses them steadily consumes the concurrency budget for the rest of the session.
+
+Dismiss each worker with `TaskStop` (pass the worker name or its `name@session` id as `task_id`) as soon as its result has been read and integrated. Dismiss finished workers before spawning replacements rather than accumulating idle ones. Do not dismiss a worker whose output has not been collected yet, and do not keep one alive merely because it might be useful later — spawn a fresh worker when new work appears.
+
+## Local changes belong in this repository
+
+The installed hooks, agent definitions, and rules are symlinks back into this repository, so editing an installed file edits the repository. Any procedural change to delegation behavior — hook logic, gating conditions, worker definitions, installer or settings-merge behavior — must be made in this repository and committed here, not patched in place in an agent's configuration directory.
+
+Ad-hoc local edits are lost on reinstall, diverge silently between machines, and leave the other agent's half inconsistent. If a change is worth making locally, it is worth committing and pushing here.
+
 ## Hook interaction
 
 The installed Claude hook may:
@@ -29,6 +41,7 @@ The installed Claude hook may:
 - deny parent mutation until required delegation evidence exists;
 - require actual overlapping workers for multi-subsystem fan-out;
 - block turn completion until the required delegation evidence exists;
+- record each worker whose task finished, and block new spawns and turn completion until those workers are dismissed with `TaskStop`;
 - fail open only when the Agent runtime/model/concurrency path is observed to be unavailable.
 
 If the hook does not classify a task mechanically but this rule clearly applies, follow this rule proactively anyway.

@@ -4,9 +4,10 @@
 Modes:
   prompt           Classify the user turn and inject the delegation policy.
   subagent-start   Record actual worker overlap and inject worker constraints.
-  subagent-stop    Remove the worker from the active set.
+  subagent-stop    Remove the worker from the active set and record it as finished-but-not-dismissed.
   agent-failure    Record spawn/runtime unavailability for fail-open handling.
-  pretool          Block parent mutation before required delegation occurs.
+  pretool          Block parent mutation before required delegation occurs, observe worker
+                   dismissals, and block new spawns while finished workers are still held.
   stop             Prevent completion before required delegation occurs.
 
 Classification is intentionally conservative and deterministic. The supporting rule is still loaded
@@ -23,7 +24,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-PROTOCOL_VERSION = 4
+PROTOCOL_VERSION = 5
 
 BULK_WORDS = (
     "bulk", "batch", "high-volume", "high volume", "many files", "many modules",
@@ -122,6 +123,52 @@ def marker(session_id: Any, name: str) -> Path:
     return Path(str(turn_base(session_id)) + f".{name}")
 
 
+def finished_dir(session_id: Any) -> Path:
+    return Path(str(turn_base(session_id)) + ".finished")
+
+
+def dismissed_dir(session_id: Any) -> Path:
+    return Path(str(turn_base(session_id)) + ".dismissed")
+
+
+def worker_key(value: Any) -> str:
+    """Normalize an agent identity so a spawn id and a dismissal target compare equal.
+
+    Spawned workers are identified as `name@session-xxxx`, while TaskStop accepts either
+    that full id or the bare name. The name is the stable part, so key on it.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return safe_session_id(raw.split("@", 1)[0].lower())
+
+
+def outstanding_workers(session_id: Any) -> list[str]:
+    """Workers whose task finished but which were never dismissed, oldest first."""
+    finished = finished_dir(session_id)
+    if not finished.exists():
+        return []
+    dismissed = dismissed_dir(session_id)
+    names = []
+    for path in finished.iterdir():
+        if not path.is_file():
+            continue
+        if (dismissed / path.name).exists():
+            continue
+        names.append((path.stat().st_mtime, path.name))
+    return [name for _, name in sorted(names)]
+
+
+def dismissal_reason(names: list[str], action: str) -> str:
+    listed = ", ".join(names)
+    return (
+        f"Delegation protocol: {len(names)} finished worker(s) are still held and occupying "
+        f"subagent capacity ({listed}). A worker stays alive and idle after its task completes; "
+        f"it is only released by TaskStop. Dismiss each one with TaskStop (pass the worker name "
+        f"as task_id) {action}."
+    )
+
+
 def load_state(session_id: Any) -> dict[str, Any]:
     path = state_path(session_id)
     if not path.exists():
@@ -151,9 +198,9 @@ def save_state(session_id: Any, data: dict[str, Any]) -> None:
 
 
 def reset_evidence(session_id: Any) -> None:
-    directory = active_dir(session_id)
-    if directory.exists():
-        shutil.rmtree(directory, ignore_errors=True)
+    for directory in (active_dir(session_id), finished_dir(session_id), dismissed_dir(session_id)):
+        if directory.exists():
+            shutil.rmtree(directory, ignore_errors=True)
     for name in ("delegated", "fanout", "unavailable", "multi-unavailable"):
         try:
             marker(session_id, name).unlink()
@@ -370,11 +417,18 @@ def handle_subagent_start(event: dict[str, Any]) -> None:
 
 
 def handle_subagent_stop(event: dict[str, Any]) -> None:
-    path = active_dir(event.get("session_id")) / safe_session_id(event.get("agent_id") or "unknown-agent")
+    session_id = event.get("session_id")
+    agent_id = event.get("agent_id") or "unknown-agent"
+    path = active_dir(session_id) / safe_session_id(agent_id)
     try:
         path.unlink()
     except FileNotFoundError:
         pass
+
+    # The task ended, but the worker itself is still alive and idle until it is dismissed.
+    key = worker_key(agent_id)
+    if key:
+        touch(finished_dir(session_id) / key)
 
 
 def handle_agent_failure(event: dict[str, Any]) -> None:
@@ -418,9 +472,39 @@ def unmet_reason(session_id: Any, state: dict[str, Any]) -> str | None:
 
 
 def handle_pretool(event: dict[str, Any]) -> None:
-    if not is_main_agent(event) or not tool_is_mutating(event):
+    if not is_main_agent(event):
         return
     session_id = event.get("session_id")
+    tool = str(event.get("tool_name") or "")
+    tool_input = event.get("tool_input") or {}
+
+    # Observe dismissals at intent rather than at outcome. TaskStop against a worker that is
+    # already gone still clears the obligation, so a failed call can never wedge the session.
+    if tool == "TaskStop":
+        key = worker_key(tool_input.get("task_id") or tool_input.get("shell_id"))
+        if key:
+            touch(dismissed_dir(session_id) / key)
+        return
+
+    # Reclaim finished workers before creating new ones.
+    if tool == "Agent":
+        outstanding = outstanding_workers(session_id)
+        if outstanding:
+            emit(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": dismissal_reason(
+                            outstanding, "before spawning another worker"
+                        ),
+                    }
+                }
+            )
+        return
+
+    if not tool_is_mutating(event):
+        return
     reason = unmet_reason(session_id, load_state(session_id))
     if reason:
         emit(
@@ -441,6 +525,17 @@ def handle_stop(event: dict[str, Any]) -> None:
     if reason:
         emit({"decision": "block", "reason": reason + " Do not stop yet; satisfy delegation first."})
         return
+
+    outstanding = outstanding_workers(session_id)
+    if outstanding:
+        emit(
+            {
+                "decision": "block",
+                "reason": dismissal_reason(outstanding, "before ending the turn"),
+            }
+        )
+        return
+
     if state:
         state["completed"] = True
         save_state(session_id, state)

@@ -189,6 +189,17 @@ def test_multi_agent_overlap_gate(home: Path) -> None:
 
     call_hook(home, "subagent-stop", {"session_id": session, "agent_id": "frontend-worker"})
     call_hook(home, "subagent-stop", {"session_id": session, "agent_id": "backend-worker"})
+    # Dismiss both workers before stop is allowed (PROTOCOL_VERSION 5 dismissal enforcement)
+    call_hook(home, "pretool", {
+        "session_id": session,
+        "tool_name": "TaskStop",
+        "tool_input": {"task_id": "frontend-worker"},
+    })
+    call_hook(home, "pretool", {
+        "session_id": session,
+        "tool_name": "TaskStop",
+        "tool_input": {"task_id": "backend-worker"},
+    })
     stopped = call_hook(home, "stop", {"session_id": session})
     require(stopped is None, "completed fan-out task was blocked from stopping")
 
@@ -207,6 +218,151 @@ def test_explicit_opt_out(home: Path) -> None:
     require(result is None, "explicit no-delegation instruction was not respected")
 
 
+def test_dismissal_lifecycle(home: Path) -> None:
+    """Test worker dismissal enforcement across all lifecycle cases."""
+
+    # Case 1: Worker finishes -> `stop` blocks
+    session1 = "dismissal-case1"
+    call_hook(home, "prompt", {
+        "session_id": session1,
+        "prompt": "Do some work",
+    })
+    call_hook(home, "subagent-start", {
+        "session_id": session1,
+        "agent_id": "w1",
+    })
+    call_hook(home, "subagent-stop", {
+        "session_id": session1,
+        "agent_id": "w1",
+    })
+    blocked = call_hook(home, "stop", {"session_id": session1})
+    require(blocked is not None and blocked.get("decision") == "block", "stop did not block for outstanding worker")
+
+    # Case 2: With outstanding worker, `pretool` Agent spawn is denied
+    session2 = "dismissal-case2"
+    call_hook(home, "prompt", {
+        "session_id": session2,
+        "prompt": "Do some work",
+    })
+    call_hook(home, "subagent-start", {
+        "session_id": session2,
+        "agent_id": "w2",
+    })
+    call_hook(home, "subagent-stop", {
+        "session_id": session2,
+        "agent_id": "w2",
+    })
+    denied = call_hook(home, "pretool", {
+        "session_id": session2,
+        "tool_name": "Agent",
+        "tool_input": {},
+    })
+    require(denied is not None and denied["hookSpecificOutput"]["permissionDecision"] == "deny", "Agent spawn was not denied with outstanding worker")
+
+    # Case 3: `pretool` TaskStop with bare name clears it -> `stop` then passes
+    session3 = "dismissal-case3"
+    call_hook(home, "prompt", {
+        "session_id": session3,
+        "prompt": "Do some work",
+    })
+    call_hook(home, "subagent-start", {
+        "session_id": session3,
+        "agent_id": "w3",
+    })
+    call_hook(home, "subagent-stop", {
+        "session_id": session3,
+        "agent_id": "w3",
+    })
+    call_hook(home, "pretool", {
+        "session_id": session3,
+        "tool_name": "TaskStop",
+        "tool_input": {"task_id": "w3"},
+    })
+    allowed = call_hook(home, "stop", {"session_id": session3})
+    require(allowed is None, "stop was blocked after dismissing worker with bare name")
+
+    # Case 4: `pretool` TaskStop with full "name@session" id also clears it
+    session4 = "dismissal-case4"
+    call_hook(home, "prompt", {
+        "session_id": session4,
+        "prompt": "Update 10 files",
+    })
+    call_hook(home, "subagent-start", {
+        "session_id": session4,
+        "agent_id": "w4@session-xyz",
+    })
+    call_hook(home, "subagent-stop", {
+        "session_id": session4,
+        "agent_id": "w4@session-xyz",
+    })
+    call_hook(home, "pretool", {
+        "session_id": session4,
+        "tool_name": "TaskStop",
+        "tool_input": {"task_id": "w4@session-xyz"},
+    })
+    allowed = call_hook(home, "stop", {"session_id": session4})
+    require(allowed is None, "stop was blocked after dismissing worker with full id")
+
+    # Case 5: Worker that started but NOT stopped is not outstanding -> `stop` passes
+    session5 = "dismissal-case5"
+    call_hook(home, "prompt", {
+        "session_id": session5,
+        "prompt": "Update 10 files",
+    })
+    call_hook(home, "subagent-start", {
+        "session_id": session5,
+        "agent_id": "w5",
+    })
+    # Note: NOT calling subagent-stop
+    allowed = call_hook(home, "stop", {"session_id": session5})
+    require(allowed is None, "stop was blocked for active (not finished) worker")
+
+    # Case 6: New `prompt` clears stale outstanding workers
+    session6 = "dismissal-case6"
+    call_hook(home, "prompt", {
+        "session_id": session6,
+        "prompt": "Update 10 files",
+    })
+    call_hook(home, "subagent-start", {
+        "session_id": session6,
+        "agent_id": "w6",
+    })
+    call_hook(home, "subagent-stop", {
+        "session_id": session6,
+        "agent_id": "w6",
+    })
+    # New prompt should reset evidence
+    call_hook(home, "prompt", {
+        "session_id": session6,
+        "prompt": "Different task now",
+    })
+    allowed = call_hook(home, "stop", {"session_id": session6})
+    require(allowed is None, "stop was blocked after new prompt reset evidence")
+
+    # Case 7: `pretool` event with non-empty agent_id (subagent's own call) is ignored
+    session7 = "dismissal-case7"
+    call_hook(home, "prompt", {
+        "session_id": session7,
+        "prompt": "Update 10 files",
+    })
+    call_hook(home, "subagent-start", {
+        "session_id": session7,
+        "agent_id": "w7",
+    })
+    call_hook(home, "subagent-stop", {
+        "session_id": session7,
+        "agent_id": "w7",
+    })
+    # Event from a subagent (non-empty agent_id) should be ignored
+    ignored = call_hook(home, "pretool", {
+        "session_id": session7,
+        "agent_id": "w7",
+        "tool_name": "Agent",
+        "tool_input": {},
+    })
+    require(ignored is None, "subagent pretool event was not ignored (should not emit deny)")
+
+
 def main() -> int:
     require(HOOK.exists(), f"missing hook: {HOOK}")
     require(SETTINGS_MANAGER.exists(), f"missing settings manager: {SETTINGS_MANAGER}")
@@ -216,6 +372,7 @@ def main() -> int:
         test_single_agent_gate(root / "single-home")
         test_multi_agent_overlap_gate(root / "multi-home")
         test_explicit_opt_out(root / "opt-out-home")
+        test_dismissal_lifecycle(root / "dismissal-home")
     print("Claude delegation protocol self-test: PASS")
     return 0
 

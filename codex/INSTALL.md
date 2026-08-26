@@ -126,6 +126,8 @@ For clear independent subsystems, the policy and hook require concurrent fan-out
 
 The protocol does not set a fixed global concurrency cap because Codex already manages a default and existing users may have deliberately configured `agents.max_concurrent_threads_per_session`. Existing concurrency policy is preserved.
 
+Because a worker keeps holding a slot after its task ends, `SubagentStop` records it as finished but still held, and the hook gates new spawns and turn completion until it is dismissed. Codex's dismissal call is not fixed across builds, so the hook matches it by shape — a stop/kill/dismiss verb paired with a task/agent/worker noun — and, until it has observed such a call, warns rather than blocking so a build without one cannot be wedged.
+
 ## Verify
 
 Run the repository self-test:

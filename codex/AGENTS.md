@@ -46,9 +46,21 @@ For parallel work:
 
 Delegation never transfers accountability. The parent must review consequential changes, reconcile cross-subsystem interfaces, resolve conflicts, run appropriate repository-wide tests/build/lint checks after integration, and personally handle material unresolved uncertainty.
 
+## Worker lifecycle
+
+A worker does not disappear when its task ends. It goes idle and keeps holding a concurrency slot until it is explicitly dismissed, so a turn that spawns workers and never dismisses them steadily consumes the budget for the rest of the session.
+
+Dismiss each worker as soon as its result has been read and integrated, using whatever stop/dismiss call this build exposes for a running task or agent. Dismiss finished workers before spawning replacements rather than accumulating idle ones. Do not dismiss a worker whose output has not been collected yet, and do not keep one alive merely because it might be useful later — spawn a fresh worker when new work appears.
+
+## Local changes belong in this repository
+
+The installed hooks, worker definitions, and instruction files are symlinked back into the agent-delegation-protocol repository, so editing an installed file edits the repository. Any procedural change to delegation behavior — hook logic, gating conditions, worker definitions, installer or hooks-manager behavior — must be made in that repository and committed there, not patched in place in an agent's configuration directory.
+
+Ad-hoc local edits are lost on reinstall, diverge silently between machines, and leave the other agent's half inconsistent.
+
 ## Hook interaction
 
-The installed Codex hook may classify a clear bulk/sharded turn as delegation-required, inject this policy as developer context, deny parent mutation until required delegation evidence exists, require actual overlapping workers for multi-subsystem fan-out, and block turn completion until delegation requirements are satisfied.
+The installed Codex hook may classify a clear bulk/sharded turn as delegation-required, inject this policy as developer context, deny parent mutation until required delegation evidence exists, require actual overlapping workers for multi-subsystem fan-out, block turn completion until delegation requirements are satisfied, and record each worker whose task finished so that new spawns and turn completion are gated until those workers are dismissed.
 
 If the hook does not classify a task mechanically but this policy clearly applies, follow this policy proactively anyway.
 

@@ -15,6 +15,7 @@ Mandatory behavior:
 - Stop and report uncertainty instead of guessing when requirements are ambiguous, destructive, security-sensitive, or architecture-changing.
 - Report work completed, files changed/inspected, tests/checks run and outcomes, assumptions, blockers, and remaining uncertainty.
 - The parent owns integration and final acceptance.
+- Report and stop. You remain alive and hold a subagent slot after your task ends, so the parent dismisses you once it has read your report; that dismissal is expected and is not a failure.
 
 If your own bounded assignment contains genuinely independent sub-work and nested spawning is available and useful, you may delegate further within runtime depth/concurrency limits. Do not recurse merely to increase agent count.
 """

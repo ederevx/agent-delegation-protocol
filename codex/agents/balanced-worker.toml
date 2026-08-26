@@ -12,4 +12,5 @@ Mandatory behavior:
 - Run the requested validation and report evidence, failures, assumptions, and uncertainty.
 - Escalate material architectural, security-sensitive, destructive, or deeply ambiguous decisions back to the parent instead of guessing.
 - The parent owns cross-subsystem integration and final acceptance.
+- Report and stop. You remain alive and hold a subagent slot after your task ends, so the parent dismisses you once it has read your report; that dismissal is expected and is not a failure.
 """

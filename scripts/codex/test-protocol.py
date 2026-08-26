@@ -84,7 +84,9 @@ def test_multi_overlap(home: Path) -> None:
     require(allowed is None, "multi-agent task did not unlock after overlapping workers")
     call_hook(home, "subagent-stop", {"session_id": session, "turn_id": "t1", "agent_id": "front", "agent_type": "bulk_worker"})
     call_hook(home, "subagent-stop", {"session_id": session, "turn_id": "t1", "agent_id": "back", "agent_type": "bulk_worker"})
-    require(call_hook(home, "stop", {"session_id": session, "turn_id": "t1", "stop_hook_active": False}) is None, "completed fan-out task was blocked")
+    for worker in ("front", "back"):
+        call_hook(home, "pretool", {"session_id": session, "turn_id": "t1", "tool_name": "stop_task", "tool_input": {"task_id": worker}})
+    require(call_hook(home, "stop", {"session_id": session, "turn_id": "t1", "stop_hook_active": False}) is None, "completed and dismissed fan-out task was blocked")
 
 
 def test_stop_continuation(home: Path) -> None:
@@ -104,6 +106,51 @@ def test_opt_out(home: Path) -> None:
     require(call_hook(home, "pretool", {"session_id": session, "turn_id": "t1", "tool_name": "apply_patch", "tool_input": {"command": "patch"}}) is None, "explicit no-delegation instruction was ignored")
 
 
+def test_worker_dismissal(home: Path) -> None:
+    """Test worker-dismissal enforcement: blocking and clearing finished workers."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("codex_delegation_enforcer", HOOK)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    is_dismissal_tool = module.is_dismissal_tool
+
+    session = "dismissal"
+
+    # Test is_dismissal_tool function directly
+    require(is_dismissal_tool("TaskStop"), "TaskStop not recognized as dismissal tool")
+    require(is_dismissal_tool("stop_agent"), "stop_agent not recognized as dismissal tool")
+    require(is_dismissal_tool("kill_task"), "kill_task not recognized as dismissal tool")
+    require(is_dismissal_tool("AgentStop"), "AgentStop not recognized as dismissal tool")
+    require(is_dismissal_tool("terminate_worker"), "terminate_worker not recognized as dismissal tool")
+    require(not is_dismissal_tool("Bash"), "Bash incorrectly recognized as dismissal tool")
+    require(not is_dismissal_tool("Agent"), "Agent incorrectly recognized as dismissal tool")
+    require(not is_dismissal_tool("apply_patch"), "apply_patch incorrectly recognized as dismissal tool")
+
+    # Test 1: finished worker with NO dismissal tool observed -> stop does NOT block
+    call_hook(home, "prompt", {"session_id": session, "turn_id": "t1", "prompt": "Create a bulk task."})
+    call_hook(home, "subagent-start", {"session_id": session, "turn_id": "t1", "agent_id": "w1@session", "agent_type": "bulk_worker"})
+    call_hook(home, "subagent-stop", {"session_id": session, "turn_id": "t1", "agent_id": "w1@session"})
+    # Worker w1 is now finished but not dismissed, and no dismissal tool has been observed yet
+    result = call_hook(home, "stop", {"session_id": session, "turn_id": "t1", "stop_hook_active": False})
+    require(result is None or result.get("hookSpecificOutput") is not None, "stop blocked without dismissal-tool marker (should warn instead)")
+
+    # Test 2: after dismissal-shaped tool call is observed, finished worker DOES cause stop to block
+    call_hook(home, "pretool", {"session_id": session, "turn_id": "t1", "tool_name": "TaskStop", "tool_input": {"task_id": "dummy"}})
+    result = call_hook(home, "stop", {"session_id": session, "turn_id": "t1", "stop_hook_active": False})
+    require(result is not None and result.get("decision") == "block", "stop did not block after dismissal-tool marker with outstanding worker")
+
+    # Test 3: dismissing that specific worker clears it -> stop passes
+    call_hook(home, "pretool", {"session_id": session, "turn_id": "t1", "tool_name": "TaskStop", "tool_input": {"agent_id": "w1@session"}})
+    result = call_hook(home, "stop", {"session_id": session, "turn_id": "t1", "stop_hook_active": False})
+    require(result is None, "stop still blocked after worker was dismissed")
+
+    # Test 5: new prompt clears stale outstanding workers
+    call_hook(home, "prompt", {"session_id": session, "turn_id": "t2", "prompt": "New turn."})
+    result = call_hook(home, "stop", {"session_id": session, "turn_id": "t2", "stop_hook_active": False})
+    require(result is None, "stop blocked after prompt reset")
+
+
 def main() -> int:
     require(HOOK.exists(), f"missing {HOOK}")
     require(MANAGER.exists(), f"missing {MANAGER}")
@@ -114,6 +161,7 @@ def main() -> int:
         test_multi_overlap(root / "multi")
         test_stop_continuation(root / "continuation")
         test_opt_out(root / "optout")
+        test_worker_dismissal(root / "dismissal")
     print("Codex delegation protocol self-test: PASS")
     return 0
 

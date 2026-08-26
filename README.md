@@ -24,6 +24,26 @@ parent integration + repository-wide validation
 
 Use non-overlapping ownership where practical, explicit interfaces/acceptance criteria, isolation for conflicting write-heavy work, and parent-controlled integration. The goal is useful parallelism, not maximum agent count.
 
+## Worker lifecycle
+
+A worker does not disappear when its task ends. It goes idle and keeps holding a concurrency slot, so the parent must dismiss it once its report has been read:
+
+```
+parent spawns worker → worker works → worker reports
+        ↓                                    ↓
+   slot occupied ←──── still idle ←──── task finished
+        ↓
+parent dismisses worker (TaskStop / build's stop-task call)
+        ↓
+   slot released → available for the next worker
+```
+
+Both hooks record each finished-but-undismissed worker and gate on it: new spawns are denied and turn completion is blocked until the outstanding workers are dismissed. The record is per-turn and cleared by the next prompt, so a worker that never reports cannot wedge the session.
+
+## Changes belong in this repository
+
+Installed hooks, worker definitions, rules, and instruction files are symlinked back here, so editing an installed file edits this repository. Procedural changes to delegation behavior belong in a commit here, never as an in-place patch to an agent's configuration directory: local edits are lost on reinstall, diverge between machines, and leave the other agent's half inconsistent.
+
 ## Clone once
 
 Keep the clone at a stable path because installed metadata/hooks are symlinked back to it.
