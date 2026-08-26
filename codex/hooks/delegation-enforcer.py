@@ -109,6 +109,21 @@ def dismissed_dir(session_id: Any) -> Path:
     return Path(str(base(session_id)) + ".dismissed")
 
 
+def known_dir(session_id: Any) -> Path:
+    """Workers this protocol actually launched, for the life of the session.
+
+    SubagentStop fires for agents the protocol never started -- runtime internals
+    that carry a nameless id no dismissal call can target. Only an agent recorded
+    here at SubagentStart may create a dismissal obligation.
+    """
+    return Path(str(base(session_id)) + ".known")
+
+
+def nagged_dir(session_id: Any) -> Path:
+    """Workers whose outstanding debt has already been reported this turn."""
+    return Path(str(base(session_id)) + ".nagged")
+
+
 def worker_key(value: Any) -> str:
     """Normalize an agent identity so a spawn id and a dismissal target compare equal."""
     raw = str(value or "").strip()
@@ -187,7 +202,12 @@ def save_state(session_id: Any, value: dict[str, Any]) -> None:
 
 
 def reset_evidence(session_id: Any) -> None:
-    for directory in (active_dir(session_id), finished_dir(session_id), dismissed_dir(session_id)):
+    for directory in (
+        active_dir(session_id),
+        finished_dir(session_id),
+        dismissed_dir(session_id),
+        nagged_dir(session_id),
+    ):
         if directory.exists():
             shutil.rmtree(directory, ignore_errors=True)
     for name in ("delegated", "fanout", "unavailable", "multi-unavailable", "dismissal-tool", "dismissal-nagged"):
@@ -323,6 +343,9 @@ def handle_subagent_start(event: dict[str, Any]) -> None:
     d = active_dir(session)
     d.mkdir(parents=True, exist_ok=True)
     touch(d / aid)
+    key = worker_key(event.get("agent_id"))
+    if key:
+        touch(known_dir(session) / key)
     touch(marker(session, "delegated"))
     try:
         if sum(1 for p in d.iterdir() if p.is_file()) >= 2:
@@ -346,8 +369,11 @@ def handle_subagent_stop(event: dict[str, Any]) -> None:
         pass
 
     # The task ended, but the worker itself is still alive until it is dismissed.
+    # Only for a worker this protocol launched: the runtime also stops agents of its own,
+    # under nameless ids that no dismissal call can name, and charging the parent for those
+    # accrues a debt that can never be paid.
     key = worker_key(aid)
-    if key:
+    if key and (known_dir(session) / key).exists():
         touch(finished_dir(session) / key)
 
 
@@ -426,15 +452,25 @@ def handle_stop(event: dict[str, Any]) -> None:
     if held:
         # Only hard-block once this build has been observed to expose a dismissal tool.
         # Otherwise there is no way to satisfy the requirement, so warn instead of wedging.
-        # Block at most once. A worker the runtime already tore down can never be
-        # dismissed, so an unconditional block would loop the stop hook forever.
+        # Block at most once either way: a worker the runtime already tore down can
+        # never be dismissed, so an unconditional block would loop the stop hook forever.
         nagged = marker(session, "dismissal-nagged")
         if marker(session, "dismissal-tool").exists() and not nagged.exists():
             touch(nagged)
+            for name in held:
+                touch(nagged_dir(session) / name)
             emit({"decision": "block", "reason": f"{CONTINUATION_PREFIX} {dismissal_reason(held, 'before ending the turn')}"})
             return
+
+        # Warnings carry no way to discharge the debt, so surface each one once and
+        # then stay quiet; the spawn gate keeps holding the obligation regardless.
+        unreported = [w for w in held if not (nagged_dir(session) / w).exists()]
+        if not unreported:
+            return
+        for name in unreported:
+            touch(nagged_dir(session) / name)
         emit({"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": dismissal_reason(
-            held, "when this build exposes a stop/dismiss call; otherwise they are released at session end")}})
+            unreported, "when this build exposes a stop/dismiss call; otherwise they are released at session end")}})
         return
 
     if state:

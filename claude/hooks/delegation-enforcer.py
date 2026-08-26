@@ -131,6 +131,21 @@ def dismissed_dir(session_id: Any) -> Path:
     return Path(str(turn_base(session_id)) + ".dismissed")
 
 
+def known_dir(session_id: Any) -> Path:
+    """Workers this protocol actually launched, for the life of the session.
+
+    SubagentStop fires for agents the protocol never started -- runtime internals
+    that carry a nameless id no dismissal call can target. Only an agent recorded
+    here at SubagentStart may create a dismissal obligation.
+    """
+    return Path(str(turn_base(session_id)) + ".known")
+
+
+def nagged_dir(session_id: Any) -> Path:
+    """Workers whose outstanding debt has already been reported this turn."""
+    return Path(str(turn_base(session_id)) + ".nagged")
+
+
 def worker_key(value: Any) -> str:
     """Normalize an agent identity so a spawn id and a dismissal target compare equal.
 
@@ -216,7 +231,12 @@ def save_state(session_id: Any, data: dict[str, Any]) -> None:
 
 
 def reset_evidence(session_id: Any) -> None:
-    for directory in (active_dir(session_id), finished_dir(session_id), dismissed_dir(session_id)):
+    for directory in (
+        active_dir(session_id),
+        finished_dir(session_id),
+        dismissed_dir(session_id),
+        nagged_dir(session_id),
+    ):
         if directory.exists():
             shutil.rmtree(directory, ignore_errors=True)
     for name in ("delegated", "fanout", "unavailable", "multi-unavailable", "dismissal-nagged"):
@@ -411,6 +431,9 @@ def handle_subagent_start(event: dict[str, Any]) -> None:
     directory = active_dir(session_id)
     directory.mkdir(parents=True, exist_ok=True)
     touch(directory / agent_id)
+    key = worker_key(event.get("agent_id"))
+    if key:
+        touch(known_dir(session_id) / key)
     touch(marker(session_id, "delegated"))
     try:
         if sum(1 for p in directory.iterdir() if p.is_file()) >= 2:
@@ -444,8 +467,11 @@ def handle_subagent_stop(event: dict[str, Any]) -> None:
         pass
 
     # The task ended, but the worker itself is still alive and idle until it is dismissed.
+    # Only for a worker this protocol launched: the runtime also stops agents of its own,
+    # under nameless ids that no dismissal call can name, and charging the parent for those
+    # accrues a debt that can never be paid.
     key = worker_key(agent_id)
-    if key:
+    if key and (known_dir(session_id) / key).exists():
         touch(finished_dir(session_id) / key)
 
 
@@ -552,6 +578,8 @@ def handle_stop(event: dict[str, Any]) -> None:
         nagged = marker(session_id, "dismissal-nagged")
         if not nagged.exists():
             touch(nagged)
+            for name in outstanding:
+                touch(nagged_dir(session_id) / name)
             emit(
                 {
                     "decision": "block",
@@ -559,12 +587,21 @@ def handle_stop(event: dict[str, Any]) -> None:
                 }
             )
             return
+
+        # Past the one block, surface only debts not yet reported. Repeating a debt
+        # the parent can no longer pay just nags it on every Stop; the spawn gate
+        # still holds the obligation either way.
+        unreported = [w for w in outstanding if not (nagged_dir(session_id) / w).exists()]
+        if not unreported:
+            return
+        for name in unreported:
+            touch(nagged_dir(session_id) / name)
         emit(
             {
                 "hookSpecificOutput": {
                     "hookEventName": "Stop",
                     "additionalContext": dismissal_reason(
-                        outstanding,
+                        unreported,
                         "if they are still alive; they are released at session end otherwise",
                     ),
                 }
