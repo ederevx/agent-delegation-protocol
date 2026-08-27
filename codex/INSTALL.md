@@ -6,15 +6,16 @@ Codex is installed independently from Claude. The Codex installer touches only `
 
 If you are Codex upgrading an AGENTS-only, partially migrated, or legacy combined installation, you MUST follow [`MIGRATE.md`](MIGRATE.md) before improvising cleanup. The migration runbook is written directly for the agent and requires preflight inventory, preservation of existing configuration, independent Codex-only installation, verification, failure handling, and rollback.
 
-## Why the implementation uses three layers
+## Why the implementation uses four layers
 
 Current Codex supports stronger enforcement than an `AGENTS.md`-only design, but `AGENTS.md` still serves an important purpose.
 
 The protocol therefore uses:
 
 1. **Global AGENTS authorization/semantic policy** — explicitly authorizes subagents and parallel delegation, while preserving pre-existing global instructions.
-2. **Custom worker agents** — pin the cheap worker tiers to Luna/Terra without globally forcing every subagent onto a cheap model.
-3. **Lifecycle hooks** — mechanically classify clear bulk/sharded turns, observe real subagent starts/stops, block parent mutation until delegation requirements are met, and block turn completion until required delegation/fan-out evidence exists.
+2. **Custom worker agents** — make `bulk_worker` a lifecycle-visible multiplexer dispatcher while preserving `balanced_worker` as a stronger native tier.
+3. **Agent multiplexer** — selects the first available backend that supplies the task's required capabilities from an easily reordered priority list.
+4. **Lifecycle hooks** — mechanically classify clear bulk/sharded turns, observe real subagent starts/stops, block parent mutation until delegation requirements are met, and block turn completion until required delegation/fan-out evidence exists.
 
 This is stronger than using text instructions alone and safer than globally setting every subagent's default model to Luna.
 
@@ -32,7 +33,7 @@ Windows PowerShell:
 .\scripts\codex\install.ps1
 ```
 
-Python 3 is required for the local enforcement hook.
+Python 3 is required for the local enforcement hook and agent multiplexer.
 
 ## Global instruction installation
 
@@ -70,12 +71,33 @@ The installer adds symlinks:
 
 Declared agent names/model tiers:
 
-- `bulk_worker` — `gpt-5.6-luna`, medium reasoning; mechanical/repetitive/high-volume work.
+- `bulk_worker` — lifecycle-visible bulk dispatcher; its Luna configuration is used only when the multiplexer selects `native-codex-bulk`.
 - `balanced_worker` — `gpt-5.6-terra`, medium reasoning; moderately difficult delegated units.
 
 Custom-agent files are preferred over setting `agents.default_subagent_model = "gpt-5.6-luna"` globally. A global default would make Luna the inherited model for all otherwise-unspecified subagents, including tasks that need more reasoning. Custom roles preserve cheap routing while leaving escalation available.
 
 The protocol deliberately does not require per-call `model` overrides for the normal cheap-worker path. That reduces dependence on client surfaces where model/agent metadata may be hidden or awkward to express. Explicit model overrides remain available when the current runtime exposes them.
+
+## Agent multiplexer
+
+The installer also adds symlinks under `$CODEX_HOME/.delegation-protocol/`:
+
+```text
+multiplexer.py   -> <clone>/scripts/agents/multiplexer.py
+catalog          -> <clone>/agents/catalog
+multiplexer.json -> <clone>/agents/multiplexer.json
+```
+
+The bulk worker submits one bounded common JSON task or ordered batch with:
+
+```bash
+python3 "$CODEX_HOME/.delegation-protocol/multiplexer.py" \
+  run --route bulk --runtime codex
+```
+
+Each catalog entry uses the same named-function and compatibility interface and declares a top-level `native` boolean plus either a native Codex binding or a custom command/API adapter. Route priority is only the order of backend IDs in `agents/multiplexer.json`. The multiplexer queues calls to a serial one-lane backend even when multiple native dispatchers overlap.
+
+The dispatcher executes natively only for a valid `native_required` receipt with exit status 69 selecting the Codex-native backend. Once an external adapter launches, its receipt is returned without automatic native retry.
 
 ## Hook enforcement
 
@@ -101,7 +123,7 @@ Installed events:
 - `SubagentStop` — removes the worker from the active set.
 - `PreToolUse` — denies parent mutation on a classified bulk/sharded turn until required delegation evidence exists. Codex can apply this to shell commands, `apply_patch`, MCP calls, and other local function tools.
 - `PostToolUse` matching `Agent` — observes failed Agent/spawn results so enforcement can fail open when the requested worker/runtime is genuinely unavailable.
-- `Stop` — prevents the parent turn from completing until required delegation requirements are met. For multi-subsystem work, the hook requires evidence that at least two workers overlapped in time.
+- `Stop` — prevents the parent turn from completing until required delegation requirements are met. For multi-subsystem work, the hook requires overlapping workers; backend calls may still be serialized by the multiplexer.
 
 The hook is a guardrail, not a sandbox. Specialized tool paths may opt out of normal tool hooks; the `Stop` gate provides a second enforcement point.
 
@@ -122,7 +144,7 @@ Hooks are enabled by default in current Codex releases. If your `config.toml` ex
 
 ## Multi-agent behavior
 
-For clear independent subsystems, the policy and hook require concurrent fan-out rather than merely two sequential subagent runs. Atomic marker files record active `SubagentStart`/`SubagentStop` state so simultaneous hook processes do not race on one shared counter.
+For clear independent subsystems, the policy and hook require concurrent lifecycle-visible fan-out. A sequential one-lane backend queues those dispatchers rather than opening overlapping provider requests. Atomic marker files record active `SubagentStart`/`SubagentStop` state so simultaneous hook processes do not race on one shared counter.
 
 The protocol does not set a fixed global concurrency cap because Codex already manages a default and existing users may have deliberately configured `agents.max_concurrent_threads_per_session`. Existing concurrency policy is preserved.
 
@@ -141,7 +163,7 @@ Then start a fresh Codex session and confirm:
 1. `/hooks` shows the protocol handlers as trusted/enabled.
 2. `bulk_worker` and `balanced_worker` are available custom agents.
 3. a clear bulk request cannot perform parent mutation before spawning a worker;
-4. an independent frontend/backend/test request requires overlapping workers before parent mutation;
+4. an independent frontend/backend/test request requires overlapping workers before parent mutation, while any one-lane backend remains serialized;
 5. existing global/project instructions remain present and applicable.
 
 ## Uninstall
@@ -158,4 +180,4 @@ Windows PowerShell:
 .\scripts\codex\uninstall.ps1
 ```
 
-Uninstall removes only protocol-owned hook handlers/symlinks/state and restores a preserved prior `AGENTS.override.md` where applicable. It does not modify Claude.
+Uninstall removes only protocol-owned hook handlers, symlinks, and known state files, and restores a preserved prior `AGENTS.override.md` where applicable. Unrelated files inside `.delegation-protocol` are preserved. It does not modify Claude.

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "id": "replace-with-agent-id",
+  "name": "Replace with agent name",
+  "description": "Replace with a concise description of the bounded worker.",
+  "native": false,
+  "provider": "replace-with-provider",
+  "model": "replace-with-model",
+  "binding": {
+    "argv": ["python3", "/absolute/path/to/custom-adapter.py"],
+    "max_input_bytes": 1048576,
+    "max_output_bytes": 2097152,
+    "timeout_seconds": 3600
+  },
+  "capabilities": {
+    "functions": ["audit"],
+    "runtimes": ["codex", "claude"],
+    "platforms": ["linux", "darwin", "windows"],
+    "modes": ["read"],
+    "workspaces": ["shared"],
+    "deliveries": ["json-receipt"]
+  },
+  "limits": {
+    "max_concurrency": 1
+  }
+}

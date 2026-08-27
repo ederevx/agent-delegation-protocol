@@ -20,9 +20,15 @@ function Remove-IfOurs([string]$Destination, [string]$Expected) {
 $RuleSource = Join-Path $RepoRoot 'claude\rules\delegation-protocol.md'
 $AgentSource = Join-Path $RepoRoot 'claude\agents\bulk-worker.md'
 $HookSource = Join-Path $RepoRoot 'claude\hooks\delegation-enforcer.py'
+$MuxSource = Join-Path $RepoRoot 'scripts\agents\multiplexer.py'
+$CatalogSource = Join-Path $RepoRoot 'agents\catalog'
+$RoutesSource = Join-Path $RepoRoot 'agents\multiplexer.json'
 $RuleDest = Join-Path $ClaudeHome 'rules\delegation-protocol.md'
 $AgentDest = Join-Path $ClaudeHome 'agents\bulk-worker.md'
 $HookDest = Join-Path $ClaudeHome 'hooks\delegation-enforcer.py'
+$MuxDest = Join-Path $ClaudeHome '.delegation-protocol\multiplexer.py'
+$CatalogDest = Join-Path $ClaudeHome '.delegation-protocol\catalog'
+$RoutesDest = Join-Path $ClaudeHome '.delegation-protocol\multiplexer.json'
 
 & $PythonExe (Join-Path $RepoRoot 'scripts\claude\manage-settings.py') uninstall --claude-home $ClaudeHome --hook-path $HookDest --python $PythonExe
 if ($LASTEXITCODE -ne 0) { throw "Claude settings uninstallation failed with exit code $LASTEXITCODE" }
@@ -30,7 +36,16 @@ if ($LASTEXITCODE -ne 0) { throw "Claude settings uninstallation failed with exi
 Remove-IfOurs $RuleDest $RuleSource
 Remove-IfOurs $AgentDest $AgentSource
 Remove-IfOurs $HookDest $HookSource
+Remove-IfOurs $MuxDest $MuxSource
+Remove-IfOurs $CatalogDest $CatalogSource
+Remove-IfOurs $RoutesDest $RoutesSource
 
 $ProtocolState = Join-Path $ClaudeHome '.delegation-protocol'
-if (Test-Path $ProtocolState) { Remove-Item -LiteralPath $ProtocolState -Recurse -Force }
+foreach ($owned in @('settings.before-first-install.json', 'settings-manifest.json')) {
+    $path = Join-Path $ProtocolState $owned
+    if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+}
+if ((Test-Path $ProtocolState) -and @(Get-ChildItem -LiteralPath $ProtocolState -Force).Count -eq 0) {
+    Remove-Item -LiteralPath $ProtocolState -Force
+}
 Write-Host 'Uninstalled Claude delegation protocol only; unrelated Claude settings and hooks were preserved.'

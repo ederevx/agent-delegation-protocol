@@ -86,11 +86,14 @@ install_global_instructions
 safe_link "$repo_root/codex/agents/bulk-worker.toml" "$codex_home/agents/bulk-worker.toml"
 safe_link "$repo_root/codex/agents/balanced-worker.toml" "$codex_home/agents/balanced-worker.toml"
 safe_link "$repo_root/codex/hooks/delegation-enforcer.py" "$codex_home/hooks/delegation-enforcer.py"
+safe_link "$repo_root/scripts/agents/multiplexer.py" "$state_dir/multiplexer.py"
+safe_link "$repo_root/agents/catalog" "$state_dir/catalog"
+safe_link "$repo_root/agents/multiplexer.json" "$state_dir/multiplexer.json"
 
 "$python_exe" "$repo_root/scripts/codex/manage-hooks.py" install \
   --codex-home "$codex_home" \
   --hook-path "$codex_home/hooks/delegation-enforcer.py" \
   --python "$python_exe"
 
-echo "Installed Codex delegation protocol only: supplementary AGENTS instructions, custom worker tiers, and lifecycle hooks."
+echo "Installed Codex delegation protocol only: supplementary AGENTS instructions, worker tiers, agent multiplexer, and lifecycle hooks."
 echo "Restart Codex, run /hooks, and review/trust the Agent Delegation Protocol hooks before relying on mechanical enforcement."

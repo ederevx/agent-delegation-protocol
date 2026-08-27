@@ -10,11 +10,15 @@ Existing `CLAUDE.md`, `CLAUDE.local.md`, project rules, managed policy, permissi
 
 Preserve the strongest parent model for planning, ambiguity, architecture, difficult debugging, integration, conflict resolution, and final validation. Delegate bounded repetitive or high-volume work to the cheapest suitable supported subagent.
 
-Prefer `bulk-worker` for low-risk mechanical work. Escalate a delegated unit to a stronger model when its reasoning requirements exceed the cheap worker's capability. Do not set or assume a global subagent model that prevents escalation.
+Prefer `bulk-worker` for low-risk mechanical work. It is a lifecycle-visible dispatcher that submits a bounded task to the installed agent multiplexer, then returns the external receipt or executes natively only when the selected native backend requests it. Escalate a delegated unit when the selected backend's declared capabilities are insufficient.
+
+The multiplexer is agent-agnostic. Each backend has one metadata document declaring a common capability interface, availability checks, limits, and either a native runtime binding or a custom command/API adapter. Its top-level `native` boolean distinguishes those bindings. Routes are ordered lists of backend IDs, so changing priority does not require provider logic in this rule or the worker definition. Selection filters by required capabilities and runtime before taking the first available route entry.
+
+Never silently retry an external task on the native model after it launches. Native execution is valid only when the multiplexer selects the matching native backend before launch and returns its documented native-required receipt.
 
 ## Parallel fan-out
 
-When an eligible task contains two or more independent subsystems, services, modules, packages, directories, test groups, data partitions, or other safely separable workstreams, use multiple subagents concurrently when runtime capacity permits it.
+When an eligible task contains two or more independent subsystems, services, modules, packages, directories, test groups, data partitions, or other safely separable workstreams, use multiple subagents concurrently when runtime capacity permits it. For a sequential one-lane backend, those lifecycle-visible dispatchers may overlap while the multiplexer queues their provider calls. An ordered batch is also valid when host-level fan-out is not required.
 
 Do not serialize naturally parallel work through one worker merely for convenience. Give workers non-overlapping primary ownership, explicit boundaries, acceptance criteria, and validation commands. Use worktree/equivalent isolation when parallel write-heavy work would otherwise conflict.
 
@@ -47,7 +51,7 @@ The installed Claude hook may:
 - classify a clear bulk/sharded prompt as delegation-required;
 - inject the delegation/fan-out policy into the current context;
 - deny parent mutation until required delegation evidence exists;
-- require actual overlapping workers for multi-subsystem fan-out;
+- require actual overlapping workers for multi-subsystem fan-out, regardless of whether the selected backend serializes their calls;
 - block turn completion until the required delegation evidence exists;
 - record each worker whose task finished, and block new spawns and turn completion until those workers are dismissed with `TaskStop`;
 - fail open only when the Agent runtime/model/concurrency path is observed to be unavailable.
