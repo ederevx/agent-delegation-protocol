@@ -15,6 +15,13 @@
   },
   "provider": "cheapestinference",
   "model": "deepseek-v4-flash",
+  "inference": {
+    "thinking": {
+      "type": "adaptive"
+    },
+    "effort": "medium",
+    "max_output_tokens": 16384
+  },
   "binding": {
     "argv": ["ci-claude-worker", "--cooperative"],
     "protocol": "cooperative-v1",

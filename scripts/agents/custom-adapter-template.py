@@ -6,7 +6,7 @@ import json
 import os
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 SCHEMA_VERSION = 1
@@ -20,13 +20,37 @@ class AdapterError(Exception):
     """A deterministic input or backend adapter failure."""
 
 
+def unsafe_path_parts(value: str) -> bool:
+    """Reject traversal and Git metadata using native and Windows separators."""
+    parts = (*Path(value).parts, *PureWindowsPath(value).parts)
+    return ".." in parts or any(part.casefold() == ".git" for part in parts)
+
+
+def has_windows_ads_component(value: str) -> bool:
+    """Detect NTFS alternate-data-stream syntax without rejecting POSIX colons."""
+    if os.name != "nt":
+        return False
+    path = PureWindowsPath(value)
+    return any(
+        ":" in part
+        for part in path.parts
+        if part not in (path.anchor, path.drive, path.root)
+    )
+
+
 def relative_path(value: Any, index: int) -> str:
     if not isinstance(value, str) or not value or "\0" in value:
         raise AdapterError(
             f"task {index}: allowed_paths entries must be non-empty strings"
         )
     path = Path(value)
-    if path.is_absolute() or ".." in path.parts or ".git" in path.parts:
+    windows_path = PureWindowsPath(value)
+    if (
+        path.is_absolute()
+        or bool(windows_path.anchor or windows_path.drive or windows_path.root)
+        or unsafe_path_parts(value)
+        or has_windows_ads_component(value)
+    ):
         raise AdapterError(f"task {index}: unsafe allowed path: {value!r}")
     return path.as_posix().rstrip("/") or "."
 
@@ -69,7 +93,7 @@ def validate_task(value: Any, index: int = 0) -> dict[str, Any]:
     repo = task.get("repo")
     if (
         not isinstance(repo, str) or not Path(repo).is_absolute() or "\0" in repo
-        or ".." in Path(repo).parts or ".git" in Path(repo).parts
+        or unsafe_path_parts(repo) or has_windows_ads_component(repo)
     ):
         raise AdapterError(f"task {index}: repo must be an absolute path")
     task["repo"] = str(Path(repo).resolve())
