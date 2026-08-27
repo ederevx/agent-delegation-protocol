@@ -21,6 +21,7 @@ SCHEMA_VERSION = 1
 DEFAULT_MAX_INPUT = 1024 * 1024
 DEFAULT_MAX_OUTPUT = 2 * 1024 * 1024
 ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+INFERENCE_ENV = "AGENT_INFERENCE_CONFIG"
 
 
 class ConfigurationError(Exception):
@@ -53,13 +54,62 @@ def _positive_int(value: Any, where: str) -> int:
     return value
 
 
+def _validate_inference(value: Any, source: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ConfigurationError(f"{source}: inference must be an object")
+    _reject_unknown(value, {"thinking", "effort", "max_output_tokens"},
+                    f"{source}: inference")
+    if not value:
+        raise ConfigurationError(f"{source}: inference must not be empty")
+    effort = value.get("effort")
+    if effort is not None and effort not in ("low", "medium", "high", "xhigh", "max"):
+        raise ConfigurationError(
+            f"{source}: inference.effort must be low, medium, high, xhigh, or max"
+        )
+    maximum = value.get("max_output_tokens")
+    if maximum is not None:
+        _positive_int(maximum, f"{source}: inference.max_output_tokens")
+        if maximum > 131072:
+            raise ConfigurationError(
+                f"{source}: inference.max_output_tokens must not exceed 131072"
+            )
+    thinking = value.get("thinking")
+    if thinking is not None:
+        if not isinstance(thinking, dict):
+            raise ConfigurationError(f"{source}: inference.thinking must be an object")
+        _reject_unknown(thinking, {"type", "budget_tokens"},
+                        f"{source}: inference.thinking")
+        thinking_type = thinking.get("type")
+        if thinking_type not in ("adaptive", "disabled", "enabled"):
+            raise ConfigurationError(
+                f"{source}: inference.thinking.type must be adaptive, disabled, or enabled"
+            )
+        budget = thinking.get("budget_tokens")
+        if thinking_type == "enabled":
+            _positive_int(budget, f"{source}: inference.thinking.budget_tokens")
+            if budget > 131072:
+                raise ConfigurationError(
+                    f"{source}: inference.thinking.budget_tokens must not exceed 131072"
+                )
+            if maximum is not None and budget >= maximum:
+                raise ConfigurationError(
+                    f"{source}: inference.thinking.budget_tokens must be below "
+                    "inference.max_output_tokens"
+                )
+        elif budget is not None:
+            raise ConfigurationError(
+                f"{source}: inference.thinking.budget_tokens requires type='enabled'"
+            )
+    return value
+
+
 def validate_agent(agent: Any, source: str) -> dict[str, Any]:
     if not isinstance(agent, dict):
         raise ConfigurationError(f"{source}: metadata must be a JSON object")
     _reject_unknown(agent, {
         "schema_version", "id", "name", "description", "native",
         "delegation_queue", "provider", "model", "binding", "capabilities",
-        "limits", "queue_policy",
+        "limits", "queue_policy", "inference",
     }, source)
     required = {
         "schema_version", "id", "name", "description", "native",
@@ -81,6 +131,9 @@ def validate_agent(agent: Any, source: str) -> dict[str, Any]:
     for field in ("name", "description", "provider", "model"):
         if not isinstance(agent[field], str) or not agent[field].strip():
             raise ConfigurationError(f"{source}: {field} must be a non-empty string")
+
+    if "inference" in agent:
+        _validate_inference(agent["inference"], source)
 
     binding = agent["binding"]
     if not isinstance(binding, dict):
@@ -463,9 +516,17 @@ def invoke(agent: dict[str, Any], raw_task: bytes,
     try:
         with tempfile.TemporaryFile(dir=scratch) as stdout_file, \
                 tempfile.TemporaryFile(dir=scratch) as stderr_file:
+            child_env = os.environ.copy()
+            inference = agent.get("inference")
+            if inference is None:
+                child_env.pop(INFERENCE_ENV, None)
+            else:
+                child_env[INFERENCE_ENV] = json.dumps(
+                    inference, separators=(",", ":"), sort_keys=True
+                )
             process = subprocess.Popen(
                 argv, stdin=subprocess.PIPE, stdout=stdout_file, stderr=stderr_file,
-                env=os.environ.copy(), start_new_session=(os.name != "nt"),
+                env=child_env, start_new_session=(os.name != "nt"),
             )
             try:
                 process.communicate(
