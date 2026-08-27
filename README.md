@@ -99,6 +99,11 @@ The bundled `bulk` route contains the matching `native-codex-bulk` and
 route usable from both hosts. Optional API-backed bindings can be
 maintained on separate branches without coupling provider details to `main`.
 
+The `ci-agents` branch adds `deepseek-ci` ahead of those native fallbacks. It
+binds the common task interface to the installed `ci-claude-worker` command,
+which runs DeepSeek V4 Flash through CheapestInference and declares its
+single-lane execution limit to the multiplexer.
+
 ## Workers ask before conflicting
 
 Workers run in the parent's working tree and cannot see its uncommitted state, so a worker that reaches for repository-wide state on its own can silently destroy the parent's work. Before acting outside its assigned ownership — repo-wide version-control state, another worker's files, the parent's uncommitted work, dependency changes, or anything that leaves the machine — a worker must ask the parent and wait for an answer. The parent answers; only the parent may take the question to the user.
