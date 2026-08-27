@@ -5,16 +5,25 @@
   "description": "Bounded DeepSeek audit and edit worker exposed by ci-claude-worker.",
   "native": false,
   "delegation_queue": true,
+  "queue_policy": {
+    "strategy": "round_robin",
+    "virtual_slots": 4,
+    "quantum": {
+      "unit": "agent_turn",
+      "value": 4
+    }
+  },
   "provider": "cheapestinference",
   "model": "deepseek-v4-flash",
   "binding": {
-    "argv": ["ci-claude-worker"],
+    "argv": ["ci-claude-worker", "--cooperative"],
+    "protocol": "cooperative-v1",
     "max_input_bytes": 1048576,
     "max_output_bytes": 2097152,
     "timeout_seconds": 7200
   },
   "capabilities": {
-    "functions": ["audit", "edit", "batch", "isolated-patch"],
+    "functions": ["audit", "edit", "batch", "resumable-batch", "isolated-patch"],
     "runtimes": ["codex", "claude"],
     "platforms": ["linux", "darwin"],
     "modes": ["read", "edit"],

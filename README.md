@@ -100,11 +100,13 @@ the only bulk backend. It binds the common task interface to the installed
 `ci-claude-worker` command, which runs DeepSeek V4 Flash through
 CheapestInference and declares its single-lane execution limit.
 
-Delegation queue is enabled, so one lifecycle-visible Codex or Claude host
-dispatcher submits an ordered multi-task manifest to that single stream. Those
-host workers remain installed only to preserve lifecycle enforcement; they are
-not route members or native fallbacks. If DeepSeek is unavailable, the queue
-returns `no_backend` instead of replaying work natively.
+DeepSeek advertises four virtual slots with a four-turn cooperative quantum.
+Codex or Claude can therefore launch as many independent lifecycle-visible
+dispatchers as task count and host capacity permit. Their provider calls are
+fairly interleaved on the one physical stream, and each dispatcher returns its
+own receipt. Those host workers preserve lifecycle enforcement; they are not
+route members or native fallbacks. If DeepSeek is unavailable, dispatch returns
+`no_backend` instead of replaying work natively.
 
 ## Workers ask before conflicting
 
