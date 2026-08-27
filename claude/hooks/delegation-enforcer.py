@@ -15,6 +15,7 @@ as a semantic policy layer for cases that cannot be inferred reliably from a sin
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -24,7 +25,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-PROTOCOL_VERSION = 5
+PROTOCOL_VERSION = 6
 
 BULK_WORDS = (
     "bulk", "batch", "high-volume", "high volume", "many files", "many modules",
@@ -94,6 +95,37 @@ SPAWN_UNAVAILABLE = re.compile(
 def claude_home() -> Path:
     configured = os.environ.get("CLAUDE_CONFIG_DIR")
     return Path(configured).expanduser() if configured else Path.home() / ".claude"
+
+
+def select_delegation_queue(runtime: str) -> str | None:
+    """Return the installed queue backend id, failing closed to normal fan-out."""
+    installed = claude_home() / ".delegation-protocol"
+    module_path = installed / "multiplexer.py"
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "_installed_delegation_multiplexer", module_path
+        )
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        selected = module.select_queue_backend(
+            installed / "catalog",
+            installed / "multiplexer.json",
+            "bulk",
+            runtime,
+            platform=None,
+        )
+        if not isinstance(selected, dict):
+            return None
+        backend_id = selected.get("id")
+        if not isinstance(backend_id, str) or not re.fullmatch(
+            r"[a-z0-9][a-z0-9._-]{0,63}", backend_id
+        ):
+            return None
+        return backend_id
+    except Exception:
+        return None
 
 
 def state_root() -> Path:
@@ -364,7 +396,8 @@ def policy_context(classification: dict[str, Any]) -> str:
         "integration, conflict resolution, and final validation. For bounded repetitive or high-volume work, "
         "delegate to the cheapest suitable supported subagent. Prefer `bulk-worker` (Haiku) for low-risk "
         "mechanical work; escalate individual units when stronger reasoning is needed. For independent "
-        "subsystems/shards, fan out multiple agents concurrently rather than serializing naturally parallel "
+        "subsystems/shards, fan out multiple agents concurrently unless this hook explicitly selects delegation "
+        "queue. Do not serialize naturally parallel "
         "work. Give workers non-overlapping scope, acceptance criteria, validation commands, and require "
         "concise result reports. The parent remains the single integration authority. Agent teams may be used "
         "when enabled and beneficial, but ordinary subagents remain the required baseline."
@@ -372,6 +405,15 @@ def policy_context(classification: dict[str, Any]) -> str:
     if classification.get("requires_delegation"):
         minimum = int(classification.get("min_agents", 1))
         reasons = ", ".join(classification.get("classification_reasons", [])) or "bulk task"
+        if classification.get("delegation_queue"):
+            return (
+                base
+                + f"\nHOOK CLASSIFICATION: this prompt is delegation-eligible ({reasons}) and delegation queue "
+                f"selected backend `{classification['delegation_queue_backend']}`. Before parent mutation, spawn "
+                "one lifecycle-visible `bulk-worker`. Give it every independent unit as one ordered batch and "
+                "explicitly instruct it to submit the batch through multiplexer `queue`; host-level worker overlap "
+                "is not required. A queue failure must be reported and must never be replayed on a native backend."
+            )
         overlap = " Workers must overlap in time." if minimum > 1 else ""
         return (
             base
@@ -405,6 +447,14 @@ def handle_prompt(event: dict[str, Any]) -> None:
     session_id = event.get("session_id")
     previous = load_state(session_id)
     classification = classify(str(event.get("prompt") or ""), previous)
+    classification["delegation_queue"] = False
+    classification["delegation_queue_backend"] = None
+    if classification.get("requires_multi"):
+        backend_id = select_delegation_queue("claude")
+        if backend_id:
+            classification["delegation_queue"] = True
+            classification["delegation_queue_backend"] = backend_id
+            classification["min_agents"] = 1
     reset_evidence(session_id)
     save_state(
         session_id,
@@ -499,6 +549,11 @@ def unmet_reason(session_id: Any, state: dict[str, Any]) -> str | None:
     if minimum <= 1:
         if delegated:
             return None
+        if state.get("delegation_queue"):
+            return (
+                "Delegation queue requires one lifecycle-visible `bulk-worker` before parent implementation. "
+                "Give it all independent units as one ordered batch for multiplexer `queue`."
+            )
         return (
             "Delegation protocol requires a subagent for this bulk/high-volume turn, but none has been started. "
             "Spawn a bounded worker (prefer `bulk-worker` for mechanical work) before parent implementation."
