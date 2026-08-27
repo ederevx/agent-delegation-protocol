@@ -108,6 +108,34 @@ class MultiplexerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 64)
         self.assertIn("unknown fields: surprise", json.loads(result.stdout)["error"])
 
+    def test_inference_metadata_is_validated(self) -> None:
+        valid = metadata("valid", [sys.executable, "unused.py"])
+        valid["inference"] = {
+            "thinking": {"type": "adaptive"},
+            "effort": "medium",
+            "max_output_tokens": 16384,
+        }
+        self.write_agent(valid)
+        self.write_routes(["valid"])
+        self.assertEqual(self.run_mux("validate").returncode, 0)
+
+        invalid_values = (
+            {"effort": "extreme"},
+            {"max_output_tokens": 0},
+            {"max_output_tokens": 131073},
+            {"thinking": {"type": "enabled"}},
+            {"thinking": {"type": "enabled", "budget_tokens": 4096},
+             "max_output_tokens": 4096},
+            {"thinking": {"type": "adaptive", "budget_tokens": 1024}},
+        )
+        for inference in invalid_values:
+            changed = json.loads(json.dumps(valid))
+            changed["inference"] = inference
+            self.write_agent(changed)
+            result = self.run_mux("validate")
+            self.assertEqual(result.returncode, 64, inference)
+            self.assertIn("inference", result.stdout)
+
     def test_queue_metadata_contract_is_enforced(self) -> None:
         invalid = metadata("invalid", native=True, delegation_queue=True)
         self.write_agent(invalid)
@@ -164,16 +192,24 @@ class MultiplexerTests(unittest.TestCase):
 
     def test_command_execution_passes_json_and_parses_receipt(self) -> None:
         stub = self.make_stub("stub.py", """
-import json, sys
+import json, os, sys
 task = json.load(sys.stdin)
-print(json.dumps({"schema_version": 1, "classification": "success", "seen": task}))
+print(json.dumps({"schema_version": 1, "classification": "success", "seen": task,
+                  "inference": json.loads(os.environ["AGENT_INFERENCE_CONFIG"])}))
 """)
-        self.write_agent(metadata("custom", [sys.executable, str(stub)]))
+        agent = metadata("custom", [sys.executable, str(stub)])
+        agent["inference"] = {
+            "thinking": {"type": "adaptive"}, "effort": "medium",
+            "max_output_tokens": 16384,
+        }
+        self.write_agent(agent)
         self.write_routes(["custom"])
         task = {"prompt": "audit", "mode": "read"}
         result = self.run_mux("run", "--route", "bulk", "--runtime", "codex", task=task)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout)["seen"], task)
+        receipt = json.loads(result.stdout)
+        self.assertEqual(receipt["seen"], task)
+        self.assertEqual(receipt["inference"], agent["inference"])
 
     def test_backend_is_not_replayed_after_launch(self) -> None:
         marker = self.root / "second-ran"
@@ -402,10 +438,12 @@ print(json.dumps({{"classification": "success"}}))
     def cooperative_stub(self, *, delay: float = 0.0) -> Path:
         events = self.root / "cooperative-events"
         return self.make_stub("cooperative.py", f"""
-import json, sys, time
+import json, os, sys, time
 from pathlib import Path
 value = json.load(sys.stdin)
 assert value["adapter_protocol"] == "cooperative-v1"
+if "AGENT_INFERENCE_CONFIG" in os.environ:
+    assert json.loads(os.environ["AGENT_INFERENCE_CONFIG"])["effort"] == "medium"
 operation = value["operation"]
 if operation == "start":
     name = value["task"]["id"]
@@ -431,8 +469,9 @@ else:
 
     def test_cooperative_queue_interleaves_tasks(self) -> None:
         stub = self.cooperative_stub()
-        self.write_agent(metadata("cooperative", [sys.executable, str(stub)],
-                                  cooperative=True))
+        agent = metadata("cooperative", [sys.executable, str(stub)], cooperative=True)
+        agent["inference"] = {"effort": "medium", "max_output_tokens": 16384}
+        self.write_agent(agent)
         self.write_routes(["cooperative"])
         result = self.run_mux("queue", "--route", "bulk", "--runtime", "codex",
                               task={"tasks": [{"id": "A"}, {"id": "B"}]})

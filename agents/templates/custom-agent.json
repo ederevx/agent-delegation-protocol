@@ -7,6 +7,13 @@
   "delegation_queue": true,
   "provider": "replace-with-provider",
   "model": "replace-with-model",
+  "inference": {
+    "thinking": {
+      "type": "adaptive"
+    },
+    "effort": "medium",
+    "max_output_tokens": 16384
+  },
   "binding": {
     "argv": ["python3", "/absolute/path/to/custom-adapter.py"],
     "max_input_bytes": 1048576,
