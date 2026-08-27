@@ -62,7 +62,9 @@ cross-process ticket queue and releases the provider lane after every slice,
 so several lifecycle-visible dispatchers make interleaved progress without
 ever issuing concurrent requests to the one-lane provider. Dead-process
 tickets are pruned. Virtual slots advertise host fan-out capacity, not extra
-provider throughput.
+provider throughput. A yielded adapter may include a bounded
+`retry_after_seconds` delay; this lets temporary physical-lane contention
+re-enter the fair queue without consuming an agent-turn budget or spinning.
 
 ### Add a custom API
 

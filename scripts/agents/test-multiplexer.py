@@ -529,6 +529,27 @@ else:
         self.assertEqual(job["classification"], "adapter_error")
         self.assertEqual(job["adapter_exit_code"], 7)
 
+    def test_cooperative_yield_honors_bounded_retry_delay(self) -> None:
+        stub = self.make_stub("retry-yield.py", """
+import json, sys
+value = json.load(sys.stdin)
+if value["operation"] == "start":
+    print(json.dumps({"state": "ready", "token": "A:0"}))
+elif value["token"] == "A:0":
+    print(json.dumps({"state": "yielded", "token": "A:1",
+                      "retry_after_seconds": 0.05}))
+else:
+    print(json.dumps({"state": "complete", "exit_code": 0}))
+""")
+        self.write_agent(metadata("cooperative", [sys.executable, str(stub)],
+                                  cooperative=True))
+        self.write_routes(["cooperative"])
+        started = time.monotonic()
+        result = self.run_mux("run", "--route", "bulk", "--runtime", "codex",
+                              task={"id": "A"})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertGreaterEqual(time.monotonic() - started, 0.045)
+
     def test_cooperative_launch_failure_returns_terminal_receipt(self) -> None:
         broken = self.make_stub("bad-executable", "not an executable\n")
         broken.chmod(0o700)
