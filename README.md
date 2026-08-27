@@ -66,6 +66,14 @@ provider throughput. A yielded adapter may include a bounded
 `retry_after_seconds` delay; this lets temporary physical-lane contention
 re-enter the fair queue without consuming an agent-turn budget or spinning.
 
+A step may instead return `permission_required` with its retained token and
+exact request. The multiplexer returns exit 9 without cancelling that state.
+After the parent decides, pass the backend, token, and matching
+`permission_resolution` object to `multiplexer.py resume` on stdin. The resume
+operation accepts `allow`, `deny`, or a bounded parent-supplied `handled`
+result, then continues normal cooperative scheduling. A later exceptional
+operation may pause the same task again.
+
 ### Add a custom API
 
 1. Copy [`agents/templates/custom-agent.json`](agents/templates/custom-agent.json) into `agents/catalog/` and fill in the backend identity, `native` and `delegation_queue` values, capabilities, availability, limits, and adapter binding.
