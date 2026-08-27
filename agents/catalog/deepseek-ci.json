@@ -4,7 +4,7 @@
   "name": "DeepSeek via ci-claude",
   "description": "Bounded DeepSeek audit and edit worker exposed by ci-claude-worker.",
   "native": false,
-  "delegation_queue": false,
+  "delegation_queue": true,
   "provider": "cheapestinference",
   "model": "deepseek-v4-flash",
   "binding": {
