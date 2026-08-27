@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,47 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HOOK = REPO_ROOT / "claude" / "hooks" / "delegation-enforcer.py"
 SETTINGS_MANAGER = REPO_ROOT / "scripts" / "claude" / "manage-settings.py"
+MULTIPLEXER = REPO_ROOT / "scripts" / "agents" / "multiplexer.py"
+
+
+def install_queue_fixture(home: Path, runtime: str, condition: str) -> None:
+    installed = home / ".delegation-protocol"
+    catalog = installed / "catalog"
+    catalog.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(MULTIPLEXER, installed / "multiplexer.py")
+    executable = sys.executable if condition != "unavailable" else "missing-queue-adapter-for-test"
+    metadata: dict[str, Any] = {
+        "schema_version": 1,
+        "id": "test-queue",
+        "name": "Test queue",
+        "description": "Isolated single-stream queue fixture.",
+        "native": False,
+        "delegation_queue": True,
+        "provider": "test",
+        "model": "test",
+        "binding": {
+            "argv": [executable, "-c", "pass"],
+            "max_input_bytes": 1048576,
+            "max_output_bytes": 2097152,
+            "timeout_seconds": 30,
+        },
+        "capabilities": {
+            "functions": ["audit", "edit", "batch"],
+            "runtimes": [runtime],
+            "platforms": ["linux", "darwin", "windows"],
+            "modes": ["read", "edit"],
+            "workspaces": ["shared", "isolated"],
+            "deliveries": ["json-receipt"],
+        },
+        "limits": {"max_concurrency": 1},
+    }
+    if condition == "invalid":
+        metadata["limits"] = {"max_concurrency": 2}
+    (catalog / "test-queue.json").write_text(json.dumps(metadata), encoding="utf-8")
+    members = ["missing-backend"] if condition == "misconfigured" else ["test-queue"]
+    (installed / "multiplexer.json").write_text(json.dumps({
+        "schema_version": 1, "routes": {"bulk": members},
+    }), encoding="utf-8")
 
 
 def run(cmd: list[str], *, env: dict[str, str] | None = None, stdin: dict[str, Any] | None = None) -> subprocess.CompletedProcess[str]:
@@ -202,6 +244,39 @@ def test_multi_agent_overlap_gate(home: Path) -> None:
     })
     stopped = call_hook(home, "stop", {"session_id": session})
     require(stopped is None, "completed fan-out task was blocked from stopping")
+
+
+def test_delegation_queue(home: Path) -> None:
+    install_queue_fixture(home, "claude", "valid")
+    session = "delegation-queue"
+    prompt = call_hook(home, "prompt", {
+        "session_id": session,
+        "prompt": "Implement independent frontend and backend subsystems, plus their separate tests.",
+    })
+    context = prompt["hookSpecificOutput"]["additionalContext"]
+    require("delegation queue selected backend `test-queue`" in context, "queue selection was not injected")
+    state = json.loads((home / ".delegation-protocol" / "sessions" / f"{session}.json").read_text())
+    require(state["requires_multi"] is True, "queue selection cleared the multi-workstream classification")
+    require(state["delegation_queue"] is True and state["delegation_queue_backend"] == "test-queue", "queue state was not recorded")
+    require(state["min_agents"] == 1, "queue selection did not reduce lifecycle-visible workers to one")
+    call_hook(home, "subagent-start", {"session_id": session, "agent_id": "queue-dispatcher"})
+    allowed = call_hook(home, "pretool", {"session_id": session, "tool_name": "Write", "tool_input": {"file_path": "integration.txt"}})
+    require(allowed is None, "valid queue did not unlock after one dispatcher")
+
+
+def test_queue_fallbacks(root: Path) -> None:
+    for condition in ("invalid", "unavailable", "misconfigured"):
+        home = root / condition
+        install_queue_fixture(home, "claude", condition)
+        session = f"queue-{condition}"
+        prompt = call_hook(home, "prompt", {
+            "session_id": session,
+            "prompt": "Implement independent frontend and backend subsystems, plus their separate tests.",
+        })
+        require("delegation queue selected" not in prompt["hookSpecificOutput"]["additionalContext"], f"{condition} queue was selected")
+        call_hook(home, "subagent-start", {"session_id": session, "agent_id": "only-worker"})
+        denied = call_hook(home, "pretool", {"session_id": session, "tool_name": "Write", "tool_input": {"file_path": "integration.txt"}})
+        require(denied is not None, f"{condition} queue bypassed overlap enforcement")
 
 
 def test_explicit_opt_out(home: Path) -> None:
@@ -452,6 +527,8 @@ def main() -> int:
         test_settings_merge(root / "settings-home")
         test_single_agent_gate(root / "single-home")
         test_multi_agent_overlap_gate(root / "multi-home")
+        test_delegation_queue(root / "queue-home")
+        test_queue_fallbacks(root / "queue-fallbacks")
         test_explicit_opt_out(root / "opt-out-home")
         test_pretool_matcher_covers_dismissal(root / "matcher-home")
         test_dismissal_lifecycle(root / "dismissal-home")

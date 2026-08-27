@@ -2,6 +2,7 @@
 """Codex delegation protocol enforcement hook."""
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -11,7 +12,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 CONTINUATION_PREFIX = "DELEGATION_PROTOCOL_CONTINUE:"
 
 BULK_WORDS = (
@@ -72,6 +73,37 @@ DISMISSAL_TOOL = re.compile(
 
 def codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
+
+
+def select_delegation_queue(runtime: str) -> str | None:
+    """Return the installed queue backend id, failing closed to normal fan-out."""
+    installed = codex_home() / ".delegation-protocol"
+    module_path = installed / "multiplexer.py"
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "_installed_delegation_multiplexer", module_path
+        )
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        selected = module.select_queue_backend(
+            installed / "catalog",
+            installed / "multiplexer.json",
+            "bulk",
+            runtime,
+            platform=None,
+        )
+        if not isinstance(selected, dict):
+            return None
+        backend_id = selected.get("id")
+        if not isinstance(backend_id, str) or not re.fullmatch(
+            r"[a-z0-9][a-z0-9._-]{0,63}", backend_id
+        ):
+            return None
+        return backend_id
+    except Exception:
+        return None
 
 
 def state_root() -> Path:
@@ -288,14 +320,22 @@ def policy_context(c: dict[str, Any]) -> str:
         "DELEGATION PROTOCOL (hook-enforced): preserve the frontier parent for planning, ambiguity, difficult reasoning, "
         "integration, conflict resolution, and final validation. Prefer the installed `bulk_worker` custom agent "
         "(GPT-5.6 Luna) for low-risk repetitive/high-volume work and `balanced_worker` (GPT-5.6 Terra) when a delegated "
-        "unit needs more reasoning. For independent subsystems/shards, launch multiple workers concurrently rather than "
-        "serializing naturally parallel work. Give workers non-overlapping scope, acceptance criteria, validation commands, "
+        "unit needs more reasoning. For independent subsystems/shards, launch multiple workers concurrently unless this "
+        "hook explicitly selects delegation queue. Give workers non-overlapping scope, acceptance criteria, validation commands, "
         "and require concise evidence reports. The parent is the single integration authority."
     )
     if not c.get("requires_delegation"):
         return base_text
     reasons = ", ".join(c.get("classification_reasons", [])) or "bulk task"
     minimum = int(c.get("min_agents", 1))
+    if c.get("delegation_queue"):
+        return base_text + (
+            f"\nHOOK CLASSIFICATION: this turn is delegation-eligible ({reasons}) and delegation queue selected "
+            f"backend `{c['delegation_queue_backend']}`. Before parent mutation, start one lifecycle-visible "
+            "`bulk_worker` dispatcher. Give it every independent unit as one ordered batch and explicitly instruct "
+            "it to submit the batch through multiplexer `queue`; host-level worker overlap is not required. A queue "
+            "failure must be reported and must never be replayed on a native backend."
+        )
     overlap = " The workers must overlap in time." if minimum > 1 else ""
     return base_text + (
         f"\nHOOK CLASSIFICATION: this turn is delegation-eligible ({reasons}). Before parent mutation, start at least "
@@ -325,6 +365,14 @@ def handle_prompt(event: dict[str, Any]) -> None:
     session = event.get("session_id")
     previous = load_state(session)
     c = classify(str(event.get("prompt") or ""), previous)
+    c["delegation_queue"] = False
+    c["delegation_queue_backend"] = None
+    if c.get("requires_multi"):
+        backend_id = select_delegation_queue("codex")
+        if backend_id:
+            c["delegation_queue"] = True
+            c["delegation_queue_backend"] = backend_id
+            c["min_agents"] = 1
     if not c.get("carry_forward"):
         reset_evidence(session)
     save_state(session, {
@@ -396,7 +444,14 @@ def unmet(session: Any, state: dict[str, Any]) -> str | None:
     delegated = marker(session, "delegated").exists()
     fanout = marker(session, "fanout").exists()
     if minimum <= 1:
-        return None if delegated else (
+        if delegated:
+            return None
+        if state.get("delegation_queue"):
+            return (
+                "Delegation queue requires one lifecycle-visible `bulk_worker` dispatcher before parent implementation. "
+                "Give it all independent units as one ordered batch for multiplexer `queue`."
+            )
+        return (
             "Delegation protocol requires a bounded subagent for this bulk/high-volume turn. Start `bulk_worker` when suitable "
             "or another supported worker before parent implementation."
         )

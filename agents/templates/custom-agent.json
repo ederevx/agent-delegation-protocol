@@ -4,6 +4,7 @@
   "name": "Replace with agent name",
   "description": "Replace with a concise description of the bounded worker.",
   "native": false,
+  "delegation_queue": false,
   "provider": "replace-with-provider",
   "model": "replace-with-model",
   "binding": {

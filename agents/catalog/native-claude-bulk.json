@@ -4,6 +4,7 @@
   "name": "Native Claude bulk worker",
   "description": "Claude-native bounded bulk worker fallback.",
   "native": true,
+  "delegation_queue": false,
   "provider": "anthropic",
   "model": "haiku",
   "binding": {
