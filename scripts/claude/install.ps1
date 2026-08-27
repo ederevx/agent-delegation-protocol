@@ -22,15 +22,24 @@ function New-SafeSymlink([string]$Source, [string]$Destination) {
 $RuleSource = Join-Path $RepoRoot 'claude\rules\delegation-protocol.md'
 $AgentSource = Join-Path $RepoRoot 'claude\agents\bulk-worker.md'
 $HookSource = Join-Path $RepoRoot 'claude\hooks\delegation-enforcer.py'
+$MuxSource = Join-Path $RepoRoot 'scripts\agents\multiplexer.py'
+$CatalogSource = Join-Path $RepoRoot 'agents\catalog'
+$RoutesSource = Join-Path $RepoRoot 'agents\multiplexer.json'
 $RuleDest = Join-Path $ClaudeHome 'rules\delegation-protocol.md'
 $AgentDest = Join-Path $ClaudeHome 'agents\bulk-worker.md'
 $HookDest = Join-Path $ClaudeHome 'hooks\delegation-enforcer.py'
+$MuxDest = Join-Path $ClaudeHome '.delegation-protocol\multiplexer.py'
+$CatalogDest = Join-Path $ClaudeHome '.delegation-protocol\catalog'
+$RoutesDest = Join-Path $ClaudeHome '.delegation-protocol\multiplexer.json'
 
 New-SafeSymlink $RuleSource $RuleDest
 New-SafeSymlink $AgentSource $AgentDest
 New-SafeSymlink $HookSource $HookDest
+New-SafeSymlink $MuxSource $MuxDest
+New-SafeSymlink $CatalogSource $CatalogDest
+New-SafeSymlink $RoutesSource $RoutesDest
 
 & $PythonExe (Join-Path $RepoRoot 'scripts\claude\manage-settings.py') install --claude-home $ClaudeHome --hook-path $HookDest --python $PythonExe
 if ($LASTEXITCODE -ne 0) { throw "Claude settings installation failed with exit code $LASTEXITCODE" }
 
-Write-Host 'Installed Claude delegation protocol only: hooks, settings, rule, and bulk-worker. Restart Claude Code sessions.'
+Write-Host 'Installed Claude delegation protocol only: hooks, settings, rule, bulk-worker, and agent multiplexer. Restart Claude Code sessions.'

@@ -68,16 +68,25 @@ if (-not $InstructionsReady) {
 $BulkSource = Join-Path $RepoRoot 'codex\agents\bulk-worker.toml'
 $BalancedSource = Join-Path $RepoRoot 'codex\agents\balanced-worker.toml'
 $HookSource = Join-Path $RepoRoot 'codex\hooks\delegation-enforcer.py'
+$MuxSource = Join-Path $RepoRoot 'scripts\agents\multiplexer.py'
+$CatalogSource = Join-Path $RepoRoot 'agents\catalog'
+$RoutesSource = Join-Path $RepoRoot 'agents\multiplexer.json'
 $BulkDest = Join-Path $CodexHome 'agents\bulk-worker.toml'
 $BalancedDest = Join-Path $CodexHome 'agents\balanced-worker.toml'
 $HookDest = Join-Path $CodexHome 'hooks\delegation-enforcer.py'
+$MuxDest = Join-Path $StateDir 'multiplexer.py'
+$CatalogDest = Join-Path $StateDir 'catalog'
+$RoutesDest = Join-Path $StateDir 'multiplexer.json'
 
 New-SafeSymlink $BulkSource $BulkDest
 New-SafeSymlink $BalancedSource $BalancedDest
 New-SafeSymlink $HookSource $HookDest
+New-SafeSymlink $MuxSource $MuxDest
+New-SafeSymlink $CatalogSource $CatalogDest
+New-SafeSymlink $RoutesSource $RoutesDest
 
 & $PythonExe (Join-Path $RepoRoot 'scripts\codex\manage-hooks.py') install --codex-home $CodexHome --hook-path $HookDest --python $PythonExe
 if ($LASTEXITCODE -ne 0) { throw "Codex hook installation failed with exit code $LASTEXITCODE" }
 
-Write-Host 'Installed Codex delegation protocol only: supplementary AGENTS instructions, custom worker tiers, and lifecycle hooks.'
+Write-Host 'Installed Codex delegation protocol only: supplementary AGENTS instructions, worker tiers, agent multiplexer, and lifecycle hooks.'
 Write-Host 'Restart Codex, run /hooks, and review/trust the Agent Delegation Protocol hooks before relying on mechanical enforcement.'

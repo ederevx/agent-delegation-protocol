@@ -30,6 +30,9 @@ remove_if_ours() {
 remove_if_ours "$codex_home/agents/bulk-worker.toml" "$repo_root/codex/agents/bulk-worker.toml"
 remove_if_ours "$codex_home/agents/balanced-worker.toml" "$repo_root/codex/agents/balanced-worker.toml"
 remove_if_ours "$codex_home/hooks/delegation-enforcer.py" "$repo_root/codex/hooks/delegation-enforcer.py"
+remove_if_ours "$state_dir/multiplexer.py" "$repo_root/scripts/agents/multiplexer.py"
+remove_if_ours "$state_dir/catalog" "$repo_root/agents/catalog"
+remove_if_ours "$state_dir/multiplexer.json" "$repo_root/agents/multiplexer.json"
 
 if [[ -f "$state" ]]; then
   mode="$(awk -F= '$1=="mode"{print $2}' "$state")"
@@ -44,5 +47,12 @@ if [[ -f "$state" ]]; then
   fi
 fi
 
-rm -rf "$state_dir" "$repo_root/.runtime/codex"
+rm -f "$state_dir/state" \
+  "$state_dir/original-active-global.md" \
+  "$state_dir/hooks.before-first-install.json" \
+  "$state_dir/hooks-manifest.json"
+rm -f "$repo_root/.runtime/codex/AGENTS.composed.md"
+rmdir "$state_dir" 2>/dev/null || true
+rmdir "$repo_root/.runtime/codex" 2>/dev/null || true
+rmdir "$repo_root/.runtime" 2>/dev/null || true
 echo "Uninstalled Codex delegation protocol only; unrelated hooks/configuration were preserved and the prior Codex override was restored when applicable."

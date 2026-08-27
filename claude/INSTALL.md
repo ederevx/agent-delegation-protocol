@@ -20,7 +20,7 @@ Windows PowerShell:
 .\scripts\claude\install.ps1
 ```
 
-Python 3 is required because the enforcement hook is a small local Python program.
+Python 3 is required for the local enforcement hook and agent multiplexer.
 
 ## Installed symlinks
 
@@ -35,9 +35,31 @@ The installer refuses to overwrite an unrelated file or symlink at any destinati
 
 ~/.claude/hooks/delegation-enforcer.py
   -> <clone>/claude/hooks/delegation-enforcer.py
+
+~/.claude/.delegation-protocol/multiplexer.py
+  -> <clone>/scripts/agents/multiplexer.py
+
+~/.claude/.delegation-protocol/catalog
+  -> <clone>/agents/catalog
+
+~/.claude/.delegation-protocol/multiplexer.json
+  -> <clone>/agents/multiplexer.json
 ```
 
 The Markdown rule is a semantic/supporting policy layer. Mechanical enforcement is performed by hooks and settings.
+
+## Agent multiplexer
+
+The bulk worker is a lifecycle-visible dispatcher. It submits one bounded common JSON task or ordered batch with:
+
+```bash
+python3 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.delegation-protocol/multiplexer.py" \
+  run --route bulk --runtime claude
+```
+
+The shared catalog gives every backend the same capability interface and a top-level `native` boolean, followed by either a native Claude binding or a custom command/API adapter. The route is only an ordered list of backend IDs, so priority can be rearranged without putting provider-specific logic in the Claude worker.
+
+A one-lane API is protected by the multiplexer lock, so overlapping dispatchers queue and run sequentially. The dispatcher executes natively only for a valid `native_required` receipt with exit status 69 selecting `native-claude-bulk`. An external launch is never silently retried with Haiku or another provider.
 
 ## Hooks installed into settings.json
 
@@ -52,7 +74,7 @@ The hook participates in these lifecycle events:
 - `PreToolUse` for core mutation tools, `Agent`, and `TaskStop` — denies parent mutation on an eligible bulk task until required delegation has occurred, denies new worker spawns while finished workers are still held, and records each `TaskStop` as a dismissal.
 - `Stop` — blocks the parent from ending an eligible turn until required delegation has occurred and every finished worker has been dismissed.
 
-For multi-subsystem work, enforcement requires evidence that at least two subagents actually overlapped in time, not merely that two workers ran sequentially. Atomic per-agent marker files avoid races between simultaneous lifecycle hook processes.
+For multi-subsystem work, enforcement requires overlapping lifecycle-visible subagents. A sequential one-lane backend queues their provider calls. Atomic per-agent marker files avoid races between simultaneous lifecycle hook processes.
 
 ## Settings configured
 
@@ -70,7 +92,7 @@ When the following environment entries are absent from `settings.json`, the inst
 
 Existing values are preserved rather than overwritten; the installer warns when an existing value conflicts with the protocol default.
 
-The installer deliberately does **not** set `CLAUDE_CODE_SUBAGENT_MODEL`. That variable outranks per-invocation and agent-definition model selection, so globally pinning it to Haiku would prevent escalation. Instead, `bulk-worker.md` specifies `model: haiku`, while the parent remains free to choose a stronger model when necessary.
+The installer deliberately does **not** set `CLAUDE_CODE_SUBAGENT_MODEL`. That variable outranks per-invocation and agent-definition model selection, so globally pinning it to Haiku would prevent escalation. Instead, `bulk-worker.md` specifies `model: haiku` for the native binding, while the multiplexer may select an external backend and the parent remains free to choose a stronger model when necessary.
 
 Agent teams are optional. The mandatory baseline uses ordinary subagents because they are broadly available and directly observable through `SubagentStart`/`SubagentStop`. Teams may be used for complex independent subsystems that benefit from peer-to-peer coordination.
 
@@ -111,7 +133,7 @@ Then start a fresh Claude Code session and confirm:
 1. `~/.claude/settings.json` contains the protocol hook handlers alongside existing hooks.
 2. `bulk-worker` is visible as a custom subagent.
 3. A clearly bulk request triggers a required subagent before parent mutation.
-4. A request spanning independent frontend/backend/test work triggers concurrent fan-out rather than a single serialized worker.
+4. A request spanning independent frontend/backend/test work triggers concurrent lifecycle-visible fan-out while a one-lane backend remains serialized.
 5. `/context` still shows all pre-existing applicable instructions plus the supplementary rule.
 
 ## Uninstall
@@ -128,4 +150,4 @@ Windows PowerShell:
 .\scripts\claude\uninstall.ps1
 ```
 
-This does not uninstall or modify Codex.
+Uninstall removes only protocol-owned links and known state files; unrelated files inside `.delegation-protocol` are preserved. It does not uninstall or modify Codex.

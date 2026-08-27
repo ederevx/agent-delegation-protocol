@@ -22,9 +22,15 @@ function Remove-IfOurs([string]$Destination, [string]$Expected) {
 $BulkSource = Join-Path $RepoRoot 'codex\agents\bulk-worker.toml'
 $BalancedSource = Join-Path $RepoRoot 'codex\agents\balanced-worker.toml'
 $HookSource = Join-Path $RepoRoot 'codex\hooks\delegation-enforcer.py'
+$MuxSource = Join-Path $RepoRoot 'scripts\agents\multiplexer.py'
+$CatalogSource = Join-Path $RepoRoot 'agents\catalog'
+$RoutesSource = Join-Path $RepoRoot 'agents\multiplexer.json'
 $BulkDest = Join-Path $CodexHome 'agents\bulk-worker.toml'
 $BalancedDest = Join-Path $CodexHome 'agents\balanced-worker.toml'
 $HookDest = Join-Path $CodexHome 'hooks\delegation-enforcer.py'
+$MuxDest = Join-Path $StateDir 'multiplexer.py'
+$CatalogDest = Join-Path $StateDir 'catalog'
+$RoutesDest = Join-Path $StateDir 'multiplexer.json'
 
 & $PythonExe (Join-Path $RepoRoot 'scripts\codex\manage-hooks.py') uninstall --codex-home $CodexHome --hook-path $HookDest --python $PythonExe
 if ($LASTEXITCODE -ne 0) { throw "Codex hook uninstallation failed with exit code $LASTEXITCODE" }
@@ -32,6 +38,9 @@ if ($LASTEXITCODE -ne 0) { throw "Codex hook uninstallation failed with exit cod
 Remove-IfOurs $BulkDest $BulkSource
 Remove-IfOurs $BalancedDest $BalancedSource
 Remove-IfOurs $HookDest $HookSource
+Remove-IfOurs $MuxDest $MuxSource
+Remove-IfOurs $CatalogDest $CatalogSource
+Remove-IfOurs $RoutesDest $RoutesSource
 
 if (Test-Path $State) {
     $lines = Get-Content $State
@@ -48,7 +57,23 @@ if (Test-Path $State) {
     }
 }
 
-if (Test-Path $StateDir) { Remove-Item -LiteralPath $StateDir -Recurse -Force }
+foreach ($owned in @(
+    'state',
+    'original-active-global.md',
+    'hooks.before-first-install.json',
+    'hooks-manifest.json'
+)) {
+    $path = Join-Path $StateDir $owned
+    if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+}
+if ((Test-Path $StateDir) -and @(Get-ChildItem -LiteralPath $StateDir -Force).Count -eq 0) {
+    Remove-Item -LiteralPath $StateDir -Force
+}
 $Runtime = Join-Path $RepoRoot '.runtime\codex'
-if (Test-Path $Runtime) { Remove-Item -LiteralPath $Runtime -Recurse -Force }
+if (Test-Path (Join-Path $Runtime 'AGENTS.composed.md')) {
+    Remove-Item -LiteralPath (Join-Path $Runtime 'AGENTS.composed.md') -Force
+}
+if ((Test-Path $Runtime) -and @(Get-ChildItem -LiteralPath $Runtime -Force).Count -eq 0) {
+    Remove-Item -LiteralPath $Runtime -Force
+}
 Write-Host 'Uninstalled Codex delegation protocol only; unrelated hooks/configuration were preserved and the prior Codex override was restored when applicable.'
