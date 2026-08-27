@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -19,7 +20,8 @@ ADAPTER = HERE / "custom-adapter-template.py"
 
 def metadata(agent_id: str, argv: list[str] | None = None, *, native: bool = False,
              runtime: str = "codex", concurrency: int = 1,
-             delegation_queue: bool = False) -> dict[str, object]:
+             delegation_queue: bool = False,
+             cooperative: bool = False) -> dict[str, object]:
     binding: dict[str, object]
     if native:
         binding = {"runtime": runtime, "agent_type": "bulk_worker", "reasoning_effort": "medium"}
@@ -28,7 +30,9 @@ def metadata(agent_id: str, argv: list[str] | None = None, *, native: bool = Fal
             "argv": argv, "max_input_bytes": 1048576,
             "max_output_bytes": 2097152, "timeout_seconds": 10,
         }
-    return {
+        if cooperative:
+            binding["protocol"] = "cooperative-v1"
+    result = {
         "schema_version": 1, "id": agent_id, "name": agent_id,
         "description": "test agent", "native": native, "provider": "test",
         "delegation_queue": delegation_queue,
@@ -41,6 +45,14 @@ def metadata(agent_id: str, argv: list[str] | None = None, *, native: bool = Fal
         },
         "limits": {"max_concurrency": concurrency},
     }
+    if cooperative:
+        result["delegation_queue"] = True
+        result["capabilities"]["functions"].extend(["batch", "resumable-batch"])
+        result["queue_policy"] = {
+            "strategy": "round_robin", "virtual_slots": 4,
+            "quantum": {"unit": "agent_turn", "value": 4},
+        }
+    return result
 
 
 class MultiplexerTests(unittest.TestCase):
@@ -354,6 +366,208 @@ print(json.dumps({{"classification": "success"}}))
         self.assertIn(lines, (["0:start", "0:end", "1:start", "1:end"],
                               ["1:start", "1:end", "0:start", "0:end"]))
 
+    def test_round_robin_metadata_contract_is_enforced(self) -> None:
+        valid = metadata("cooperative", [sys.executable, "unused.py"], cooperative=True)
+        self.write_agent(valid)
+        self.write_routes(["cooperative"])
+        self.assertEqual(self.run_mux("validate").returncode, 0)
+        cases = [
+            ("native", True),
+            ("delegation_queue", False),
+            ("virtual_slots", 33),
+            ("quantum_unit", "second"),
+            ("protocol", "oneshot"),
+        ]
+        for field, replacement in cases:
+            changed = json.loads(json.dumps(valid))
+            if field == "virtual_slots":
+                changed["queue_policy"]["virtual_slots"] = replacement
+            elif field == "quantum_unit":
+                changed["queue_policy"]["quantum"]["unit"] = replacement
+            elif field == "protocol":
+                changed["binding"]["protocol"] = replacement
+            else:
+                changed[field] = replacement
+            self.write_agent(changed)
+            result = self.run_mux("validate")
+            self.assertEqual(result.returncode, 64, field)
+            self.assertIn("configuration_error", result.stdout)
+        missing_policy = json.loads(json.dumps(valid))
+        del missing_policy["queue_policy"]
+        self.write_agent(missing_policy)
+        result = self.run_mux("validate")
+        self.assertEqual(result.returncode, 64)
+        self.assertIn("requires queue_policy", result.stdout)
+
+    def cooperative_stub(self, *, delay: float = 0.0) -> Path:
+        events = self.root / "cooperative-events"
+        return self.make_stub("cooperative.py", f"""
+import json, sys, time
+from pathlib import Path
+value = json.load(sys.stdin)
+assert value["adapter_protocol"] == "cooperative-v1"
+operation = value["operation"]
+if operation == "start":
+    name = value["task"]["id"]
+    time.sleep({delay!r})
+    print(json.dumps({{"state": "ready", "classification": "success",
+                      "token": f"{{name}}:0"}}))
+    raise SystemExit(0)
+name, raw_count = value["token"].split(":")
+if operation == "cancel":
+    print(json.dumps({{"state": "complete", "classification": "success"}}))
+    raise SystemExit(0)
+count = int(raw_count) + 1
+with Path({str(events)!r}).open("a") as handle:
+    handle.write(f"{{name}}{{count}}\\n")
+time.sleep({delay!r})
+if count < 2:
+    print(json.dumps({{"state": "yielded", "classification": "success",
+                      "token": f"{{name}}:{{count}}"}}))
+else:
+    print(json.dumps({{"state": "complete", "classification": "success",
+                      "status": "success", "task_id": name}}))
+""")
+
+    def test_cooperative_queue_interleaves_tasks(self) -> None:
+        stub = self.cooperative_stub()
+        self.write_agent(metadata("cooperative", [sys.executable, str(stub)],
+                                  cooperative=True))
+        self.write_routes(["cooperative"])
+        result = self.run_mux("queue", "--route", "bulk", "--runtime", "codex",
+                              task={"tasks": [{"id": "A"}, {"id": "B"}]})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        receipt = json.loads(result.stdout)
+        self.assertEqual(receipt["protocol"], "cooperative-v1")
+        self.assertEqual(receipt["counts"], {
+            "requested": 2, "completed": 2, "succeeded": 2,
+            "failed": 0, "skipped": 0,
+        })
+        self.assertEqual((self.root / "cooperative-events").read_text().splitlines(),
+                         ["A1", "B1", "A2", "B2"])
+        self.assertEqual([job["slices"] for job in receipt["jobs"]], [2, 2])
+
+    def test_cooperative_run_interleaves_across_processes(self) -> None:
+        stub = self.cooperative_stub(delay=0.15)
+        self.write_agent(metadata("cooperative", [sys.executable, str(stub)],
+                                  cooperative=True))
+        self.write_routes(["cooperative"])
+        command = [sys.executable, str(MUX), "--catalog", str(self.catalog),
+                   "--routes", str(self.routes), "run", "--route", "bulk",
+                   "--runtime", "codex"]
+        env = os.environ.copy()
+        env["AGENT_MULTIPLEXER_STATE_DIR"] = str(self.state)
+        task_a = self.root / "task-a.json"
+        task_b = self.root / "task-b.json"
+        task_a.write_text(json.dumps({"id": "A"}))
+        task_b.write_text(json.dumps({"id": "B"}))
+        first = subprocess.Popen(command + ["--task-file", str(task_a)], stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True, env=env)
+        time.sleep(0.04)
+        second = subprocess.Popen(command + ["--task-file", str(task_b)], stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True, env=env)
+        outputs = [
+            first.communicate(timeout=5),
+            second.communicate(timeout=5),
+        ]
+        self.assertEqual((first.returncode, second.returncode), (0, 0), outputs)
+        self.assertEqual((self.root / "cooperative-events").read_text().splitlines(),
+                         ["A1", "B1", "A2", "B2"])
+
+    def test_cooperative_ticket_queue_prunes_dead_pid(self) -> None:
+        stub = self.cooperative_stub()
+        self.write_agent(metadata("cooperative", [sys.executable, str(stub)],
+                                  cooperative=True))
+        self.write_routes(["cooperative"])
+        ticket_dir = self.state / "round-robin" / "cooperative"
+        ticket_dir.mkdir(parents=True)
+        (ticket_dir / "tickets.json").write_text(json.dumps([
+            {"id": "stale", "pid": 999999999},
+        ]))
+        result = self.run_mux("run", "--route", "bulk", "--runtime", "codex",
+                              task={"id": "A"})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(json.loads((ticket_dir / "tickets.json").read_text()), [])
+
+    def test_cooperative_invalid_state_is_terminal_without_fallback(self) -> None:
+        marker = self.root / "fallback-ran"
+        bad = self.make_stub(
+            "bad-cooperative.py",
+            "import json,sys\njson.load(sys.stdin)\nprint(json.dumps({'state':'maybe'}))\n",
+        )
+        fallback = self.make_stub(
+            "fallback.py", f"from pathlib import Path\nPath({str(marker)!r}).touch()\n",
+        )
+        self.write_agent(metadata("cooperative", [sys.executable, str(bad)],
+                                  cooperative=True))
+        self.write_agent(metadata("fallback", [sys.executable, str(fallback)]))
+        self.write_routes(["cooperative", "fallback"])
+        result = self.run_mux("run", "--route", "bulk", "--runtime", "codex",
+                              task={"id": "A"})
+        self.assertEqual(result.returncode, 1)
+        job = json.loads(result.stdout)["jobs"][0]
+        self.assertEqual(job["classification"], "invalid_receipt")
+        self.assertFalse(marker.exists())
+
+    def test_cooperative_nonzero_yield_is_terminal(self) -> None:
+        stub = self.make_stub("nonzero-yield.py", """
+import json, sys
+value = json.load(sys.stdin)
+if value["operation"] == "start":
+    print(json.dumps({"state": "ready", "token": "opaque"}))
+else:
+    print(json.dumps({"state": "yielded", "token": "opaque"}))
+    raise SystemExit(7)
+""")
+        self.write_agent(metadata("cooperative", [sys.executable, str(stub)],
+                                  cooperative=True))
+        self.write_routes(["cooperative"])
+        result = self.run_mux("run", "--route", "bulk", "--runtime", "codex",
+                              task={"id": "A"})
+        self.assertEqual(result.returncode, 1)
+        job = json.loads(result.stdout)["jobs"][0]
+        self.assertEqual(job["classification"], "adapter_error")
+        self.assertEqual(job["adapter_exit_code"], 7)
+
+    def test_cooperative_launch_failure_returns_terminal_receipt(self) -> None:
+        broken = self.make_stub("bad-executable", "not an executable\n")
+        broken.chmod(0o700)
+        self.write_agent(metadata("cooperative", [str(broken)], cooperative=True))
+        self.write_routes(["cooperative"])
+        result = self.run_mux("run", "--route", "bulk", "--runtime", "codex",
+                              task={"id": "A"})
+        self.assertEqual(result.returncode, 1)
+        receipt = json.loads(result.stdout)
+        self.assertEqual(receipt["jobs"][0]["state"], "failed")
+        self.assertEqual(receipt["jobs"][0]["classification"], "launch_failed")
+
+    def test_cooperative_stop_on_error_cancels_started_peer(self) -> None:
+        marker = self.root / "cancelled"
+        stub = self.make_stub("stop-cooperative.py", f"""
+import json, sys
+from pathlib import Path
+value = json.load(sys.stdin)
+if value["operation"] == "start":
+    print(json.dumps({{"state": "ready", "token": value["task"]["id"]}}))
+elif value["operation"] == "cancel":
+    Path({str(marker)!r}).write_text(value["token"])
+    print(json.dumps({{"state": "complete", "classification": "success"}}))
+else:
+    print(json.dumps({{"state": "failed", "classification": "task_failed",
+                      "exit_code": 3}}))
+""")
+        self.write_agent(metadata("cooperative", [sys.executable, str(stub)],
+                                  cooperative=True))
+        self.write_routes(["cooperative"])
+        result = self.run_mux("queue", "--route", "bulk", "--runtime", "codex",
+                              task={"tasks": [{"id": "A"}, {"id": "B"}],
+                                    "stop_on_error": True})
+        self.assertEqual(result.returncode, 1)
+        receipt = json.loads(result.stdout)
+        self.assertEqual([job["state"] for job in receipt["jobs"]],
+                         ["failed", "cancelled"])
+        self.assertEqual(marker.read_text(), "B")
+
 
 class AdapterTemplateTests(unittest.TestCase):
     def invoke(self, task: object) -> subprocess.CompletedProcess[str]:
@@ -381,6 +595,24 @@ class AdapterTemplateTests(unittest.TestCase):
         self.assertEqual(receipt["counts"], {
             "requested": 2, "completed": 1, "succeeded": 0, "failed": 1, "skipped": 1,
         })
+
+    def test_cooperative_envelope_is_bounded_and_protocol_checked(self) -> None:
+        result = self.invoke({
+            "adapter_protocol": "cooperative-v1", "operation": "start",
+            "quantum": {"unit": "agent_turn", "value": 4},
+            "task": {"id": "one", "prompt": "audit", "mode": "read"},
+        })
+        self.assertEqual(result.returncode, 1)
+        receipt = json.loads(result.stdout)
+        self.assertEqual(receipt["state"], "failed")
+        self.assertEqual(receipt["classification"], "backend_error")
+
+        result = self.invoke({
+            "adapter_protocol": "wrong", "operation": "step", "token": "opaque",
+            "quantum": {"unit": "agent_turn", "value": 4},
+        })
+        self.assertEqual(result.returncode, 64)
+        self.assertEqual(json.loads(result.stdout)["classification"], "invalid_task")
 
 
 if __name__ == "__main__":

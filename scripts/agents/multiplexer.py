@@ -12,6 +12,8 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
+import uuid
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -57,7 +59,7 @@ def validate_agent(agent: Any, source: str) -> dict[str, Any]:
     _reject_unknown(agent, {
         "schema_version", "id", "name", "description", "native",
         "delegation_queue", "provider", "model", "binding", "capabilities",
-        "limits",
+        "limits", "queue_policy",
     }, source)
     required = {
         "schema_version", "id", "name", "description", "native",
@@ -86,6 +88,7 @@ def validate_agent(agent: Any, source: str) -> dict[str, Any]:
     if not agent["native"]:
         _reject_unknown(binding, {
             "argv", "max_input_bytes", "max_output_bytes", "timeout_seconds",
+            "protocol",
         }, f"{source}: binding")
         required_binding = {
             "argv", "max_input_bytes", "max_output_bytes", "timeout_seconds",
@@ -101,6 +104,11 @@ def validate_agent(agent: Any, source: str) -> dict[str, Any]:
         _positive_int(binding["max_input_bytes"], f"{source}: binding.max_input_bytes")
         _positive_int(binding["max_output_bytes"], f"{source}: binding.max_output_bytes")
         _positive_int(binding["timeout_seconds"], f"{source}: binding.timeout_seconds")
+        protocol = binding.get("protocol", "oneshot")
+        if protocol not in ("oneshot", "cooperative-v1"):
+            raise ConfigurationError(
+                f"{source}: binding.protocol must be 'oneshot' or 'cooperative-v1'"
+            )
     else:
         _reject_unknown(
             binding, {"runtime", "agent_type", "reasoning_effort"},
@@ -140,6 +148,47 @@ def validate_agent(agent: Any, source: str) -> dict[str, Any]:
             f"{source}: delegation_queue requires native=false, the batch "
             "function, and limits.max_concurrency=1"
         )
+    policy = agent.get("queue_policy")
+    if (not agent["native"]
+            and agent["binding"].get("protocol", "oneshot") == "cooperative-v1"
+            and policy is None):
+        raise ConfigurationError(
+            f"{source}: binding.protocol='cooperative-v1' requires queue_policy"
+        )
+    if policy is not None:
+        if not isinstance(policy, dict):
+            raise ConfigurationError(f"{source}: queue_policy must be an object")
+        _reject_unknown(policy, {"strategy", "virtual_slots", "quantum"},
+                        f"{source}: queue_policy")
+        if policy.get("strategy") != "round_robin":
+            raise ConfigurationError(
+                f"{source}: queue_policy.strategy must be 'round_robin'"
+            )
+        slots = _positive_int(policy.get("virtual_slots"),
+                              f"{source}: queue_policy.virtual_slots")
+        if slots > 32:
+            raise ConfigurationError(
+                f"{source}: queue_policy.virtual_slots must not exceed 32"
+            )
+        quantum = policy.get("quantum")
+        if not isinstance(quantum, dict):
+            raise ConfigurationError(f"{source}: queue_policy.quantum must be an object")
+        _reject_unknown(quantum, {"unit", "value"}, f"{source}: queue_policy.quantum")
+        if quantum.get("unit") != "agent_turn":
+            raise ConfigurationError(
+                f"{source}: queue_policy.quantum.unit must be 'agent_turn'"
+            )
+        _positive_int(quantum.get("value"), f"{source}: queue_policy.quantum.value")
+        functions = capabilities["functions"]
+        if (agent["native"] or not agent["delegation_queue"]
+                or limits["max_concurrency"] != 1
+                or "batch" not in functions or "resumable-batch" not in functions
+                or agent["binding"].get("protocol", "oneshot") != "cooperative-v1"):
+            raise ConfigurationError(
+                f"{source}: round_robin requires native=false, delegation_queue=true, "
+                "batch and resumable-batch functions, limits.max_concurrency=1, "
+                "and binding.protocol='cooperative-v1'"
+            )
     return agent
 
 
@@ -255,14 +304,9 @@ def state_root() -> Path:
 
 
 @contextlib.contextmanager
-def concurrency_lock(agent: dict[str, Any]) -> Iterator[None]:
-    if agent["limits"]["max_concurrency"] != 1:
-        yield
-        return
-    root = state_root() / "locks"
-    root.mkdir(parents=True, exist_ok=True)
-    lock_path = root / f"{agent['id']}.lock"
-    handle = lock_path.open("a+b")
+def _file_lock(path: Path) -> Iterator[None]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")
     try:
         if os.name == "nt":
             import msvcrt
@@ -283,6 +327,89 @@ def concurrency_lock(agent: dict[str, Any]) -> Iterator[None]:
             import fcntl
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         handle.close()
+
+
+@contextlib.contextmanager
+def concurrency_lock(agent: dict[str, Any]) -> Iterator[None]:
+    if agent["limits"]["max_concurrency"] != 1:
+        yield
+        return
+    root = state_root() / "locks"
+    root.mkdir(parents=True, exist_ok=True)
+    lock_path = root / f"{agent['id']}.lock"
+    with _file_lock(lock_path):
+        yield
+
+
+def _pid_alive(pid: Any) -> bool:
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid < 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _load_tickets(path: Path) -> list[dict[str, Any]]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return []
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)
+            and isinstance(item.get("id"), str) and _pid_alive(item.get("pid"))]
+
+
+def _store_tickets(path: Path, tickets: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(tickets, separators=(",", ":")), encoding="utf-8")
+
+
+@contextlib.contextmanager
+def fair_step_lock(agent: dict[str, Any], deadline: float) -> Iterator[None]:
+    """Acquire the single provider lane in cross-process FIFO ticket order."""
+    root = state_root() / "round-robin" / agent["id"]
+    guard = root / "tickets.lock"
+    tickets_path = root / "tickets.json"
+    lane = root / "lane.lock"
+    ticket = {"id": uuid.uuid4().hex, "pid": os.getpid()}
+    with _file_lock(guard):
+        tickets = _load_tickets(tickets_path)
+        tickets.append(ticket)
+        _store_tickets(tickets_path, tickets)
+    acquired = False
+    try:
+        while not acquired:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("timed out waiting for cooperative provider lane")
+            with _file_lock(guard):
+                tickets = _load_tickets(tickets_path)
+                if tickets and tickets[0].get("id") == ticket["id"]:
+                    # Holding the ticket guard prevents a later waiter from racing
+                    # ahead between removal of the head ticket and lane acquisition.
+                    lane_context = _file_lock(lane)
+                    lane_context.__enter__()
+                    acquired = True
+                    _store_tickets(tickets_path, tickets[1:])
+            if not acquired:
+                time.sleep(0.01)
+        try:
+            yield
+        finally:
+            lane_context.__exit__(None, None, None)
+    finally:
+        if not acquired:
+            with _file_lock(guard):
+                tickets = _load_tickets(tickets_path)
+                _store_tickets(tickets_path, [
+                    item for item in tickets if item.get("id") != ticket["id"]
+                ])
 
 
 def read_task(path: str | None, limit: int) -> bytes:
@@ -327,7 +454,8 @@ def read_queue_manifest(path: str | None, limit: int) -> bytes:
     return encoded
 
 
-def invoke(agent: dict[str, Any], raw_task: bytes) -> tuple[dict[str, Any], int, bool]:
+def invoke(agent: dict[str, Any], raw_task: bytes,
+           timeout_seconds: float | None = None) -> tuple[dict[str, Any], int, bool]:
     binding = agent["binding"]
     argv = binding["argv"]
     scratch = state_root() / "capture"
@@ -340,7 +468,11 @@ def invoke(agent: dict[str, Any], raw_task: bytes) -> tuple[dict[str, Any], int,
                 env=os.environ.copy(), start_new_session=(os.name != "nt"),
             )
             try:
-                process.communicate(raw_task, timeout=binding["timeout_seconds"])
+                process.communicate(
+                    raw_task,
+                    timeout=timeout_seconds if timeout_seconds is not None
+                    else binding["timeout_seconds"],
+                )
             except subprocess.TimeoutExpired:
                 if os.name != "nt":
                     os.killpg(process.pid, signal.SIGTERM)
@@ -396,6 +528,216 @@ def invoke(agent: dict[str, Any], raw_task: bytes) -> tuple[dict[str, Any], int,
             "error": "backend receipt must be a JSON object",
         }, 65, True)
     return receipt, process.returncode, True
+
+
+def _cooperative_envelope(operation: str, quantum: dict[str, Any], *,
+                          task: dict[str, Any] | None = None,
+                          token: str | None = None,
+                          reason: str | None = None) -> bytes:
+    value: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION, "adapter_protocol": "cooperative-v1",
+        "operation": operation,
+        "quantum": quantum,
+    }
+    if task is not None:
+        value["task"] = task
+    if token is not None:
+        value["token"] = token
+    if reason is not None:
+        value["reason"] = reason
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def _cooperative_state(receipt: dict[str, Any], operation: str) -> tuple[str, str | None]:
+    state = receipt.get("state")
+    allowed = ("ready", "failed") if operation == "start" else (
+        "yielded", "complete", "failed"
+    )
+    if state not in allowed:
+        raise InputError(
+            f"cooperative {operation} receipt has invalid state"
+        )
+    token = receipt.get("token")
+    if state in ("ready", "yielded") and (
+        not isinstance(token, str) or not token or len(token.encode("utf-8")) > 4096
+        or "\0" in token
+    ):
+        raise InputError(
+            f"cooperative {state} receipt requires a bounded token"
+        )
+    if token is not None and not isinstance(token, str):
+        raise InputError("cooperative token must be a string")
+    return state, token
+
+
+def _cancel_cooperative(agent: dict[str, Any], token: str,
+                        quantum: dict[str, Any], deadline: float,
+                        reason: str) -> dict[str, Any]:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return {"state": "failed", "classification": "cancel_timeout"}
+    try:
+        with fair_step_lock(agent, deadline):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("timed out before cooperative cancel")
+            receipt, _, launched = invoke(
+                agent, _cooperative_envelope(
+                    "cancel", quantum, token=token, reason=reason
+                ), remaining,
+            )
+    except TimeoutError:
+        return {"state": "failed", "classification": "cancel_timeout"}
+    if not launched:
+        return receipt
+    return receipt
+
+
+def run_cooperative(agent: dict[str, Any], tasks: list[dict[str, Any]],
+                    stop_on_error: bool) -> tuple[dict[str, Any], int]:
+    """Run tasks through cooperative-v1, rotating after every bounded slice."""
+    policy = agent["queue_policy"]
+    quantum = policy["quantum"]
+    pending: list[dict[str, Any]] = [
+        {"index": index, "task": task, "operation": "start", "token": None,
+         "slices": 0, "deadline": None}
+        for index, task in enumerate(tasks)
+    ]
+    jobs: list[dict[str, Any]] = []
+    terminal_failure = False
+    while pending:
+        item = pending.pop(0)
+        if item["deadline"] is None:
+            item["deadline"] = (
+                time.monotonic() + agent["binding"]["timeout_seconds"]
+            )
+        deadline = item["deadline"]
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            receipt = {
+                "schema_version": 1, "state": "failed",
+                "classification": "timeout", "status": "timeout",
+                "error": "cooperative task exceeded the multiplexer timeout",
+            }
+            launched = True
+            status = 124
+        else:
+            envelope = _cooperative_envelope(
+                item["operation"], quantum,
+                task=item["task"] if item["operation"] == "start" else None,
+                token=item["token"],
+            )
+            if len(envelope) > agent["binding"]["max_input_bytes"]:
+                receipt = {
+                    "schema_version": 1, "state": "failed",
+                    "classification": "invalid_request", "status": "invalid_request",
+                    "error": "cooperative envelope exceeds backend input limit",
+                }
+                status, launched = 64, True
+            else:
+                try:
+                    with fair_step_lock(agent, deadline):
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError("timed out before cooperative step")
+                        receipt, status, launched = invoke(agent, envelope, remaining)
+                except TimeoutError as error:
+                    receipt = {
+                        "schema_version": 1, "state": "failed",
+                        "classification": "timeout", "status": "timeout",
+                        "error": str(error),
+                    }
+                    status, launched = 124, True
+        if item["operation"] == "step":
+            item["slices"] += 1
+        if not launched:
+            # Start/step launch failure is terminal for this task and is never
+            # replayed on a different route member.
+            receipt = dict(receipt)
+            receipt["state"] = "failed"
+            state, token = "failed", None
+        else:
+            try:
+                state, token = _cooperative_state(receipt, item["operation"])
+            except InputError as error:
+                receipt = {
+                    "schema_version": 1, "state": "failed",
+                    "classification": "invalid_receipt", "status": "invalid_receipt",
+                    "error": str(error), "backend_receipt": receipt,
+                }
+                state, token, status = "failed", None, 65
+        if state in ("ready", "yielded") and status != 0:
+            receipt = {
+                "schema_version": 1, "state": "failed",
+                "classification": "adapter_error", "status": "adapter_error",
+                "error": "cooperative adapter exited nonzero for a resumable state",
+                "adapter_exit_code": status, "backend_receipt": receipt,
+            }
+            state, token = "failed", None
+        if state in ("ready", "yielded"):
+            item["operation"] = "step"
+            item["token"] = token
+            pending.append(item)
+            continue
+        job = dict(receipt)
+        task_status = job.get("exit_code", status)
+        if (not isinstance(task_status, int) or isinstance(task_status, bool)
+                or task_status < 0):
+            job = {
+                "schema_version": 1, "state": "failed",
+                "classification": "invalid_receipt", "status": "invalid_receipt",
+                "error": "cooperative terminal exit_code must be a non-negative integer",
+                "backend_receipt": receipt,
+            }
+            state, task_status = "failed", 65
+        job["adapter_exit_code"] = status
+        job["queue_index"] = item["index"]
+        job["slices"] = item["slices"]
+        job["exit_code"] = task_status
+        jobs.append(job)
+        if state == "failed" or task_status != 0:
+            terminal_failure = True
+            if stop_on_error:
+                for waiting in pending:
+                    cancelled: dict[str, Any] | None = None
+                    if waiting["token"] is not None:
+                        cancelled = _cancel_cooperative(
+                            agent, waiting["token"], quantum,
+                            waiting["deadline"] or (
+                                time.monotonic() + agent["binding"]["timeout_seconds"]
+                            ),
+                            "stop_on_error",
+                        )
+                    jobs.append({
+                        "schema_version": 1, "state": "cancelled"
+                        if waiting["token"] is not None else "skipped",
+                        "classification": "cancelled"
+                        if waiting["token"] is not None else "skipped",
+                        "status": "cancelled"
+                        if waiting["token"] is not None else "skipped",
+                        "queue_index": waiting["index"],
+                        "slices": waiting["slices"],
+                        **({"cancel_receipt": cancelled} if cancelled is not None else {}),
+                    })
+                pending.clear()
+    jobs.sort(key=lambda job: job["queue_index"])
+    completed = sum(job["state"] in ("complete", "failed") for job in jobs)
+    succeeded = sum(job["state"] == "complete" and job.get("exit_code", 0) == 0
+                    for job in jobs)
+    failed = sum(job["state"] == "failed" or job.get("exit_code", 0) != 0
+                 for job in jobs)
+    classification = "success" if not terminal_failure else "partial_failure"
+    result = {
+        "schema_version": 1, "classification": classification,
+        "status": classification, "backend": agent["id"],
+        "protocol": "cooperative-v1", "queue_policy": policy,
+        "stop_on_error": stop_on_error,
+        "counts": {"requested": len(tasks), "completed": completed,
+                   "succeeded": succeeded, "failed": failed,
+                   "skipped": len(tasks) - completed},
+        "jobs": jobs,
+    }
+    return result, 0 if not terminal_failure else 1
 
 
 def parser() -> argparse.ArgumentParser:
@@ -473,6 +815,13 @@ def main() -> int:
             limit = min(agent["binding"].get("max_input_bytes", DEFAULT_MAX_INPUT),
                         DEFAULT_MAX_INPUT)
             task = read_queue_manifest(args.task_file, limit)
+            if agent["binding"].get("protocol", "oneshot") == "cooperative-v1":
+                manifest = json.loads(task)
+                receipt, status = run_cooperative(
+                    agent, manifest["tasks"], manifest["stop_on_error"]
+                )
+                emit(receipt)
+                return status
             with concurrency_lock(agent):
                 receipt, status, _ = invoke(agent, task)
             emit(receipt)
@@ -491,6 +840,10 @@ def main() -> int:
                         DEFAULT_MAX_INPUT)
             if len(task) > limit:
                 continue
+            if agent["binding"].get("protocol", "oneshot") == "cooperative-v1":
+                receipt, status = run_cooperative(agent, [json.loads(task)], False)
+                emit(receipt)
+                return status
             with concurrency_lock(agent):
                 receipt, status, launched = invoke(agent, task)
             if launched:
