@@ -33,7 +33,7 @@ Follow the hook-selected queue strategy. For any delegation queue, use `queue` a
 
 Pass the resulting absolute task path to the installed `.delegation-protocol/mux-scheduler.py <run|queue> --task-file <absolute-task-path> --route bulk --runtime codex` using Python 3. Pass the matching `--mode read|edit`, `--workspace shared|isolated`, and `--require audit|edit` capability filters. The installed file is under the active Codex home (normally `~/.codex`). The mux-scheduler selects an enabled backend by required capabilities and route priority; do not choose a provider yourself. Start it exactly once.
 
-Invoke the mux-scheduler through `exec_command` with `login: true` and `yield_time_ms: 30000`. Do not background or redirect the command, and do not invoke a second mux-scheduler process for the same assignment. If the command cannot be launched, report the exact launch failure without replaying the task.
+Invoke this one trusted mux-scheduler command through `exec_command` with `sandbox_permissions: "require_escalated"`, `login: true`, `yield_time_ms: 30000`, and the justification `Allow the trusted DeepSeek mux-scheduler to use its global coordination state and provider network for this delegated task?`. Do not try it sandboxed first, do not request a reusable prefix rule, do not background or redirect the command, and do not invoke a second mux-scheduler process for the same assignment. If escalation is denied or the command cannot be launched, report the exact failure without replaying the task.
 
 ## Permission requests
 
