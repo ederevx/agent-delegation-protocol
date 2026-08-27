@@ -17,8 +17,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 HOOK = REPO_ROOT / "codex" / "hooks" / "delegation-enforcer.py"
 MANAGER = REPO_ROOT / "scripts" / "codex" / "manage-hooks.py"
 MUX_SCHEDULER = REPO_ROOT / "scripts" / "agents" / "mux-scheduler.py"
-INSTALLER = REPO_ROOT / "scripts" / "codex" / "install.sh"
-UNINSTALLER = REPO_ROOT / "scripts" / "codex" / "uninstall.sh"
+INSTALLER = REPO_ROOT / "scripts" / "codex" / (
+    "install.ps1" if os.name == "nt" else "install.sh"
+)
+UNINSTALLER = REPO_ROOT / "scripts" / "codex" / (
+    "uninstall.ps1" if os.name == "nt" else "uninstall.sh"
+)
 WORKER_RENDERER = REPO_ROOT / "scripts" / "agents" / "render-bulk-workers.py"
 
 
@@ -87,9 +91,93 @@ def run(cmd: list[str], *, env: dict[str, str] | None = None, stdin: dict[str, A
     return subprocess.run(cmd, input=(json.dumps(stdin) if stdin is not None else None), text=True, capture_output=True, env=env, check=False)
 
 
+def installer_command(script: Path) -> list[str]:
+    if os.name != "nt":
+        return ["bash", str(script)]
+    powershell = shutil.which("pwsh") or shutil.which("powershell")
+    require(powershell is not None, "PowerShell is required to test the Windows installer")
+    return [
+        powershell,
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script),
+    ]
+
+
+def installer_environment(home: Path) -> dict[str, str]:
+    env = dict(os.environ)
+    env["CODEX_HOME"] = str(home)
+    if os.name == "nt":
+        # Keep PATH compatible with older installers and explicitly select the
+        # interpreter for current PowerShell installers, including bundled runtimes.
+        env["CODEX_PYTHON"] = sys.executable
+        env["PATH"] = os.pathsep.join(
+            (str(Path(sys.executable).resolve().parent), env.get("PATH", ""))
+        )
+    return env
+
+
 def require(value: bool, message: str) -> None:
     if not value:
         raise AssertionError(message)
+
+
+def test_installer_platform_contract(home: Path) -> None:
+    install_command = installer_command(INSTALLER)
+    uninstall_command = installer_command(UNINSTALLER)
+    env = installer_environment(home)
+    require(env["CODEX_HOME"] == str(home), "installer environment lost CODEX_HOME")
+
+    if os.name == "nt":
+        require(sys.version_info >= (3, 11),
+                "Windows installer tests require Python 3.11 or newer")
+        require(INSTALLER.name == "install.ps1", "Windows test selected the Unix installer")
+        require(UNINSTALLER.name == "uninstall.ps1", "Windows test selected the Unix uninstaller")
+        for command, script in (
+            (install_command, INSTALLER),
+            (uninstall_command, UNINSTALLER),
+        ):
+            require(Path(command[0]).name.lower() in {"pwsh.exe", "powershell.exe"},
+                    "Windows installer did not select a PowerShell host")
+            require(command[-2:] == ["-File", str(script)],
+                    f"PowerShell command did not pass {script.name} as a native path")
+            require("bash" not in (part.lower() for part in command),
+                    "Windows installer command still invokes Bash")
+        require(env.get("CODEX_PYTHON") == sys.executable,
+                "Windows installer did not receive the running Python interpreter")
+        require(env["PATH"].split(os.pathsep, 1)[0] == str(Path(sys.executable).resolve().parent),
+                "Windows installer PATH does not start with the running Python directory")
+    else:
+        require(INSTALLER.name == "install.sh", "Unix test selected the Windows installer")
+        require(UNINSTALLER.name == "uninstall.sh", "Unix test selected the Windows uninstaller")
+        require(install_command == ["bash", str(INSTALLER)],
+                "Unix installer command changed unexpectedly")
+        require(uninstall_command == ["bash", str(UNINSTALLER)],
+                "Unix uninstaller command changed unexpectedly")
+
+
+def symlink_integration_available(root: Path) -> bool:
+    """Return whether the current Windows token can exercise symlink installs."""
+    if os.name != "nt":
+        return True
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / "symlink-capability-target"
+    link = root / "symlink-capability-link"
+    target.write_text("probe\n", encoding="utf-8")
+    try:
+        link.symlink_to(target)
+        return True
+    except OSError as error:
+        if getattr(error, "winerror", None) == 1314:
+            return False
+        raise
+    finally:
+        link.unlink(missing_ok=True)
+        target.unlink(missing_ok=True)
 
 
 def test_generated_workers() -> None:
@@ -120,6 +208,32 @@ def test_generated_workers() -> None:
             "common dispatcher contract requires an unavailable stdin transport")
 
 
+def test_windows_non_elevated_installer_preflight(root: Path) -> None:
+    if os.name != "nt" or symlink_integration_available(root / "symlink-probe"):
+        return
+
+    home = root / "fresh-codex-home"
+    legacy_composed = REPO_ROOT / ".runtime" / "codex" / "AGENTS.composed.md"
+    legacy_before = legacy_composed.read_bytes() if legacy_composed.exists() else None
+    require(not home.exists(), "non-elevated preflight fixture is not fresh")
+    result = run(installer_command(INSTALLER), env=installer_environment(home))
+    output = " ".join("\n".join((result.stdout, result.stderr)).split())
+    require(result.returncode != 0,
+            "non-elevated Windows installer unexpectedly passed symlink preflight")
+    for diagnostic_part in (
+        "Unable to create symbolic links for Codex hooks",
+        "Enable Windows Developer Mode or rerun PowerShell as",
+        "Administrator, then retry",
+    ):
+        require(diagnostic_part in output,
+                "non-elevated Windows installer omitted its actionable privilege diagnostic")
+    require(not home.exists(),
+            "non-elevated Windows installer created Codex state before symlink preflight")
+    legacy_after = legacy_composed.read_bytes() if legacy_composed.exists() else None
+    require(legacy_after == legacy_before,
+            "non-elevated Windows preflight changed shared legacy composition state")
+
+
 def call_hook(home: Path, mode: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     env = dict(os.environ)
     env["CODEX_HOME"] = str(home)
@@ -131,6 +245,9 @@ def call_hook(home: Path, mode: str, payload: dict[str, Any]) -> dict[str, Any] 
 
 def test_hooks_merge(home: Path) -> None:
     home.mkdir(parents=True, exist_ok=True)
+    installed_hook = home / "hook path with spaces" / HOOK.name
+    installed_hook.parent.mkdir(parents=True)
+    shutil.copy2(HOOK, installed_hook)
     hooks_path = home / "hooks.json"
     original = {
         "description": "existing hooks",
@@ -145,25 +262,263 @@ def test_hooks_merge(home: Path) -> None:
     }
     hooks_path.write_text(json.dumps(original, indent=2) + "\n", encoding="utf-8")
 
-    result = run([sys.executable, str(MANAGER), "install", "--codex-home", str(home), "--hook-path", str(HOOK), "--python", sys.executable])
+    result = run([sys.executable, str(MANAGER), "install", "--codex-home", str(home), "--hook-path", str(installed_hook), "--python", sys.executable])
     require(result.returncode == 0, f"hook install failed: {result.stderr}")
     installed = json.loads(hooks_path.read_text(encoding="utf-8"))
     require(installed["description"] == "existing hooks", "top-level metadata was changed")
     require(any(h.get("statusMessage") == "Existing hook" for g in installed["hooks"]["PreToolUse"] for h in g.get("hooks", [])), "existing hook was removed")
     require(any(str(h.get("statusMessage", "")).startswith("Delegation protocol:") for groups in installed["hooks"].values() for g in groups for h in g.get("hooks", [])), "protocol hooks were not installed")
 
-    result = run([sys.executable, str(MANAGER), "uninstall", "--codex-home", str(home), "--hook-path", str(HOOK), "--python", sys.executable])
+    if os.name == "nt":
+        prompt_handler = next(
+            handler
+            for group in installed["hooks"]["UserPromptSubmit"]
+            for handler in group.get("hooks", [])
+            if str(handler.get("statusMessage", "")).startswith("Delegation protocol:")
+        )
+        command_env = dict(os.environ)
+        command_env["CODEX_HOME"] = str(home)
+        command_result = subprocess.run(
+            str(prompt_handler["command"]),
+            input=json.dumps({
+                "session_id": "path-with-spaces",
+                "turn_id": "t1",
+                "prompt": "Classify this small request.",
+            }),
+            text=True,
+            capture_output=True,
+            env=command_env,
+            shell=True,
+            check=False,
+        )
+        require(command_result.returncode == 0,
+                f"generated Windows hook command failed: {command_result.stderr}")
+        command_output = json.loads(command_result.stdout)
+        require(command_output["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit",
+                "generated Windows hook command did not reach the prompt handler")
+        require((home / ".delegation-protocol" / "hook-state" /
+                 "path-with-spaces.json").is_file(),
+                "generated Windows hook command did not write state under spaced CODEX_HOME")
+
+    result = run([sys.executable, str(MANAGER), "uninstall", "--codex-home", str(home), "--hook-path", str(installed_hook), "--python", sys.executable])
     require(result.returncode == 0, f"hook uninstall failed: {result.stderr}")
     after = json.loads(hooks_path.read_text(encoding="utf-8"))
     require(any(h.get("statusMessage") == "Existing hook" for g in after["hooks"]["PreToolUse"] for h in g.get("hooks", [])), "existing hook was not preserved")
     require(not any(str(h.get("statusMessage", "")).startswith("Delegation protocol:") for groups in after.get("hooks", {}).values() for g in groups for h in g.get("hooks", [])), "protocol hooks remained after uninstall")
 
 
+def test_composed_home_isolation(root: Path) -> None:
+    homes = [root / "composed one", root / "composed two"]
+    instructions = ["first user instructions\n", "second user instructions\n"]
+    composed_paths: list[Path] = []
+    override_paths: list[Path] = []
+
+    for home, original in zip(homes, instructions):
+        home.mkdir(parents=True)
+        (home / "AGENTS.md").write_text(original, encoding="utf-8")
+        result = run(installer_command(INSTALLER), env=installer_environment(home))
+        require(result.returncode == 0,
+                f"composed-home installer failed for {home}: {result.stderr}")
+        composed = home / ".delegation-protocol" / "AGENTS.composed.md"
+        override = home / "AGENTS.override.md"
+        require(composed.is_file(), f"installer did not compose instructions under {home}")
+        require(override.is_symlink() and override.resolve() == composed.resolve(),
+                f"override for {home} does not target its per-home composition")
+        require(composed.read_text(encoding="utf-8").startswith(original),
+                f"composition for {home} lost its original instructions")
+        composed_paths.append(composed)
+        override_paths.append(override)
+
+    require(composed_paths[0].resolve() != composed_paths[1].resolve(),
+            "two Codex homes shared one composed instruction file")
+    second_before = composed_paths[1].read_bytes()
+    result = run(installer_command(UNINSTALLER), env=installer_environment(homes[0]))
+    require(result.returncode == 0, f"first composed-home uninstall failed: {result.stderr}")
+    require(not override_paths[0].exists() and not override_paths[0].is_symlink(),
+            "first composed-home uninstall left its managed override")
+    require(not composed_paths[0].exists(),
+            "first composed-home uninstall left its managed composition")
+    require(override_paths[1].is_symlink() and composed_paths[1].read_bytes() == second_before,
+            "first composed-home uninstall changed the second home's composition")
+
+    result = run(installer_command(UNINSTALLER), env=installer_environment(homes[1]))
+    require(result.returncode == 0, f"second composed-home uninstall failed: {result.stderr}")
+    require(not override_paths[1].exists() and not override_paths[1].is_symlink(),
+            "second composed-home uninstall left its managed override")
+    require(not composed_paths[1].exists(),
+            "second composed-home uninstall left its managed composition")
+
+
+def test_windows_composed_recovery(root: Path) -> None:
+    if os.name != "nt":
+        return
+
+    def install_override(home: Path, script: Path = INSTALLER) -> tuple[Path, Path, Path]:
+        home.mkdir(parents=True)
+        override = home / "AGENTS.override.md"
+        override.write_text("original override instructions\n", encoding="utf-8")
+        result = run(installer_command(script), env=installer_environment(home))
+        require(result.returncode == 0, f"override fixture install failed: {result.stderr}")
+        state_dir = home / ".delegation-protocol"
+        return override, state_dir / "AGENTS.composed.md", state_dir
+
+    dangling_home = root / "dangling per-home"
+    override, composed, state_dir = install_override(dangling_home)
+    composed.unlink()
+    require(override.is_symlink() and not override.exists(),
+            "per-home dangling override fixture was not dangling")
+    result = run(installer_command(INSTALLER), env=installer_environment(dangling_home))
+    require(result.returncode == 0, f"dangling per-home repair failed: {result.stderr}")
+    require(composed.is_file() and override.is_symlink() and override.resolve() == composed.resolve(),
+            "dangling per-home override was not repaired")
+    require("source=override" in (state_dir / "state").read_text(encoding="utf-8"),
+            "dangling per-home repair changed source=override ownership")
+
+    missing_link_home = root / "proven interrupted recovery"
+    override, composed, state_dir = install_override(missing_link_home)
+    override.unlink()
+    saved = state_dir / "original-AGENTS.override.md.path-backup"
+    saved_before = saved.read_bytes()
+    result = run(installer_command(INSTALLER), env=installer_environment(missing_link_home))
+    require(result.returncode == 0, f"proven interrupted recovery failed: {result.stderr}")
+    require(override.is_symlink() and override.resolve() == composed.resolve(),
+            "proven interrupted recovery did not recreate the managed override")
+    require(saved.read_bytes() == saved_before and
+            "source=override" in (state_dir / "state").read_text(encoding="utf-8"),
+            "proven interrupted recovery changed original recovery material")
+
+    for planted_kind in ("file", "directory"):
+        planted_home = root / f"planted {planted_kind}"
+        planted = planted_home / ".delegation-protocol" / "original-AGENTS.override.md.path-backup"
+        if planted_kind == "file":
+            planted.parent.mkdir(parents=True)
+            planted.write_text("untrusted recovery material\n", encoding="utf-8")
+        else:
+            planted.mkdir(parents=True)
+            (planted / "sentinel").write_text("preserve me\n", encoding="utf-8")
+        result = run(installer_command(INSTALLER), env=installer_environment(planted_home))
+        require(result.returncode != 0 and "Refusing" in result.stderr,
+                f"installer activated planted recovery {planted_kind}")
+        require(planted.is_file() if planted_kind == "file" else planted.is_dir(),
+                f"installer removed planted recovery {planted_kind}")
+        if planted_kind == "file":
+            require(planted.read_text(encoding="utf-8") == "untrusted recovery material\n",
+                    "installer modified planted recovery file")
+        else:
+            require((planted / "sentinel").read_text(encoding="utf-8") == "preserve me\n",
+                    "installer modified planted recovery directory")
+        require(not (planted_home / "AGENTS.override.md").exists() and
+                not (planted_home / "AGENTS.override.md").is_symlink(),
+                f"installer activated planted recovery {planted_kind}")
+
+    copied_repo = root / "legacy fixture repo"
+    shutil.copytree(
+        REPO_ROOT,
+        copied_repo,
+        ignore=shutil.ignore_patterns(".git", ".runtime", "__pycache__"),
+    )
+    copied_installer = copied_repo / "scripts" / "codex" / "install.ps1"
+    legacy_home = root / "dangling legacy"
+    override, composed, state_dir = install_override(legacy_home, copied_installer)
+    override.unlink()
+    composed.unlink()
+    legacy = copied_repo / ".runtime" / "codex" / "AGENTS.composed.md"
+    override.symlink_to(legacy)
+    require(override.is_symlink() and not override.exists(),
+            "legacy dangling override fixture was not dangling")
+    result = run(installer_command(copied_installer), env=installer_environment(legacy_home))
+    require(result.returncode == 0, f"dangling legacy migration failed: {result.stderr}")
+    require(composed.is_file() and override.is_symlink() and override.resolve() == composed.resolve(),
+            "dangling legacy override was not migrated to per-home composition")
+    require("source=override" in (state_dir / "state").read_text(encoding="utf-8"),
+            "dangling legacy migration changed source=override ownership")
+
+
+def test_windows_uninstaller_path_preflight(root: Path) -> None:
+    if os.name != "nt" or not symlink_integration_available(root / "symlink probe"):
+        return
+
+    live_home_target = root / "live Codex home target"
+    live_home_target.mkdir(parents=True)
+    live_home_link = root / "live Codex home link"
+    live_home_link.symlink_to(live_home_target, target_is_directory=True)
+    result = run(installer_command(UNINSTALLER), env=installer_environment(live_home_link))
+    require(result.returncode == 0, f"live symlinked CODEX_HOME uninstall failed: {result.stderr}")
+    require(live_home_link.is_symlink() and live_home_link.resolve() == live_home_target.resolve(),
+            "uninstaller removed or replaced a live symlinked CODEX_HOME")
+    result = run(installer_command(UNINSTALLER), env=installer_environment(live_home_link))
+    require(result.returncode == 0,
+            f"live symlinked CODEX_HOME idempotent uninstall failed: {result.stderr}")
+
+    dangling_home_target = root / "missing Codex home target"
+    dangling_home_link = root / "dangling Codex home link"
+    dangling_home_link.symlink_to(dangling_home_target, target_is_directory=True)
+    result = run(installer_command(UNINSTALLER), env=installer_environment(dangling_home_link))
+    require(result.returncode != 0 and "unsafe Codex home" in result.stderr,
+            "uninstaller accepted a dangling CODEX_HOME symlink")
+    require(dangling_home_link.is_symlink() and not dangling_home_link.exists(),
+            "uninstaller removed or activated a dangling CODEX_HOME symlink")
+
+    file_home = root / "file Codex home"
+    file_home.write_text("not a directory\n", encoding="utf-8")
+    file_before = file_home.read_bytes()
+    result = run(installer_command(UNINSTALLER), env=installer_environment(file_home))
+    require(result.returncode != 0 and "unsafe Codex home" in result.stderr,
+            "uninstaller accepted a file CODEX_HOME")
+    require(file_home.read_bytes() == file_before,
+            "uninstaller modified a file CODEX_HOME")
+
+    state_home = root / "symlinked state home"
+    state_home.mkdir(parents=True)
+    state_target = root / "external state target"
+    state_target.mkdir()
+    state_sentinel = state_target / "sentinel"
+    state_sentinel.write_text("state target must remain unchanged\n", encoding="utf-8")
+    state_link = state_home / ".delegation-protocol"
+    state_link.symlink_to(state_target, target_is_directory=True)
+    state_before = state_sentinel.read_bytes()
+    result = run(installer_command(UNINSTALLER), env=installer_environment(state_home))
+    require(result.returncode != 0 and "unsafe protocol state directory" in result.stderr,
+            "uninstaller traversed a symlinked protocol state directory")
+    require(state_link.is_symlink() and state_link.resolve() == state_target.resolve(),
+            "uninstaller replaced or removed the symlinked protocol state directory")
+    require(state_sentinel.read_bytes() == state_before,
+            "uninstaller modified the symlinked protocol state target")
+
+    hooks_home = root / "symlinked hooks json home"
+    hooks_home.mkdir(parents=True)
+    hooks_target = root / "external hooks target.json"
+    hooks_target.write_text('{"hooks":{"Stop":[]}}\n', encoding="utf-8")
+    hooks_link = hooks_home / "hooks.json"
+    hooks_link.symlink_to(hooks_target)
+    local_state = hooks_home / ".delegation-protocol"
+    local_state.mkdir()
+    manifest = local_state / "hooks-manifest.json"
+    manifest.write_text("preserve local state\n", encoding="utf-8")
+    hooks_before = hooks_target.read_bytes()
+    manifest_before = manifest.read_bytes()
+    result = run(installer_command(UNINSTALLER), env=installer_environment(hooks_home))
+    require(result.returncode != 0 and "unsafe hooks.json" in result.stderr,
+            "uninstaller accepted a symlinked hooks.json")
+    require(hooks_link.is_symlink() and hooks_link.resolve() == hooks_target.resolve(),
+            "uninstaller replaced or removed the symlinked hooks.json")
+    require(hooks_target.read_bytes() == hooks_before,
+            "uninstaller modified the symlinked hooks.json target")
+    require(manifest.read_bytes() == manifest_before,
+            "uninstaller deleted protocol state before rejecting symlinked hooks.json")
+
+
 def test_codex_worker_install(root: Path) -> None:
+    if not symlink_integration_available(root):
+        print(
+            "Codex installer integration: SKIP "
+            "(Windows symbolic-link privilege or Developer Mode is required)",
+            file=sys.stderr,
+        )
+        return
     balanced_source = REPO_ROOT / "codex" / "agents" / "balanced-worker.toml"
     legacy_source = REPO_ROOT / "codex" / "agents" / "bulk-worker.toml"
-    env = dict(os.environ)
-    env["CODEX_HOME"] = str(root / "owned-link")
+    env = installer_environment(root / "owned-link")
     agents = Path(env["CODEX_HOME"]) / "agents"
     agents.mkdir(parents=True)
     protocol_state = Path(env["CODEX_HOME"]) / ".delegation-protocol"
@@ -177,7 +532,7 @@ def test_codex_worker_install(root: Path) -> None:
     legacy_bulk = agents / "bulk-worker.toml"
     legacy_bulk.symlink_to(legacy_source)
 
-    result = run(["bash", str(INSTALLER)], env=env)
+    result = run(installer_command(INSTALLER), env=env)
     require(result.returncode == 0, f"installer failed: {result.stderr}")
     require(balanced.is_symlink() and balanced.resolve() == balanced_source.resolve(),
             "balanced worker link was not preserved")
@@ -228,22 +583,21 @@ def test_codex_worker_install(root: Path) -> None:
                 "bulk_worker.toml", "balanced-worker.toml"},
             "installer installed an unexpected custom agent")
 
-    result = run(["bash", str(INSTALLER)], env=env)
+    result = run(installer_command(INSTALLER), env=env)
     require(result.returncode == 0, f"idempotent reinstall failed: {result.stderr}")
-    result = run(["bash", str(UNINSTALLER)], env=env)
+    result = run(installer_command(UNINSTALLER), env=env)
     require(result.returncode == 0, f"uninstaller failed: {result.stderr}")
     require(not bulk.exists(), "uninstaller left the unmodified managed worker copy")
-    result = run(["bash", str(UNINSTALLER)], env=env)
+    result = run(installer_command(UNINSTALLER), env=env)
     require(result.returncode == 0, f"idempotent uninstall failed: {result.stderr}")
 
     modified_home = root / "modified-copy"
-    modified_env = dict(os.environ)
-    modified_env["CODEX_HOME"] = str(modified_home)
-    result = run(["bash", str(INSTALLER)], env=modified_env)
+    modified_env = installer_environment(modified_home)
+    result = run(installer_command(INSTALLER), env=modified_env)
     require(result.returncode == 0, f"modified-copy install failed: {result.stderr}")
     modified_worker = modified_home / "agents" / "bulk_worker.toml"
     modified_worker.write_text("# user modification\n", encoding="utf-8")
-    result = run(["bash", str(UNINSTALLER)], env=modified_env)
+    result = run(installer_command(UNINSTALLER), env=modified_env)
     require(result.returncode == 0, f"modified-copy uninstall failed: {result.stderr}")
     require(modified_worker.read_text(encoding="utf-8") == "# user modification\n",
             "uninstaller removed a modified managed worker copy")
@@ -253,14 +607,13 @@ def test_codex_worker_install(root: Path) -> None:
     custom_agents.mkdir(parents=True)
     custom_legacy = custom_agents / "balanced-worker.toml"
     custom_legacy.write_text("model = \"user-owned\"\n", encoding="utf-8")
-    custom_env = dict(os.environ)
-    custom_env["CODEX_HOME"] = str(custom_home)
-    result = run(["bash", str(INSTALLER)], env=custom_env)
+    custom_env = installer_environment(custom_home)
+    result = run(installer_command(INSTALLER), env=custom_env)
     require(result.returncode != 0 and "Refusing to overwrite" in result.stderr,
             "installer did not refuse a user-owned balanced worker")
     require(custom_legacy.read_text(encoding="utf-8") == "model = \"user-owned\"\n",
             "custom balanced worker file was changed")
-    result = run(["bash", str(UNINSTALLER)], env=custom_env)
+    result = run(installer_command(UNINSTALLER), env=custom_env)
     require(result.returncode == 0, f"custom-file uninstall failed: {result.stderr}")
     require(custom_legacy.read_text(encoding="utf-8") == "model = \"user-owned\"\n",
             "custom balanced worker file was removed")
@@ -270,9 +623,8 @@ def test_codex_worker_install(root: Path) -> None:
     conflict_agents.mkdir(parents=True)
     conflict_bulk = conflict_agents / "bulk_worker.toml"
     conflict_bulk.write_text("model = \"user-owned\"\n", encoding="utf-8")
-    conflict_env = dict(os.environ)
-    conflict_env["CODEX_HOME"] = str(conflict_home)
-    result = run(["bash", str(INSTALLER)], env=conflict_env)
+    conflict_env = installer_environment(conflict_home)
+    result = run(installer_command(INSTALLER), env=conflict_env)
     require(result.returncode != 0 and "Refusing to overwrite" in result.stderr,
             "installer did not refuse a conflicting bulk worker")
     require(conflict_bulk.read_text(encoding="utf-8") == "model = \"user-owned\"\n",
@@ -283,11 +635,14 @@ def test_codex_worker_install(root: Path) -> None:
     identical_agents.mkdir(parents=True)
     identical_bulk = identical_agents / "bulk_worker.toml"
     identical_bulk.write_bytes((REPO_ROOT / "codex" / "agents" / "bulk_worker.toml").read_bytes())
-    identical_env = dict(os.environ)
-    identical_env["CODEX_HOME"] = str(identical_home)
-    result = run(["bash", str(INSTALLER)], env=identical_env)
+    identical_env = installer_environment(identical_home)
+    result = run(installer_command(INSTALLER), env=identical_env)
     require(result.returncode != 0 and "user-owned worker" in result.stderr,
             "installer claimed an untracked user-owned worker")
+
+    test_composed_home_isolation(root / "composed isolation")
+    test_windows_composed_recovery(root / "windows composed recovery")
+    test_windows_uninstaller_path_preflight(root / "windows uninstall preflight")
 
 def test_single_gate(home: Path) -> None:
     session = "single"
@@ -457,11 +812,13 @@ def main() -> int:
     require(INSTALLER.exists(), f"missing {INSTALLER}")
     require(UNINSTALLER.exists(), f"missing {UNINSTALLER}")
     require(WORKER_RENDERER.exists(), f"missing {WORKER_RENDERER}")
+    test_installer_platform_contract(Path(tempfile.gettempdir()) / "codex-installer-contract")
     test_generated_workers()
     with tempfile.TemporaryDirectory(prefix="codex-delegation-test-") as tmp:
         root = Path(tmp)
+        test_windows_non_elevated_installer_preflight(root / "preflight")
         test_codex_worker_install(root / "installer")
-        test_hooks_merge(root / "merge")
+        test_hooks_merge(root / "merge path with spaces")
         test_single_gate(root / "single")
         test_multi_overlap(root / "multi")
         test_delegation_queue(root / "queue")

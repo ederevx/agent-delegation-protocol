@@ -1,6 +1,6 @@
 # Codex installation
 
-Codex is installed independently from Claude. The Codex installer touches only `$CODEX_HOME` (normally `~/.codex`) plus the clone's ignored `.runtime/codex` composition file when existing global instructions must be preserved.
+Codex is installed independently from Claude. The Codex installer writes mutable installation state only under `$CODEX_HOME` (normally `~/.codex`); repository-backed hook, worker, and mux-scheduler assets remain symlinked to the clone.
 
 ## Migration from an older structure
 
@@ -33,7 +33,11 @@ Windows PowerShell:
 .\scripts\codex\install.ps1
 ```
 
-Python 3 is required for the local enforcement hook and agent mux-scheduler.
+Python 3.11 or newer is required by the installer and self-test. Set `CODEX_PYTHON` to a valid interpreter when automatic discovery cannot find one; on Windows, Store execution aliases are not treated as usable runtimes.
+
+Native Windows installation also requires symbolic-link capability. Enable Windows Developer Mode or run PowerShell as Administrator; the installer probes this capability before creating persistent installation state and reports an actionable error if it is unavailable.
+
+Before changing active instructions or managed files, both platform installers validate the Codex-home directory layout, protocol state paths, managed destinations, and `hooks.json`. Unsafe symlinks, destination conflicts, malformed JSON, and incompatible existing hook shapes fail during this non-mutating preflight.
 
 ## Global instruction installation
 
@@ -47,13 +51,15 @@ $CODEX_HOME/AGENTS.md -> <clone>/codex/AGENTS.md
 
 ### Existing global Codex instructions
 
-The installer preserves the currently active global instruction content verbatim, appends this repository's protocol, writes the result to an ignored runtime file in the clone, and activates it through:
+The installer preserves the currently active global instruction content verbatim, appends this repository's protocol, writes the result to per-home installation state, and activates it through:
 
 ```text
-$CODEX_HOME/AGENTS.override.md -> <clone>/.runtime/codex/AGENTS.composed.md
+$CODEX_HOME/AGENTS.override.md -> $CODEX_HOME/.delegation-protocol/AGENTS.composed.md
 ```
 
 If an `AGENTS.override.md` already existed, it is moved to a backup under `$CODEX_HOME/.delegation-protocol/` and restored by uninstall. If only `AGENTS.md` existed, it is left untouched and its content is placed first in the composed file.
+
+Keeping the composed file under the active home isolates multiple `CODEX_HOME` installations. Reinstalling or uninstalling one home cannot overwrite or remove another home's effective instructions. A verified legacy link to `<clone>/.runtime/codex/AGENTS.composed.md` is repointed automatically; the shared legacy file is left in place because another home may still reference it.
 
 This composition remains useful even with hooks because current Codex multi-agent behavior treats a direct user request or applicable `AGENTS.md`/skill instruction as authorization to spawn. Hooks provide enforcement; AGENTS provides explicit standing authorization and broader semantic guidance.
 
@@ -104,6 +110,15 @@ python3 "$CODEX_HOME/.delegation-protocol/mux-scheduler.py" \
 Each catalog entry uses the same named-function and compatibility interface and declares a top-level `native` boolean plus either a native Codex binding or a custom command/API adapter. Each backend declares its own numeric `priority`; routes in `agents/mux-scheduler.json` are membership lists with no scheduling order. A one-lane backend advertising a round-robin `queue_policy` accepts one queue batch and interleaves its in-process virtual agents up to `virtual_slots` on the single lane.
 
 The dispatcher executes natively only for a valid `native_required` receipt with exit status 69 selecting the Codex-native backend. Once an external adapter launches, its receipt is returned without automatic native retry.
+
+Codex's managed permission profile remains authoritative for a spawned custom
+agent; role-file fields cannot add the scheduler's shared state root or provider
+network access. The CI overlay therefore invokes only the trusted installed
+mux-scheduler command with `sandbox_permissions: "require_escalated"`. That
+command receives the global `~/.cache/agent-delegation-protocol` state root and
+configured provider network. The worker never tries it sandboxed first, never
+requests a reusable Python prefix rule, and never replays a task after a denied
+escalation or launch failure.
 
 ## Hook enforcement
 

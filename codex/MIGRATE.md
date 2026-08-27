@@ -57,7 +57,7 @@ $CODEX_HOME/hooks.json
 $CODEX_HOME/agents/
 $CODEX_HOME/hooks/
 $CODEX_HOME/.delegation-protocol/
-<REPO_ROOT>/.runtime/codex/
+<REPO_ROOT>/.runtime/codex/ (legacy composed-instruction state only)
 ```
 
 Also inspect the repository worktree state.
@@ -86,9 +86,11 @@ On Windows PowerShell:
 .\scripts\codex\install.ps1
 ```
 
-Python 3 is required for hook enforcement.
+Python 3.11 or newer is required by the installer and self-test. `CODEX_PYTHON` may name the exact interpreter when discovery cannot find a usable installation; Windows Store execution aliases are rejected. Native Windows also requires Developer Mode or an elevated PowerShell session for symbolic links, and the installer checks that capability before persistent mutation.
 
 The installer is the canonical migration mechanism. Do not manually reproduce its filesystem mutations unless the installer cannot run and you are specifically repairing a known installation conflict.
+
+Its preflight validates destination ownership, instruction/state path types, and `hooks.json` before changing active instructions or managed files. If preflight reports a conflict, preserve the reported path and resolve ownership explicitly rather than deleting it to force installation.
 
 ## Phase 3 — Expected migration result
 
@@ -107,10 +109,12 @@ If prior global instructions existed, they MUST remain effective. The installer 
 
 ```text
 $CODEX_HOME/AGENTS.override.md
-  -> <REPO_ROOT>/.runtime/codex/AGENTS.composed.md
+  -> $CODEX_HOME/.delegation-protocol/AGENTS.composed.md
 ```
 
 The composed file MUST place the preserved pre-existing active global instructions before this repository's supplementary delegation protocol.
+
+The installer migrates an older link to `<REPO_ROOT>/.runtime/codex/AGENTS.composed.md` only when the active symlink, recorded `mode=composed` state, and preserved input backup agree that the installation owns it. It leaves that shared legacy file in place because another `CODEX_HOME` may still reference it. Do not delete the legacy file until every Codex home that used this clone has been migrated or uninstalled.
 
 Do not simplify this into replacement of the user's instructions.
 
@@ -176,7 +180,7 @@ Inspect `config.toml` only to diagnose runtime capability. If hooks or multi-age
 
 ## Phase 5 — Verification
 
-Run the repository's Codex self-test when Python 3 is available:
+Run the repository's Codex self-test when Python 3.11 or newer is available:
 
 ```bash
 python3 scripts/codex/test-protocol.py
