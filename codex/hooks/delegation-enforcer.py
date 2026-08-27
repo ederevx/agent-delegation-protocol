@@ -12,7 +12,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 CONTINUATION_PREFIX = "DELEGATION_PROTOCOL_CONTINUE:"
 
 BULK_WORDS = (
@@ -75,8 +75,8 @@ def codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
 
 
-def select_delegation_queue(runtime: str) -> str | None:
-    """Return the installed queue backend id, failing closed to normal fan-out."""
+def select_delegation_queue(runtime: str) -> dict[str, Any] | None:
+    """Return safe host-facing queue details, failing closed to normal fan-out."""
     installed = codex_home() / ".delegation-protocol"
     module_path = installed / "multiplexer.py"
     try:
@@ -101,7 +101,19 @@ def select_delegation_queue(runtime: str) -> str | None:
             r"[a-z0-9][a-z0-9._-]{0,63}", backend_id
         ):
             return None
-        return backend_id
+        policy = selected.get("queue_policy")
+        if policy is None:
+            return {"backend": backend_id, "strategy": "fifo", "virtual_slots": 1}
+        if not isinstance(policy, dict) or policy.get("strategy") != "round_robin":
+            return None
+        slots = policy.get("virtual_slots")
+        if not isinstance(slots, int) or isinstance(slots, bool) or not 1 <= slots <= 32:
+            return None
+        return {
+            "backend": backend_id,
+            "strategy": "round_robin",
+            "virtual_slots": slots,
+        }
     except Exception:
         return None
 
@@ -329,6 +341,20 @@ def policy_context(c: dict[str, Any]) -> str:
     reasons = ", ".join(c.get("classification_reasons", [])) or "bulk task"
     minimum = int(c.get("min_agents", 1))
     if c.get("delegation_queue"):
+        if c.get("delegation_queue_strategy") == "round_robin":
+            slots = int(c["delegation_queue_virtual_slots"])
+            return base_text + (
+                f"\nHOOK CLASSIFICATION: this turn is delegation-eligible ({reasons}) and round-robin delegation "
+                f"queue selected backend `{c['delegation_queue_backend']}`, advertising {slots} virtual slots. "
+                "Before parent mutation, launch concurrent lifecycle-visible `bulk_worker` dispatchers: use one "
+                "dispatcher per independent workstream, up to the minimum of the independent workstream count, "
+                f"{slots} advertised slots, and the host's currently available child slots. Each dispatcher must "
+                "receive one bounded workstream and submit it independently through multiplexer `run`; the backend "
+                "round-robins those calls on its single physical lane. When the backend advertises at least two "
+                "slots, dispatchers must actually overlap if at least two child slots are available. Do not wait "
+                "for one dispatcher before launching the next. A "
+                "queue failure must be reported and must never be replayed on a native backend."
+            )
         return base_text + (
             f"\nHOOK CLASSIFICATION: this turn is delegation-eligible ({reasons}) and delegation queue selected "
             f"backend `{c['delegation_queue_backend']}`. Before parent mutation, start one lifecycle-visible "
@@ -367,12 +393,18 @@ def handle_prompt(event: dict[str, Any]) -> None:
     c = classify(str(event.get("prompt") or ""), previous)
     c["delegation_queue"] = False
     c["delegation_queue_backend"] = None
+    c["delegation_queue_strategy"] = None
+    c["delegation_queue_virtual_slots"] = 0
     if c.get("requires_multi"):
-        backend_id = select_delegation_queue("codex")
-        if backend_id:
+        queue = select_delegation_queue("codex")
+        if queue:
             c["delegation_queue"] = True
-            c["delegation_queue_backend"] = backend_id
-            c["min_agents"] = 1
+            c["delegation_queue_backend"] = queue["backend"]
+            c["delegation_queue_strategy"] = queue["strategy"]
+            c["delegation_queue_virtual_slots"] = queue["virtual_slots"]
+            c["min_agents"] = 2 if (
+                queue["strategy"] == "round_robin" and queue["virtual_slots"] >= 2
+            ) else 1
     if not c.get("carry_forward"):
         reset_evidence(session)
     save_state(session, {
@@ -454,6 +486,14 @@ def unmet(session: Any, state: dict[str, Any]) -> str | None:
         return (
             "Delegation protocol requires a bounded subagent for this bulk/high-volume turn. Start `bulk_worker` when suitable "
             "or another supported worker before parent implementation."
+        )
+    if state.get("delegation_queue_strategy") == "round_robin":
+        if fanout or (delegated and marker(session, "multi-unavailable").exists()):
+            return None
+        return (
+            "Round-robin delegation queue requires overlapping lifecycle-visible `bulk_worker` dispatchers when "
+            "capacity permits. Launch separate dispatchers for separate bounded workstreams; each must submit its "
+            "own task through multiplexer `run`."
         )
     if fanout or (delegated and marker(session, "multi-unavailable").exists()):
         return None

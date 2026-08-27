@@ -18,7 +18,7 @@ Never silently retry an external task on the native model after it launches. Nat
 
 ## Parallel fan-out
 
-When an eligible task contains two or more independent subsystems, services, modules, packages, directories, test groups, data partitions, or other safely separable workstreams, use multiple subagents concurrently when runtime capacity permits it. The only exception is when the hook explicitly selects delegation queue for a validated available single-stream backend; then one lifecycle-visible bulk dispatcher submits all independent units as one ordered batch through multiplexer `queue`.
+When an eligible task contains two or more independent subsystems, services, modules, packages, directories, test groups, data partitions, or other safely separable workstreams, use multiple subagents concurrently when runtime capacity permits it. A selected FIFO delegation queue uses one lifecycle-visible bulk dispatcher with one ordered `queue` batch. A selected round-robin queue exposes a virtual dispatcher pool: launch one lifecycle-visible dispatcher per independent workstream, up to the minimum of useful workstreams, advertised virtual slots, and available host child slots. Each dispatcher submits its own bounded task through multiplexer `run`, and the multiplexer interleaves them on the single physical provider lane.
 
 Do not serialize naturally parallel work through one worker merely for convenience. Give workers non-overlapping primary ownership, explicit boundaries, acceptance criteria, and validation commands. Use worktree/equivalent isolation when parallel write-heavy work would otherwise conflict.
 
@@ -51,7 +51,7 @@ The installed Claude hook may:
 - classify a clear bulk/sharded prompt as delegation-required;
 - inject the delegation/fan-out policy into the current context;
 - deny parent mutation until required delegation evidence exists;
-- select delegation queue only through the installed multiplexer for a validated available single-stream backend, otherwise require actual overlapping workers for multi-subsystem fan-out;
+- select delegation queue only through the installed multiplexer for a validated available single-stream backend, require actual overlapping workers for round-robin virtual pools and ordinary multi-subsystem fan-out, and preserve the one-dispatcher exception for FIFO queues;
 - block turn completion until the required delegation evidence exists;
 - record each worker whose task finished, and block new spawns and turn completion until those workers are dismissed with `TaskStop`;
 - fail open only when the Agent runtime/model/concurrency path is observed to be unavailable.

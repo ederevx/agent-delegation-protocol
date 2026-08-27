@@ -18,7 +18,7 @@ Prefer the installed custom agents. `bulk_worker` is a lifecycle-visible dispatc
 
 The multiplexer is agent-agnostic. Each backend has one metadata document that declares a common capability interface, availability checks, limits, and either a native runtime binding or a custom command/API adapter. The top-level `native` boolean distinguishes those bindings. Routes contain only ordered backend IDs, so priority can be rearranged without changing host policy or adapter code. Selection first filters for the task's required capabilities and runtime, then chooses the first available route entry.
 
-Delegation queue is the explicit exception for a validated, available single-stream backend. When the hook selects it for a multi-workstream turn, one lifecycle-visible dispatcher submits all independent units as one ordered batch through multiplexer `queue`; no host-level overlap is required. Without that explicit selection, normal concurrent fan-out remains mandatory. Never silently retry an external or queued task on a native model after launch; native execution is valid only when the multiplexer selects the matching native backend before launch and returns its documented native-required receipt.
+Delegation queue is the explicit exception for a validated, available single-stream backend. A FIFO queue uses one lifecycle-visible dispatcher with one ordered `queue` batch. A round-robin queue exposes the backend as a virtual dispatcher pool: launch one lifecycle-visible dispatcher per independent workstream, up to the minimum of useful workstreams, the backend's advertised virtual slots, and available host child slots. Each dispatcher submits its own bounded task through multiplexer `run`; the multiplexer interleaves progress while keeping one physical provider call active. Never silently retry an external or queued task on a native model after launch; native execution is valid only when the multiplexer selects the matching native backend before launch and returns its documented native-required receipt.
 
 ## Mandatory delegation
 
@@ -28,7 +28,7 @@ Do not manufacture delegation for tiny, inseparable, or tightly coupled work.
 
 ## Mandatory concurrent fan-out
 
-When an eligible workload contains two or more independent subsystems, components, services, packages, directories, test groups, data partitions, or other safely separable workstreams, launch multiple child agents concurrently when runtime capacity permits it. The only exception is when the hook explicitly selects delegation queue for a validated single-stream backend; then launch one lifecycle-visible bulk dispatcher with one ordered batch.
+When an eligible workload contains two or more independent subsystems, components, services, packages, directories, test groups, data partitions, or other safely separable workstreams, launch multiple child agents concurrently when runtime capacity permits it. A selected FIFO queue uses one lifecycle-visible bulk dispatcher with one ordered batch. A selected round-robin queue still uses overlapping lifecycle-visible dispatchers, capped by its advertised virtual slots and host capacity; do not wait for one dispatcher to finish before launching the next.
 
 Do not serialize naturally parallel work through one child merely for convenience. Prefer one worker per coherent ownership boundary, up to useful concurrency. If the runtime limit is smaller than the useful worker count, run additional workstreams in waves.
 
@@ -66,7 +66,7 @@ Ad-hoc local edits are lost on reinstall, diverge silently between machines, and
 
 ## Hook interaction
 
-The installed Codex hook may classify a clear bulk/sharded turn as delegation-required, inject this policy as developer context, deny parent mutation until required delegation evidence exists, select delegation queue only through the installed multiplexer for a validated available single-stream backend, otherwise require actual overlapping workers for multi-subsystem fan-out, block turn completion until delegation requirements are satisfied, and record each worker whose task finished so that new spawns and turn completion are gated until those workers are dismissed.
+The installed Codex hook may classify a clear bulk/sharded turn as delegation-required, inject this policy as developer context, deny parent mutation until required delegation evidence exists, select delegation queue only through the installed multiplexer for a validated available single-stream backend, require actual overlapping workers for round-robin virtual pools and ordinary multi-subsystem fan-out, preserve the one-dispatcher exception for FIFO queues, block turn completion until delegation requirements are satisfied, and record each worker whose task finished so that new spawns and turn completion are gated until those workers are dismissed.
 
 If the hook does not classify a task mechanically but this policy clearly applies, follow this policy proactively anyway.
 
