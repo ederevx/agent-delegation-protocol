@@ -548,6 +548,72 @@ else:
         self.assertEqual(job["classification"], "invalid_receipt")
         self.assertFalse(marker.exists())
 
+    def test_cooperative_permission_request_can_be_resumed(self) -> None:
+        stub = self.make_stub("permission-cooperative.py", """
+import json, sys
+value = json.load(sys.stdin)
+if value["operation"] == "start":
+    print(json.dumps({"state": "ready", "token": "permission-token"}))
+elif "permission_resolution" not in value:
+    print(json.dumps({
+        "state": "permission_required", "token": value["token"],
+        "request": {
+            "request_id": "request-1", "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+        },
+    }))
+else:
+    assert value["permission_resolution"] == {
+        "request_id": "request-1", "decision": "allow",
+    }
+    print(json.dumps({
+        "state": "complete", "exit_code": 0,
+        "classification": "success", "task_id": "A",
+    }))
+""")
+        self.write_agent(metadata("cooperative", [sys.executable, str(stub)],
+                                  cooperative=True))
+        self.write_routes(["cooperative"])
+        paused = self.run_mux("run", "--route", "bulk", "--runtime", "codex",
+                              task={"id": "A"})
+        self.assertEqual(paused.returncode, 9, paused.stdout)
+        paused_receipt = json.loads(paused.stdout)
+        self.assertEqual(paused_receipt["classification"], "permission_required")
+        self.assertEqual(paused_receipt["counts"]["permission_required"], 1)
+        job = paused_receipt["jobs"][0]
+        self.assertEqual(job["state"], "permission_required")
+        self.assertEqual(job["request"]["request_id"], "request-1")
+
+        resumed = self.run_mux(
+            "resume", "--route", "bulk", "--runtime", "codex",
+            task={
+                "backend": "cooperative", "token": job["token"],
+                "permission_resolution": {
+                    "request_id": "request-1", "decision": "allow",
+                },
+            },
+        )
+        self.assertEqual(resumed.returncode, 0, resumed.stdout)
+        resumed_receipt = json.loads(resumed.stdout)
+        self.assertEqual(resumed_receipt["classification"], "success")
+        self.assertEqual(resumed_receipt["jobs"][0]["task_id"], "A")
+
+    def test_cooperative_resume_request_is_validated(self) -> None:
+        self.write_agent(metadata("cooperative", [sys.executable, "unused.py"],
+                                  cooperative=True))
+        self.write_routes(["cooperative"])
+        result = self.run_mux(
+            "resume", "--route", "bulk", "--runtime", "codex",
+            task={
+                "backend": "cooperative", "token": "opaque",
+                "permission_resolution": {
+                    "request_id": "request-1", "decision": "handled",
+                },
+            },
+        )
+        self.assertEqual(result.returncode, 64)
+        self.assertIn("requires a result object", result.stdout)
+
     def test_cooperative_nonzero_yield_is_terminal(self) -> None:
         stub = self.make_stub("nonzero-yield.py", """
 import json, sys

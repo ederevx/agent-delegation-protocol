@@ -507,6 +507,44 @@ def read_queue_manifest(path: str | None, limit: int) -> bytes:
     return encoded
 
 
+def read_resume_request(path: str | None, limit: int) -> dict[str, Any]:
+    value = json.loads(read_task(path, limit))
+    unknown = sorted(set(value) - {"backend", "token", "permission_resolution"})
+    if unknown:
+        raise InputError(f"resume request has unknown fields: {', '.join(unknown)}")
+    backend = value.get("backend")
+    if not isinstance(backend, str) or not ID_PATTERN.fullmatch(backend):
+        raise InputError("resume backend must be a valid agent id")
+    token = value.get("token")
+    if (not isinstance(token, str) or not token
+            or len(token.encode("utf-8")) > 4096 or "\0" in token):
+        raise InputError("resume token must be a bounded non-empty string")
+    resolution = value.get("permission_resolution")
+    if not isinstance(resolution, dict):
+        raise InputError("permission_resolution must be an object")
+    unknown_resolution = sorted(
+        set(resolution) - {"request_id", "decision", "result"}
+    )
+    if unknown_resolution:
+        raise InputError(
+            "permission_resolution has unknown fields: "
+            + ", ".join(unknown_resolution)
+        )
+    request_id = resolution.get("request_id")
+    if (not isinstance(request_id, str) or not request_id
+            or len(request_id.encode("utf-8")) > 4096 or "\0" in request_id):
+        raise InputError("permission_resolution request_id must be bounded")
+    decision = resolution.get("decision")
+    if decision not in ("allow", "deny", "handled"):
+        raise InputError("permission_resolution decision must be allow, deny, or handled")
+    if decision == "handled":
+        if not isinstance(resolution.get("result"), dict):
+            raise InputError("handled permission_resolution requires a result object")
+    elif "result" in resolution:
+        raise InputError("permission_resolution result is valid only for handled")
+    return value
+
+
 def invoke(agent: dict[str, Any], raw_task: bytes,
            timeout_seconds: float | None = None) -> tuple[dict[str, Any], int, bool]:
     binding = agent["binding"]
@@ -594,7 +632,8 @@ def invoke(agent: dict[str, Any], raw_task: bytes,
 def _cooperative_envelope(operation: str, quantum: dict[str, Any], *,
                           task: dict[str, Any] | None = None,
                           token: str | None = None,
-                          reason: str | None = None) -> bytes:
+                          reason: str | None = None,
+                          permission_resolution: dict[str, Any] | None = None) -> bytes:
     value: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION, "adapter_protocol": "cooperative-v1",
         "operation": operation,
@@ -606,20 +645,22 @@ def _cooperative_envelope(operation: str, quantum: dict[str, Any], *,
         value["token"] = token
     if reason is not None:
         value["reason"] = reason
+    if permission_resolution is not None:
+        value["permission_resolution"] = permission_resolution
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
 def _cooperative_state(receipt: dict[str, Any], operation: str) -> tuple[str, str | None]:
     state = receipt.get("state")
     allowed = ("ready", "failed") if operation == "start" else (
-        "yielded", "complete", "failed"
+        "yielded", "permission_required", "complete", "failed"
     )
     if state not in allowed:
         raise InputError(
             f"cooperative {operation} receipt has invalid state"
         )
     token = receipt.get("token")
-    if state in ("ready", "yielded") and (
+    if state in ("ready", "yielded", "permission_required") and (
         not isinstance(token, str) or not token or len(token.encode("utf-8")) > 4096
         or "\0" in token
     ):
@@ -655,15 +696,24 @@ def _cancel_cooperative(agent: dict[str, Any], token: str,
 
 
 def run_cooperative(agent: dict[str, Any], tasks: list[dict[str, Any]],
-                    stop_on_error: bool) -> tuple[dict[str, Any], int]:
+                    stop_on_error: bool,
+                    resume: dict[str, Any] | None = None) -> tuple[dict[str, Any], int]:
     """Run tasks through cooperative-v1, rotating after every bounded slice."""
     policy = agent["queue_policy"]
     quantum = policy["quantum"]
-    pending: list[dict[str, Any]] = [
-        {"index": index, "task": task, "operation": "start", "token": None,
-         "slices": 0, "deadline": None}
-        for index, task in enumerate(tasks)
-    ]
+    if resume is None:
+        pending: list[dict[str, Any]] = [
+            {"index": index, "task": task, "operation": "start", "token": None,
+             "slices": 0, "deadline": None, "permission_resolution": None}
+            for index, task in enumerate(tasks)
+        ]
+    else:
+        pending = [{
+            "index": 0, "task": None, "operation": "step",
+            "token": resume["token"], "slices": 0, "deadline": None,
+            "permission_resolution": resume["permission_resolution"],
+        }]
+    requested = len(pending)
     jobs: list[dict[str, Any]] = []
     terminal_failure = False
     while pending:
@@ -687,7 +737,9 @@ def run_cooperative(agent: dict[str, Any], tasks: list[dict[str, Any]],
                 item["operation"], quantum,
                 task=item["task"] if item["operation"] == "start" else None,
                 token=item["token"],
+                permission_resolution=item["permission_resolution"],
             )
+            item["permission_resolution"] = None
             if len(envelope) > agent["binding"]["max_input_bytes"]:
                 receipt = {
                     "schema_version": 1, "state": "failed",
@@ -727,7 +779,7 @@ def run_cooperative(agent: dict[str, Any], tasks: list[dict[str, Any]],
                     "error": str(error), "backend_receipt": receipt,
                 }
                 state, token, status = "failed", None, 65
-        if state in ("ready", "yielded") and status != 0:
+        if state in ("ready", "yielded", "permission_required") and status != 0:
             receipt = {
                 "schema_version": 1, "state": "failed",
                 "classification": "adapter_error", "status": "adapter_error",
@@ -753,6 +805,14 @@ def run_cooperative(agent: dict[str, Any], tasks: list[dict[str, Any]],
             item["operation"] = "step"
             item["token"] = token
             pending.append(item)
+            continue
+        if state == "permission_required":
+            job = dict(receipt)
+            job["adapter_exit_code"] = status
+            job["queue_index"] = item["index"]
+            job["slices"] = item["slices"]
+            job["exit_code"] = 9
+            jobs.append(job)
             continue
         job = dict(receipt)
         task_status = job.get("exit_code", status)
@@ -800,19 +860,27 @@ def run_cooperative(agent: dict[str, Any], tasks: list[dict[str, Any]],
     succeeded = sum(job["state"] == "complete" and job.get("exit_code", 0) == 0
                     for job in jobs)
     failed = sum(job["state"] == "failed" or job.get("exit_code", 0) != 0
-                 for job in jobs)
-    classification = "success" if not terminal_failure else "partial_failure"
+                 for job in jobs if job["state"] != "permission_required")
+    permissions = sum(job["state"] == "permission_required" for job in jobs)
+    classification = (
+        "partial_failure" if terminal_failure else
+        "permission_required" if permissions else
+        "success"
+    )
+    counts = {"requested": requested, "completed": completed,
+              "succeeded": succeeded, "failed": failed,
+              "skipped": requested - completed - permissions}
+    if permissions:
+        counts["permission_required"] = permissions
     result = {
         "schema_version": 1, "classification": classification,
         "status": classification, "backend": agent["id"],
         "protocol": "cooperative-v1", "queue_policy": policy,
         "stop_on_error": stop_on_error,
-        "counts": {"requested": len(tasks), "completed": completed,
-                   "succeeded": succeeded, "failed": failed,
-                   "skipped": len(tasks) - completed},
+        "counts": counts,
         "jobs": jobs,
     }
-    return result, 0 if not terminal_failure else 1
+    return result, 1 if terminal_failure else 9 if permissions else 0
 
 
 def parser() -> argparse.ArgumentParser:
@@ -824,7 +892,7 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("validate")
     listing = commands.add_parser("list")
     listing.add_argument("--route")
-    for name in ("select", "run", "queue"):
+    for name in ("select", "run", "queue", "resume"):
         command = commands.add_parser(name)
         command.add_argument("--route", required=True)
         command.add_argument("--runtime")
@@ -837,6 +905,8 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--delegation-queue", action="store_true")
         if name in ("run", "queue"):
             command.add_argument("--task-file")
+        if name == "resume":
+            command.add_argument("--resolution-file")
     return result
 
 
@@ -868,7 +938,7 @@ def main() -> int:
             "runtime", "platform", "mode", "workspace", "delivery",
         )}
         required = list(args.require)
-        queue_only = args.command == "queue" or (
+        queue_only = args.command in ("queue", "resume") or (
             args.command == "select" and args.delegation_queue
         )
         if queue_only and "batch" not in required:
@@ -885,6 +955,23 @@ def main() -> int:
         if args.command == "select":
             emit(selected[0])
             return 0
+        if args.command == "resume":
+            request = read_resume_request(args.resolution_file, DEFAULT_MAX_INPUT)
+            selected = [agent for agent in selected
+                        if agent["id"] == request["backend"]
+                        and agent["binding"].get("protocol") == "cooperative-v1"]
+            if not selected:
+                emit({
+                    "schema_version": 1, "classification": "no_backend",
+                    "status": "no_backend", "route": args.route,
+                    "backend": request["backend"],
+                })
+                return 69
+            receipt, status = run_cooperative(
+                selected[0], [], False, resume=request
+            )
+            emit(receipt)
+            return status
         if args.command == "queue":
             agent = selected[0]
             limit = min(agent["binding"].get("max_input_bytes", DEFAULT_MAX_INPUT),
