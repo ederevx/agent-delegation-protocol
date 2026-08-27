@@ -10,13 +10,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from multiplexer import select_queue_backend
+
 HERE = Path(__file__).resolve().parent
 MUX = HERE / "multiplexer.py"
 ADAPTER = HERE / "custom-adapter-template.py"
 
 
 def metadata(agent_id: str, argv: list[str] | None = None, *, native: bool = False,
-             runtime: str = "codex", concurrency: int = 1) -> dict[str, object]:
+             runtime: str = "codex", concurrency: int = 1,
+             delegation_queue: bool = False) -> dict[str, object]:
     binding: dict[str, object]
     if native:
         binding = {"runtime": runtime, "agent_type": "bulk_worker", "reasoning_effort": "medium"}
@@ -28,6 +31,7 @@ def metadata(agent_id: str, argv: list[str] | None = None, *, native: bool = Fal
     return {
         "schema_version": 1, "id": agent_id, "name": agent_id,
         "description": "test agent", "native": native, "provider": "test",
+        "delegation_queue": delegation_queue,
         "model": "test-model", "binding": binding,
         "capabilities": {
             "functions": ["audit", "edit"],
@@ -91,6 +95,38 @@ class MultiplexerTests(unittest.TestCase):
         result = self.run_mux("validate")
         self.assertEqual(result.returncode, 64)
         self.assertIn("unknown fields: surprise", json.loads(result.stdout)["error"])
+
+    def test_queue_metadata_contract_is_enforced(self) -> None:
+        invalid = metadata("invalid", native=True, delegation_queue=True)
+        self.write_agent(invalid)
+        self.write_routes(["invalid"])
+        result = self.run_mux("validate")
+        self.assertEqual(result.returncode, 64)
+        self.assertIn("delegation_queue requires native=false", result.stdout)
+
+        invalid["native"] = False
+        invalid["binding"] = {
+            "argv": [sys.executable, "unused.py"], "max_input_bytes": 1048576,
+            "max_output_bytes": 2097152, "timeout_seconds": 10,
+        }
+        result = self.run_mux("validate")
+        self.assertEqual(result.returncode, 64)
+        self.assertIn("batch function", result.stdout)
+
+        invalid["capabilities"]["functions"].append("batch")
+        invalid["limits"]["max_concurrency"] = 2
+        result = self.run_mux("validate")
+        self.assertEqual(result.returncode, 64)
+        self.assertIn("limits.max_concurrency=1", result.stdout)
+
+    def test_queue_metadata_field_is_required(self) -> None:
+        invalid = metadata("invalid", [sys.executable, "unused.py"])
+        del invalid["delegation_queue"]
+        self.write_agent(invalid)
+        self.write_routes(["invalid"])
+        result = self.run_mux("validate")
+        self.assertEqual(result.returncode, 64)
+        self.assertIn("missing fields: delegation_queue", result.stdout)
 
     def test_priority_skips_unavailable_and_filters_capabilities(self) -> None:
         self.write_agent(metadata("missing", ["definitely-not-an-installed-worker"] ))
@@ -216,6 +252,107 @@ print(json.dumps({{"schema_version": 1, "classification": "success"}}))
             self.assertEqual(process.returncode, 0)
         self.assertEqual(events.read_text(encoding="utf-8").splitlines(),
                          ["start", "end", "start", "end"])
+
+    def test_queue_passes_full_manifest_in_one_invocation(self) -> None:
+        calls = self.root / "calls"
+        stub = self.make_stub("queue.py", f"""
+import json, sys
+from pathlib import Path
+manifest = json.load(sys.stdin)
+p = Path({str(calls)!r})
+p.write_text(str(int(p.read_text()) + 1) if p.exists() else "1")
+print(json.dumps({{"classification": "success", "seen": manifest}}))
+""")
+        queued = metadata("queued", [sys.executable, str(stub)],
+                          delegation_queue=True)
+        queued["capabilities"]["functions"].append("batch")
+        self.write_agent(queued)
+        self.write_routes(["queued"])
+        manifest = {"tasks": [{"id": "one"}, {"id": "two"}],
+                    "stop_on_error": True}
+        result = self.run_mux("queue", "--route", "bulk", "--runtime", "codex",
+                              task=manifest)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["seen"], manifest)
+        self.assertEqual(calls.read_text(), "1")
+
+        selected = select_queue_backend(
+            self.catalog, self.routes, "bulk", "codex", "linux"
+        )
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["id"], "queued")
+        self.assertIsNone(select_queue_backend(
+            self.catalog, self.routes, "bulk", "codex", "windows"
+        ))
+
+    def test_queue_rejects_invalid_manifest_before_launch(self) -> None:
+        marker = self.root / "ran"
+        stub = self.make_stub("must-not-run.py", f"from pathlib import Path\nPath({str(marker)!r}).touch()\n")
+        queued = metadata("queued", [sys.executable, str(stub)],
+                          delegation_queue=True)
+        queued["capabilities"]["functions"].append("batch")
+        self.write_agent(queued)
+        self.write_routes(["queued"])
+        for manifest in ({"tasks": []}, {"tasks": [{}], "extra": True},
+                         {"tasks": [{}], "stop_on_error": "yes"}):
+            result = self.run_mux("queue", "--route", "bulk", "--runtime", "codex",
+                                  task=manifest)
+            self.assertEqual(result.returncode, 64)
+        self.assertFalse(marker.exists())
+
+    def test_queue_does_not_replay_or_fall_back_to_native(self) -> None:
+        stub = self.make_stub(
+            "bad-queue.py", "import sys\nsys.stdin.read()\nprint('bad')\n"
+        )
+        queued = metadata("queued", [sys.executable, str(stub)],
+                          delegation_queue=True)
+        queued["capabilities"]["functions"].append("batch")
+        native = metadata("native", native=True)
+        native["capabilities"]["functions"].append("batch")
+        self.write_agent(queued)
+        self.write_agent(native)
+        self.write_routes(["queued", "native"])
+        result = self.run_mux("queue", "--route", "bulk", "--runtime", "codex",
+                              task={"tasks": [{"id": "one"}]})
+        self.assertEqual(result.returncode, 65)
+        self.assertEqual(json.loads(result.stdout)["backend"], "queued")
+        selected = self.run_mux("select", "--delegation-queue", "--route", "bulk",
+                                "--runtime", "codex")
+        self.assertEqual(json.loads(selected.stdout)["id"], "queued")
+
+    def test_queue_lock_serializes_complete_manifests(self) -> None:
+        events = self.root / "queue-events"
+        stub = self.make_stub("slow-queue.py", f"""
+import json, sys, time
+from pathlib import Path
+manifest = json.load(sys.stdin)
+p = Path({str(events)!r})
+name = manifest["tasks"][0]["id"]
+with p.open("a") as f: f.write(name + ":start\\n")
+time.sleep(0.25)
+with p.open("a") as f: f.write(name + ":end\\n")
+print(json.dumps({{"classification": "success"}}))
+""")
+        queued = metadata("queued", [sys.executable, str(stub)],
+                          delegation_queue=True)
+        queued["capabilities"]["functions"].append("batch")
+        self.write_agent(queued)
+        self.write_routes(["queued"])
+        command = [sys.executable, str(MUX), "--catalog", str(self.catalog),
+                   "--routes", str(self.routes), "queue", "--route", "bulk",
+                   "--runtime", "codex"]
+        env = os.environ.copy()
+        env["AGENT_MULTIPLEXER_STATE_DIR"] = str(self.state)
+        processes = [subprocess.Popen(
+            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, env=env
+        ) for _ in range(2)]
+        for index, process in enumerate(processes):
+            process.communicate(json.dumps({"tasks": [{"id": str(index)}]}), timeout=5)
+            self.assertEqual(process.returncode, 0)
+        lines = events.read_text().splitlines()
+        self.assertIn(lines, (["0:start", "0:end", "1:start", "1:end"],
+                              ["1:start", "1:end", "0:start", "0:end"]))
 
 
 class AdapterTemplateTests(unittest.TestCase):

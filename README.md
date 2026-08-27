@@ -28,15 +28,29 @@ Use non-overlapping ownership where practical, explicit interfaces/acceptance cr
 
 ## Agent metadata and routing
 
-Every backend is described by one JSON metadata document under [`agents/catalog`](agents/catalog). The common interface declares named functions, compatibility capabilities, execution limits, and a binding; command availability is derived from that binding. A top-level `native` boolean selects between a host-native agent binding and a custom command/API adapter. Provider-specific behavior stays in the adapter rather than leaking into Codex, Claude, or the route selector.
+Every backend is described by one JSON metadata document under [`agents/catalog`](agents/catalog). The common interface declares named functions, compatibility capabilities, execution limits, and a binding; command availability is derived from that binding. A top-level `native` boolean selects between a host-native agent binding and a custom command/API adapter. The required `delegation_queue` boolean opts a custom, single-concurrency backend with the `batch` function into whole-manifest queue dispatch. Provider-specific behavior stays in the adapter rather than leaking into Codex, Claude, or the route selector.
 
 [`agents/multiplexer.json`](agents/multiplexer.json) is intentionally small: each route is an ordered list of backend IDs. The multiplexer filters that list by the task's required capabilities and runtime, then selects the first available entry. Reorder the IDs to change priority; no policy or adapter rewrite is needed.
 
 External workers receive one bounded common task or batch on stdin and return a machine-readable JSON receipt. A backend that has already launched is never silently retried on another provider. Native selection happens before launch and is represented by a `native_required` receipt and exit status 69, which the lifecycle-visible host worker validates before doing the task itself.
 
+### Delegation queue
+
+The delegation queue is specialized for APIs that expose one sequential agent
+stream. A queue backend declares `"delegation_queue": true`, `native: false`,
+the `batch` function, and `limits.max_concurrency: 1`. These constraints are
+validated together so a queue can never resolve to a native or multi-lane
+backend.
+
+`multiplexer.py queue` accepts only a manifest containing `tasks` (1–32 JSON
+objects) and optional boolean `stop_on_error`. It selects one explicit queue
+backend, holds that backend's single-lane lock for the entire manifest, and
+invokes its adapter once. It never replays or falls through after selection;
+use `select --delegation-queue` for a non-executing dispatcher preflight.
+
 ### Add a custom API
 
-1. Copy [`agents/templates/custom-agent.json`](agents/templates/custom-agent.json) into `agents/catalog/` and fill in the backend identity, `native` value, capabilities, availability, limits, and adapter binding.
+1. Copy [`agents/templates/custom-agent.json`](agents/templates/custom-agent.json) into `agents/catalog/` and fill in the backend identity, `native` and `delegation_queue` values, capabilities, availability, limits, and adapter binding.
 2. Copy [`scripts/agents/custom-adapter-template.py`](scripts/agents/custom-adapter-template.py), implement the bounded stdin-to-receipt API call, and reference it from the metadata. Keep credentials in environment or a credential manager, never in metadata.
 3. Add the metadata ID to the desired ordered route in [`agents/multiplexer.json`](agents/multiplexer.json).
 4. Run the multiplexer validation/tests, then rerun the applicable host installer so the installed links are present.

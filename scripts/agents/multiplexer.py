@@ -55,12 +55,14 @@ def validate_agent(agent: Any, source: str) -> dict[str, Any]:
     if not isinstance(agent, dict):
         raise ConfigurationError(f"{source}: metadata must be a JSON object")
     _reject_unknown(agent, {
-        "schema_version", "id", "name", "description", "native", "provider",
-        "model", "binding", "capabilities", "limits",
+        "schema_version", "id", "name", "description", "native",
+        "delegation_queue", "provider", "model", "binding", "capabilities",
+        "limits",
     }, source)
     required = {
-        "schema_version", "id", "name", "description", "native", "provider",
-        "model", "binding", "capabilities", "limits",
+        "schema_version", "id", "name", "description", "native",
+        "delegation_queue", "provider", "model", "binding", "capabilities",
+        "limits",
     }
     missing = sorted(required - set(agent))
     if missing:
@@ -72,6 +74,8 @@ def validate_agent(agent: Any, source: str) -> dict[str, Any]:
         raise ConfigurationError(f"{source}: invalid id")
     if not isinstance(agent["native"], bool):
         raise ConfigurationError(f"{source}: native must be boolean")
+    if not isinstance(agent["delegation_queue"], bool):
+        raise ConfigurationError(f"{source}: delegation_queue must be boolean")
     for field in ("name", "description", "provider", "model"):
         if not isinstance(agent[field], str) or not agent[field].strip():
             raise ConfigurationError(f"{source}: {field} must be a non-empty string")
@@ -127,6 +131,15 @@ def validate_agent(agent: Any, source: str) -> dict[str, Any]:
         raise ConfigurationError(f"{source}: limits must be an object")
     _reject_unknown(limits, {"max_concurrency"}, f"{source}: limits")
     _positive_int(limits.get("max_concurrency"), f"{source}: limits.max_concurrency")
+    if agent["delegation_queue"] and (
+        agent["native"]
+        or "batch" not in capabilities["functions"]
+        or limits["max_concurrency"] != 1
+    ):
+        raise ConfigurationError(
+            f"{source}: delegation_queue requires native=false, the batch "
+            "function, and limits.max_concurrency=1"
+        )
     return agent
 
 
@@ -209,6 +222,28 @@ def candidates(route: str, routes: dict[str, list[str]], agents: dict[str, dict[
             and is_available(agents[agent_id])]
 
 
+def runtime_platform() -> str:
+    return {"win32": "windows", "darwin": "darwin"}.get(
+        sys.platform, sys.platform
+    )
+
+
+def select_queue_backend(catalog_dir: Path, routes_path: Path, route: str,
+                         runtime: str, platform: str | None = None
+                         ) -> dict[str, Any] | None:
+    """Return the first available queue backend on a validated route."""
+    agents = load_catalog(catalog_dir)
+    routes = load_routes(routes_path, agents)
+    filters = {
+        "runtime": runtime, "platform": platform or runtime_platform(), "mode": None,
+        "workspace": None, "delivery": None,
+    }
+    selected = candidates(route, routes, agents, filters, ["batch"])
+    return next(
+        (agent for agent in selected if agent["delegation_queue"]), None
+    )
+
+
 def state_root() -> Path:
     configured = os.environ.get("AGENT_MULTIPLEXER_STATE_DIR")
     if configured:
@@ -268,6 +303,28 @@ def read_task(path: str | None, limit: int) -> bytes:
     if not isinstance(value, dict):
         raise InputError("task must be a JSON object")
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def read_queue_manifest(path: str | None, limit: int) -> bytes:
+    raw = read_task(path, limit)
+    value = json.loads(raw)
+    unknown = sorted(set(value) - {"tasks", "stop_on_error"})
+    if unknown:
+        raise InputError(f"queue manifest has unknown fields: {', '.join(unknown)}")
+    tasks = value.get("tasks")
+    if (not isinstance(tasks, list) or not 1 <= len(tasks) <= 32
+            or any(not isinstance(task, dict) for task in tasks)):
+        raise InputError("queue tasks must contain 1 to 32 JSON objects")
+    stop_on_error = value.get("stop_on_error", False)
+    if not isinstance(stop_on_error, bool):
+        raise InputError("queue stop_on_error must be boolean")
+    manifest = {"tasks": tasks, "stop_on_error": stop_on_error}
+    encoded = json.dumps(
+        manifest, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    if len(encoded) > limit:
+        raise InputError(f"task exceeds {limit} bytes")
+    return encoded
 
 
 def invoke(agent: dict[str, Any], raw_task: bytes) -> tuple[dict[str, Any], int, bool]:
@@ -350,16 +407,18 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("validate")
     listing = commands.add_parser("list")
     listing.add_argument("--route")
-    for name in ("select", "run"):
+    for name in ("select", "run", "queue"):
         command = commands.add_parser(name)
         command.add_argument("--route", required=True)
         command.add_argument("--runtime")
-        command.add_argument("--platform", default=sys.platform.replace("win32", "windows").replace("darwin", "darwin"))
+        command.add_argument("--platform", default=runtime_platform())
         command.add_argument("--mode")
         command.add_argument("--workspace")
         command.add_argument("--delivery")
         command.add_argument("--require", action="append", default=[])
-        if name == "run":
+        if name == "select":
+            command.add_argument("--delegation-queue", action="store_true")
+        if name in ("run", "queue"):
             command.add_argument("--task-file")
     return result
 
@@ -391,7 +450,15 @@ def main() -> int:
         filters = {name: getattr(args, name) for name in (
             "runtime", "platform", "mode", "workspace", "delivery",
         )}
-        selected = candidates(args.route, routes, agents, filters, args.require)
+        required = list(args.require)
+        queue_only = args.command == "queue" or (
+            args.command == "select" and args.delegation_queue
+        )
+        if queue_only and "batch" not in required:
+            required.append("batch")
+        selected = candidates(args.route, routes, agents, filters, required)
+        if queue_only:
+            selected = [agent for agent in selected if agent["delegation_queue"]]
         if not selected:
             emit({
                 "schema_version": 1, "classification": "no_backend",
@@ -401,6 +468,15 @@ def main() -> int:
         if args.command == "select":
             emit(selected[0])
             return 0
+        if args.command == "queue":
+            agent = selected[0]
+            limit = min(agent["binding"].get("max_input_bytes", DEFAULT_MAX_INPUT),
+                        DEFAULT_MAX_INPUT)
+            task = read_queue_manifest(args.task_file, limit)
+            with concurrency_lock(agent):
+                receipt, status, _ = invoke(agent, task)
+            emit(receipt)
+            return status
         task = read_task(args.task_file, DEFAULT_MAX_INPUT) if args.command == "run" else None
         last_launch_failure: dict[str, Any] | None = None
         for agent in selected:

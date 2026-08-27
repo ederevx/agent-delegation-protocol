@@ -18,7 +18,7 @@ Never silently retry an external task on the native model after it launches. Nat
 
 ## Parallel fan-out
 
-When an eligible task contains two or more independent subsystems, services, modules, packages, directories, test groups, data partitions, or other safely separable workstreams, use multiple subagents concurrently when runtime capacity permits it. For a sequential one-lane backend, those lifecycle-visible dispatchers may overlap while the multiplexer queues their provider calls. An ordered batch is also valid when host-level fan-out is not required.
+When an eligible task contains two or more independent subsystems, services, modules, packages, directories, test groups, data partitions, or other safely separable workstreams, use multiple subagents concurrently when runtime capacity permits it. The only exception is when the hook explicitly selects delegation queue for a validated available single-stream backend; then one lifecycle-visible bulk dispatcher submits all independent units as one ordered batch through multiplexer `queue`.
 
 Do not serialize naturally parallel work through one worker merely for convenience. Give workers non-overlapping primary ownership, explicit boundaries, acceptance criteria, and validation commands. Use worktree/equivalent isolation when parallel write-heavy work would otherwise conflict.
 
@@ -51,7 +51,7 @@ The installed Claude hook may:
 - classify a clear bulk/sharded prompt as delegation-required;
 - inject the delegation/fan-out policy into the current context;
 - deny parent mutation until required delegation evidence exists;
-- require actual overlapping workers for multi-subsystem fan-out, regardless of whether the selected backend serializes their calls;
+- select delegation queue only through the installed multiplexer for a validated available single-stream backend, otherwise require actual overlapping workers for multi-subsystem fan-out;
 - block turn completion until the required delegation evidence exists;
 - record each worker whose task finished, and block new spawns and turn completion until those workers are dismissed with `TaskStop`;
 - fail open only when the Agent runtime/model/concurrency path is observed to be unavailable.
