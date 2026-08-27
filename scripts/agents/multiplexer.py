@@ -674,6 +674,20 @@ def run_cooperative(agent: dict[str, Any], tasks: list[dict[str, Any]],
                 "adapter_exit_code": status, "backend_receipt": receipt,
             }
             state, token = "failed", None
+        if state == "yielded" and "retry_after_seconds" in receipt:
+            retry_after = receipt["retry_after_seconds"]
+            if (not isinstance(retry_after, (int, float))
+                    or isinstance(retry_after, bool)
+                    or not 0 <= retry_after <= 60):
+                receipt = {
+                    "schema_version": 1, "state": "failed",
+                    "classification": "invalid_receipt", "status": "invalid_receipt",
+                    "error": "cooperative retry_after_seconds must be between 0 and 60",
+                    "backend_receipt": receipt,
+                }
+                state, token, status = "failed", None, 65
+            elif retry_after:
+                time.sleep(min(float(retry_after), max(0.0, deadline - time.monotonic())))
         if state in ("ready", "yielded"):
             item["operation"] = "step"
             item["token"] = token
