@@ -94,17 +94,17 @@ operation may pause the same task again.
 
 That metadata document, one adapter, and one route membership are the complete extension surface for a custom API.
 
-The bundled `bulk` route contains the matching `native-codex-bulk` and
-`native-claude-bulk` entries. Capability and runtime filtering make the same
-route usable from both hosts. Optional API-backed bindings can be
-maintained on separate branches without coupling provider details to `main`.
+On `main`, the bundled `bulk` route contains matching native Codex and Claude
+entries. This `ci-agents` branch replaces that catalog with `deepseek-ci` as
+the only bulk backend. It binds the common task interface to the installed
+`ci-claude-worker` command, which runs DeepSeek V4 Flash through
+CheapestInference and declares its single-lane execution limit.
 
-The `ci-agents` branch adds `deepseek-ci` ahead of those native fallbacks. It
-binds the common task interface to the installed `ci-claude-worker` command,
-which runs DeepSeek V4 Flash through CheapestInference and declares its
-single-lane execution limit to the multiplexer. Delegation queue is enabled,
-so one lifecycle-visible dispatcher submits an ordered multi-task manifest to
-that single stream.
+Delegation queue is enabled, so one lifecycle-visible Codex or Claude host
+dispatcher submits an ordered multi-task manifest to that single stream. Those
+host workers remain installed only to preserve lifecycle enforcement; they are
+not route members or native fallbacks. If DeepSeek is unavailable, the queue
+returns `no_backend` instead of replaying work natively.
 
 ## Workers ask before conflicting
 
