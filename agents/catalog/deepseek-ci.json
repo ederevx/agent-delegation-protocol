@@ -19,8 +19,8 @@
     "thinking": {
       "type": "adaptive"
     },
-    "effort": "medium",
-    "max_output_tokens": 16384
+    "effort": "low",
+    "max_output_tokens": 32000
   },
   "binding": {
     "argv": ["ci-claude-worker", "--cooperative"],
