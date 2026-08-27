@@ -102,7 +102,9 @@ maintained on separate branches without coupling provider details to `main`.
 The `ci-agents` branch adds `deepseek-ci` ahead of those native fallbacks. It
 binds the common task interface to the installed `ci-claude-worker` command,
 which runs DeepSeek V4 Flash through CheapestInference and declares its
-single-lane execution limit to the multiplexer.
+single-lane execution limit to the multiplexer. Delegation queue is enabled,
+so one lifecycle-visible dispatcher submits an ordered multi-task manifest to
+that single stream.
 
 ## Workers ask before conflicting
 
