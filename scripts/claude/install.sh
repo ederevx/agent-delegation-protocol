@@ -36,10 +36,13 @@ safe_link() {
 safe_link "$repo_root/claude/rules/delegation-protocol.md" "$claude_home/rules/delegation-protocol.md"
 safe_link "$repo_root/claude/agents/bulk-worker.md" "$claude_home/agents/bulk-worker.md"
 safe_link "$repo_root/claude/hooks/delegation-enforcer.py" "$claude_home/hooks/delegation-enforcer.py"
+safe_link "$repo_root/scripts/agents/multiplexer.py" "$claude_home/.delegation-protocol/multiplexer.py"
+safe_link "$repo_root/agents/catalog" "$claude_home/.delegation-protocol/catalog"
+safe_link "$repo_root/agents/multiplexer.json" "$claude_home/.delegation-protocol/multiplexer.json"
 
 "$python_exe" "$repo_root/scripts/claude/manage-settings.py" install \
   --claude-home "$claude_home" \
   --hook-path "$claude_home/hooks/delegation-enforcer.py" \
   --python "$python_exe"
 
-echo "Installed Claude delegation protocol only: hooks, settings, rule, and bulk-worker. Restart Claude Code sessions."
+echo "Installed Claude delegation protocol only: hooks, settings, rule, bulk-worker, and agent multiplexer. Restart Claude Code sessions."

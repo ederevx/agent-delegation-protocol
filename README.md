@@ -1,6 +1,6 @@
 # Agent Delegation Protocol
 
-A configuration protocol that makes a frontier coding model act as coordinator while delegating bounded bulk work to cheaper supported workers, mechanically enforced by lifecycle hooks in both Codex and Claude Code.
+A configuration protocol that makes a frontier coding model act as coordinator while delegating bounded bulk work through an agent-agnostic backend multiplexer, mechanically enforced by lifecycle hooks in both Codex and Claude Code.
 
 Codex and Claude Code are intentionally **independent installations**. There is no combined installer. Installing one agent must not modify the other agent's configuration.
 
@@ -10,19 +10,43 @@ The protocol is supplementary: existing applicable instructions, hooks, and sett
 
 For eligible bulk/high-volume work, preserve frontier-model effort for planning, ambiguity, difficult reasoning, architecture, integration, conflict resolution, and final validation. Delegate bounded work to the cheapest suitable worker.
 
-When a task contains multiple independent subsystems, components, modules, services, packages, directories, test groups, data partitions, or other safely separable workstreams, use **multiple concurrent agents** when runtime capacity permits it instead of serializing naturally parallel work through one worker.
+When a task contains multiple independent workstreams, use concurrent lifecycle-visible agents when runtime capacity permits it. The multiplexer serializes calls to a one-lane API, so native fan-out evidence does not create overlapping provider requests.
 
 ```text
 Frontier parent / coordinator
-├── cheap worker → subsystem A
-├── cheap worker → subsystem B
-├── cheap worker → subsystem C
-└── stronger worker → unusually difficult subsystem D
+        ↓ bounded task or ordered batch
+lifecycle-visible bulk worker
+        ↓ required capabilities
+ordered agent multiplexer route
         ↓
+external command/API adapter or native host binding
+        ↓ JSON receipt
 parent integration + repository-wide validation
 ```
 
 Use non-overlapping ownership where practical, explicit interfaces/acceptance criteria, isolation for conflicting write-heavy work, and parent-controlled integration. The goal is useful parallelism, not maximum agent count.
+
+## Agent metadata and routing
+
+Every backend is described by one JSON metadata document under [`agents/catalog`](agents/catalog). The common interface declares named functions, compatibility capabilities, execution limits, and a binding; command availability is derived from that binding. A top-level `native` boolean selects between a host-native agent binding and a custom command/API adapter. Provider-specific behavior stays in the adapter rather than leaking into Codex, Claude, or the route selector.
+
+[`agents/multiplexer.json`](agents/multiplexer.json) is intentionally small: each route is an ordered list of backend IDs. The multiplexer filters that list by the task's required capabilities and runtime, then selects the first available entry. Reorder the IDs to change priority; no policy or adapter rewrite is needed.
+
+External workers receive one bounded common task or batch on stdin and return a machine-readable JSON receipt. A backend that has already launched is never silently retried on another provider. Native selection happens before launch and is represented by a `native_required` receipt and exit status 69, which the lifecycle-visible host worker validates before doing the task itself.
+
+### Add a custom API
+
+1. Copy [`agents/templates/custom-agent.json`](agents/templates/custom-agent.json) into `agents/catalog/` and fill in the backend identity, `native` value, capabilities, availability, limits, and adapter binding.
+2. Copy [`scripts/agents/custom-adapter-template.py`](scripts/agents/custom-adapter-template.py), implement the bounded stdin-to-receipt API call, and reference it from the metadata. Keep credentials in environment or a credential manager, never in metadata.
+3. Add the metadata ID to the desired ordered route in [`agents/multiplexer.json`](agents/multiplexer.json).
+4. Run the multiplexer validation/tests, then rerun the applicable host installer so the installed links are present.
+
+That metadata document, one adapter, and one ordered route entry are the complete extension surface for a custom API.
+
+The bundled `bulk` route contains the matching `native-codex-bulk` and
+`native-claude-bulk` entries. Capability and runtime filtering make the same
+ordered route usable from both hosts. Optional API-backed bindings can be
+maintained on separate branches without coupling provider details to `main`.
 
 ## Workers ask before conflicting
 
@@ -80,13 +104,14 @@ Windows PowerShell:
 .\scripts\codex\install.ps1
 ```
 
-Codex now uses a three-layer implementation:
+Codex now uses a four-layer implementation:
 
 1. **AGENTS authorization/semantic policy** — standing authorization for subagents and parallel delegation while preserving pre-existing global instructions.
-2. **Custom worker agents** — `bulk_worker` pinned to GPT-5.6 Luna and `balanced_worker` pinned to GPT-5.6 Terra, avoiding a global cheap-model default that would also affect difficult subagents.
-3. **Lifecycle hooks** — `UserPromptSubmit`, `SubagentStart`, `SubagentStop`, `PreToolUse`, `PostToolUse(Agent)`, and `Stop` mechanically gate clear bulk/sharded work.
+2. **Custom worker agents** — `bulk_worker` is the lifecycle-visible multiplexer dispatcher; `balanced_worker` remains pinned to GPT-5.6 Terra for work that needs more judgment.
+3. **Agent multiplexer** — capability-filtered, priority-ordered routing across native bindings and custom command/API adapters.
+4. **Lifecycle hooks** — `UserPromptSubmit`, `SubagentStart`, `SubagentStop`, `PreToolUse`, `PostToolUse(Agent)`, and `Stop` mechanically gate clear bulk/sharded work.
 
-For multi-subsystem tasks the Codex hook requires evidence of **actual overlapping workers**, not merely two sequential agent runs.
+For multi-subsystem tasks the Codex hook requires evidence of **actual overlapping workers**, not merely two sequential agent runs. If the selected backend is one-lane, the multiplexer queues those workers' provider calls.
 
 **Important:** current Codex requires non-managed hooks to be reviewed/trusted. After installation, restart Codex, run `/hooks`, review the protocol definition, and trust/enable it. Until then, the AGENTS policy/custom workers are installed but mechanical hook enforcement may be skipped.
 
@@ -110,14 +135,15 @@ Windows PowerShell:
 
 Claude installation manages only the configured Claude home (normally `~/.claude`) and installs:
 
-- a `bulk-worker` custom subagent using the Haiku model alias;
+- a lifecycle-visible `bulk-worker` dispatcher with Haiku as its native binding;
+- the shared agent catalog, route configuration, and multiplexer;
 - a supplementary semantic rule;
 - a local enforcement hook;
 - non-destructively merged lifecycle hooks in `settings.json`;
 - explicit subagent concurrency/depth defaults when absent;
 - experimental agent teams when absent, as an optional additional coordination capability.
 
-Claude enforcement is not text-only. The hook classifies clear bulk/sharded requests, records actual worker starts/stops, denies parent mutation before required delegation, and blocks turn completion until delegation requirements are satisfied. Independent-subsystem work requires actual overlapping workers.
+Claude enforcement is not text-only. The hook classifies clear bulk/sharded requests, records actual worker starts/stops, denies parent mutation before required delegation, and blocks turn completion until delegation requirements are satisfied. Independent-subsystem work uses overlapping lifecycle-visible workers; the multiplexer serializes a backend that declares one lane.
 
 See [`claude/INSTALL.md`](claude/INSTALL.md).
 
@@ -137,11 +163,12 @@ Both runbooks make preservation, independent installation, self-test verificatio
 These tests use temporary config directories and do not modify your live Codex or Claude configuration:
 
 ```bash
+python3 scripts/agents/test-multiplexer.py
 python3 scripts/codex/test-protocol.py
 python3 scripts/claude/test-protocol.py
 ```
 
-They verify non-destructive hook/settings merge behavior plus single-worker and concurrent-fan-out gating.
+They verify non-destructive hook/settings merge behavior plus worker gating. The agent multiplexer tests cover metadata validation, capability selection, ordered priority, native handoff, and external receipts.
 
 ## Update
 
@@ -195,7 +222,15 @@ claude/
     delegation-enforcer.py
   rules/
     delegation-protocol.md
+agents/
+  catalog/
+  multiplexer.json
+  templates/
+    custom-agent.json
 scripts/
+  agents/
+    multiplexer.py
+    custom-adapter-template.py
   codex/
     install.sh
     uninstall.sh
