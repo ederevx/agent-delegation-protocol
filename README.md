@@ -40,13 +40,29 @@ The delegation queue is specialized for APIs that expose one sequential agent
 stream. A queue backend declares `"delegation_queue": true`, `native: false`,
 the `batch` function, and `limits.max_concurrency: 1`. These constraints are
 validated together so a queue can never resolve to a native or multi-lane
-backend.
+backend. Without additional policy it preserves the original one-shot FIFO
+contract.
 
 `multiplexer.py queue` accepts only a manifest containing `tasks` (1–32 JSON
 objects) and optional boolean `stop_on_error`. It selects one explicit queue
-backend, holds that backend's single-lane lock for the entire manifest, and
-invokes its adapter once. It never replays or falls through after selection;
-use `select --delegation-queue` for a non-executing dispatcher preflight.
+backend. A one-shot adapter holds the backend's single-lane lock for the entire
+manifest and is invoked once. It never replays or falls through after
+selection; use `select --delegation-queue` for a non-executing dispatcher
+preflight.
+
+A resumable backend can instead set `binding.protocol` to `cooperative-v1`,
+advertise both `batch` and `resumable-batch`, and provide a `queue_policy` with
+`strategy: round_robin`, `virtual_slots` (1–32), and a positive `agent_turn`
+quantum. Both `run` and `queue` then use bounded `start`, `step`, and `cancel`
+adapter envelopes tagged with `adapter_protocol: cooperative-v1`. Start returns
+`ready` plus an opaque `token`; each yielded step returns the token needed by
+the next process, while complete and failed receipts are terminal. The
+multiplexer owns a fair,
+cross-process ticket queue and releases the provider lane after every slice,
+so several lifecycle-visible dispatchers make interleaved progress without
+ever issuing concurrent requests to the one-lane provider. Dead-process
+tickets are pruned. Virtual slots advertise host fan-out capacity, not extra
+provider throughput.
 
 ### Add a custom API
 

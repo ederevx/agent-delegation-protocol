@@ -67,6 +67,26 @@ def perform_backend_request(task: dict[str, Any]) -> Any:
     raise AdapterError("custom API call is not configured")
 
 
+def cooperative_start(task: dict[str, Any], quantum: dict[str, Any]) -> str:
+    """TODO: create durable provider state and return its opaque token.
+
+    The token must identify state that a later adapter process can resume; do
+    not rely on process memory. Work begins in ``cooperative_step`` so start
+    does not consume a scheduler slice.
+    """
+    raise AdapterError("cooperative custom API start is not configured")
+
+
+def cooperative_step(token: str, quantum: dict[str, Any]) -> tuple[str, Any]:
+    """TODO: resume durable state for at most one quantum."""
+    raise AdapterError("cooperative custom API step is not configured")
+
+
+def cooperative_cancel(token: str, reason: str) -> Any:
+    """TODO: cancel provider work and remove durable state idempotently."""
+    raise AdapterError("cooperative custom API cancel is not configured")
+
+
 def normalize_response(task: dict[str, Any], response: Any) -> dict[str, Any]:
     """Convert a provider response into the common JSON receipt envelope."""
     receipt: dict[str, Any] = {
@@ -99,9 +119,84 @@ def execute(task: dict[str, Any]) -> tuple[dict[str, Any], int]:
     return receipt, status
 
 
-def main() -> int:
+def execute_cooperative(value: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """Implement the cooperative-v1 start/step/cancel envelope."""
+    operation = value.get("operation")
+    if operation not in ("start", "step", "cancel"):
+        raise AdapterError("operation must be start, step, or cancel")
+    quantum = value.get("quantum")
+    if (not isinstance(quantum, dict) or quantum.get("unit") != "agent_turn"
+            or not isinstance(quantum.get("value"), int)
+            or isinstance(quantum.get("value"), bool) or quantum["value"] < 1):
+        raise AdapterError("quantum must contain a positive agent_turn value")
+    if value.get("adapter_protocol") != "cooperative-v1":
+        raise AdapterError("adapter_protocol must be cooperative-v1")
+    token = value.get("token")
+    if operation != "start" and (
+        not isinstance(token, str) or not token or len(token.encode()) > 4096
+    ):
+        raise AdapterError("step/cancel requires a bounded token")
     try:
-        tasks, stop_on_error, single = load_manifest()
+        if operation == "start":
+            task = validate_task(value.get("task"))
+            state, payload = "ready", cooperative_start(task, quantum)
+        elif operation == "step":
+            state, payload = cooperative_step(token, quantum)
+        else:
+            payload = cooperative_cancel(token, str(value.get("reason", "cancelled")))
+            state = "complete"
+        if state not in ("ready", "yielded", "complete"):
+            raise AdapterError("cooperative implementation returned an invalid state")
+        receipt: dict[str, Any] = {
+            "schema_version": SCHEMA_VERSION, "classification": "success",
+            "status": "success", "state": state,
+        }
+        if state in ("ready", "yielded"):
+            if not isinstance(payload, str) or not payload:
+                raise AdapterError("yielded state requires an opaque string token")
+            receipt["token"] = payload
+        else:
+            receipt["response"] = payload
+        return receipt, 0
+    except AdapterError as error:
+        return ({
+            "schema_version": SCHEMA_VERSION, "classification": "backend_error",
+            "status": "backend_error", "state": "failed", "error": str(error),
+        }, 1)
+
+
+def main() -> int:
+    raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
+    if len(raw) > MAX_INPUT_BYTES:
+        print(json.dumps({"schema_version": SCHEMA_VERSION,
+                          "classification": "invalid_task", "status": "invalid_task",
+                          "error": f"manifest exceeds {MAX_INPUT_BYTES} bytes"}, sort_keys=True))
+        return 64
+    try:
+        initial = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        print(json.dumps({"schema_version": SCHEMA_VERSION,
+                          "classification": "invalid_task", "status": "invalid_task",
+                          "error": f"invalid manifest JSON: {error}"}, sort_keys=True))
+        return 64
+    if isinstance(initial, dict) and "operation" in initial:
+        try:
+            receipt, status = execute_cooperative(initial)
+        except AdapterError as error:
+            receipt, status = ({"schema_version": SCHEMA_VERSION,
+                                "classification": "invalid_task", "status": "invalid_task",
+                                "state": "failed", "error": str(error)}, 64)
+        print(json.dumps(receipt, sort_keys=True))
+        return status
+    try:
+        # Reuse the one-shot parser without requiring seekable stdin.
+        import io
+        original_stdin = sys.stdin
+        sys.stdin = io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8")
+        try:
+            tasks, stop_on_error, single = load_manifest()
+        finally:
+            sys.stdin = original_stdin
     except AdapterError as error:
         print(json.dumps({
             "schema_version": SCHEMA_VERSION,
