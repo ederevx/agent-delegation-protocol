@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from typing import Any
@@ -10,10 +11,27 @@ from typing import Any
 SCHEMA_VERSION = 1
 MAX_INPUT_BYTES = 1024 * 1024
 MAX_TASKS = 32
+INFERENCE_ENV = "AGENT_INFERENCE_CONFIG"
 
 
 class AdapterError(Exception):
     """A deterministic input or backend adapter failure."""
+
+
+def load_inference_config() -> dict[str, Any] | None:
+    """Load the multiplexer-validated, provider-neutral inference profile."""
+    raw = os.environ.get(INFERENCE_ENV)
+    if raw is None:
+        return None
+    if len(raw.encode("utf-8")) > 4096:
+        raise AdapterError(f"{INFERENCE_ENV} exceeds 4096 bytes")
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise AdapterError(f"{INFERENCE_ENV} is invalid JSON: {error}") from error
+    if not isinstance(value, dict):
+        raise AdapterError(f"{INFERENCE_ENV} must contain an object")
+    return value
 
 
 def validate_task(value: Any, index: int = 0) -> dict[str, Any]:
@@ -57,22 +75,26 @@ def load_manifest() -> tuple[list[dict[str, Any]], bool, bool]:
     return [validate_task(task, index) for index, task in enumerate(tasks)], stop_on_error, False
 
 
-def perform_backend_request(task: dict[str, Any]) -> Any:
+def perform_backend_request(task: dict[str, Any],
+                            inference: dict[str, Any] | None) -> Any:
     """TODO: call the custom API and return its decoded response.
 
     Read credentials from the environment, apply network timeouts, and keep
-    provider-specific request construction here. Never embed a secret in the
+    provider-specific request construction here. Translate ``inference`` only
+    where the provider has an equivalent control. Never embed a secret in the
     metadata or source file.
     """
     raise AdapterError("custom API call is not configured")
 
 
-def cooperative_start(task: dict[str, Any], quantum: dict[str, Any]) -> str:
+def cooperative_start(task: dict[str, Any], quantum: dict[str, Any],
+                      inference: dict[str, Any] | None) -> str:
     """TODO: create durable provider state and return its opaque token.
 
     The token must identify state that a later adapter process can resume; do
-    not rely on process memory. Work begins in ``cooperative_step`` so start
-    does not consume a scheduler slice.
+    not rely on process memory. Persist ``inference`` with that state so later
+    steps cannot drift. Work begins in ``cooperative_step`` so start does not
+    consume a scheduler slice.
     """
     raise AdapterError("cooperative custom API start is not configured")
 
@@ -103,7 +125,9 @@ def normalize_response(task: dict[str, Any], response: Any) -> dict[str, Any]:
 def execute(task: dict[str, Any]) -> tuple[dict[str, Any], int]:
     started = time.monotonic()
     try:
-        receipt = normalize_response(task, perform_backend_request(task))
+        receipt = normalize_response(task, perform_backend_request(
+            task, load_inference_config()
+        ))
         status = 0
     except AdapterError as error:
         receipt = {
@@ -139,7 +163,9 @@ def execute_cooperative(value: dict[str, Any]) -> tuple[dict[str, Any], int]:
     try:
         if operation == "start":
             task = validate_task(value.get("task"))
-            state, payload = "ready", cooperative_start(task, quantum)
+            state, payload = "ready", cooperative_start(
+                task, quantum, load_inference_config()
+            )
         elif operation == "step":
             state, payload = cooperative_step(token, quantum)
         else:
