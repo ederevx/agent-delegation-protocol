@@ -94,19 +94,10 @@ operation may pause the same task again.
 
 That metadata document, one adapter, and one route membership are the complete extension surface for a custom API.
 
-On `main`, the bundled `bulk` route contains matching native Codex and Claude
-entries. This `ci-agents` branch replaces that catalog with `deepseek-ci` as
-the only bulk backend. It binds the common task interface to the installed
-`ci-claude-worker` command, which runs DeepSeek V4 Flash through
-CheapestInference and declares its single-lane execution limit.
-
-DeepSeek advertises four virtual slots with a four-turn cooperative quantum.
-Codex or Claude can therefore launch as many independent lifecycle-visible
-dispatchers as task count and host capacity permit. Their provider calls are
-fairly interleaved on the one physical stream, and each dispatcher returns its
-own receipt. Those host workers preserve lifecycle enforcement; they are not
-route members or native fallbacks. If DeepSeek is unavailable, dispatch returns
-`no_backend` instead of replaying work natively.
+The bundled `bulk` route contains the matching `native-codex-bulk` and
+`native-claude-bulk` entries. Capability and runtime filtering make the same
+route usable from both hosts. Optional API-backed bindings can be
+maintained on separate branches without coupling provider details to `main`.
 
 ## Workers ask before conflicting
 
@@ -166,7 +157,9 @@ git clone git@github.com:ederevx/agent-delegation-protocol.git "$HOME\agent-dele
 cd "$HOME\agent-delegation-protocol"
 ```
 
-Creating symbolic links on native Windows may require Developer Mode or an elevated shell.
+The Codex installer and self-test require Python 3.11 or newer; set `CODEX_PYTHON` to a valid interpreter if it cannot discover one. Creating symbolic links on native Windows also requires Developer Mode or an elevated shell.
+
+Codex installation preflights managed destinations, instruction/state path types, and `hooks.json` before changing the active Codex home, so known conflicts and malformed configuration fail without leaving a partial installation.
 
 ## Install Codex only
 
@@ -263,6 +256,12 @@ bash scripts/claude/install.sh  # Claude only
 Codex composed-global mode and its managed worker copy need reinstall to refresh. Symlinked
 hook/agent assets pick up repository changes immediately, while rerunning the appropriate installer
 refreshes copied files and protocol-owned hook/settings entries.
+
+Composed Codex instructions are stored per installation at
+`$CODEX_HOME/.delegation-protocol/AGENTS.composed.md`. This keeps alternate `CODEX_HOME` values
+isolated: updating or uninstalling one home cannot overwrite or remove another home's composed
+instructions. The installer safely repoints a verified legacy repository-runtime link but retains
+the old shared file in case another home still uses it.
 
 For upgrades from a materially older installation layout, use the applicable `MIGRATE.md` rather than improvising cleanup.
 
