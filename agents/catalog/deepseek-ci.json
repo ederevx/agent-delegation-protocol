@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "id": "deepseek-ci",
+  "name": "DeepSeek via ci-claude",
+  "description": "Bounded DeepSeek audit and edit worker exposed by ci-claude-worker.",
+  "native": false,
+  "delegation_queue": false,
+  "provider": "cheapestinference",
+  "model": "deepseek-v4-flash",
+  "binding": {
+    "argv": ["ci-claude-worker"],
+    "max_input_bytes": 1048576,
+    "max_output_bytes": 2097152,
+    "timeout_seconds": 7200
+  },
+  "capabilities": {
+    "functions": ["audit", "edit", "batch", "isolated-patch"],
+    "runtimes": ["codex", "claude"],
+    "platforms": ["linux", "darwin"],
+    "modes": ["read", "edit"],
+    "workspaces": ["shared", "isolated"],
+    "deliveries": ["json-receipt"]
+  },
+  "limits": {
+    "max_concurrency": 1
+  }
+}

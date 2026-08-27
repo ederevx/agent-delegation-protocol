@@ -2,6 +2,7 @@
   "schema_version": 1,
   "routes": {
     "bulk": [
+      "deepseek-ci",
       "native-codex-bulk",
       "native-claude-bulk"
     ]
