@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import contextlib
+import errno
 import json
 import os
 import re
@@ -402,26 +403,41 @@ def state_root() -> Path:
 def _file_lock(path: Path) -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = path.open("a+b")
+    acquired = False
     try:
         if os.name == "nt":
             import msvcrt
-            handle.seek(0)
-            handle.write(b"0")
-            handle.flush()
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"0")
+                handle.flush()
+            while not acquired:
+                handle.seek(0)
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                except OSError as error:
+                    if error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                        raise
+                    time.sleep(0.05)
+                else:
+                    acquired = True
         else:
             import fcntl
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            acquired = True
         yield
     finally:
-        if os.name == "nt":
-            import msvcrt
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
+        try:
+            if acquired:
+                if os.name == "nt":
+                    import msvcrt
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 @contextlib.contextmanager
@@ -445,6 +461,13 @@ def _pid_alive(pid: Any) -> bool:
         return False
     except PermissionError:
         return True
+    except OSError as error:
+        # Windows reports a nonexistent PID as a generic WinError 87 rather
+        # than ProcessLookupError. Only that error proves staleness; access
+        # denial and unexpected Windows failures do not prove the process died.
+        if os.name == "nt":
+            return getattr(error, "winerror", None) != 87
+        raise
     return True
 
 
@@ -604,7 +627,7 @@ def invoke(agent: dict[str, Any], raw_task: bytes,
                 child_env[INFERENCE_ENV] = json.dumps(
                     inference, separators=(",", ":"), sort_keys=True
                 )
-            process = subprocess.Popen(
+            process = _popen_owned(
                 argv, stdin=subprocess.PIPE, stdout=stdout_file, stderr=stderr_file,
                 env=child_env, start_new_session=(os.name != "nt"),
             )
@@ -625,6 +648,7 @@ def invoke(agent: dict[str, Any], raw_task: bytes,
             except BaseException:
                 _terminate_process_group(process)
                 raise
+            _close_windows_job(process)
             stdout_size = stdout_file.tell()
             max_output = binding.get("max_output_bytes", DEFAULT_MAX_OUTPUT)
             if stdout_size > max_output:
@@ -720,9 +744,10 @@ def _try_command_slot(agent_id: str, limit: int) -> Any | None:
         try:
             if os.name == "nt":
                 import msvcrt
-                handle.seek(0)
-                handle.write(b"0")
-                handle.flush()
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b"0")
+                    handle.flush()
                 handle.seek(0)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
             else:
@@ -780,6 +805,16 @@ def _validated_mux_execution(receipt: dict[str, Any]) -> tuple[str, list[str], P
 
 def _terminate_process_group(process: subprocess.Popen[Any]) -> None:
     if os.name == "nt":
+        if getattr(process, "_mux_job_handle", None) is not None:
+            # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE terminates the complete tree,
+            # including descendants that outlived their direct parent.
+            _close_windows_job(process)
+            try:
+                process.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            return
         if process.poll() is None:
             process.terminate()
             try:
@@ -810,6 +845,129 @@ def _terminate_process_group(process: subprocess.Popen[Any]) -> None:
         process.wait()
 
 
+def _assign_windows_kill_job(process: subprocess.Popen[Any]) -> None:
+    """Own a Windows child tree with a kill-on-close Job Object."""
+    if os.name != "nt":
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    class IO_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_ulonglong),
+            ("WriteOperationCount", ctypes.c_ulonglong),
+            ("OtherOperationCount", ctypes.c_ulonglong),
+            ("ReadTransferCount", ctypes.c_ulonglong),
+            ("WriteTransferCount", ctypes.c_ulonglong),
+            ("OtherTransferCount", ctypes.c_ulonglong),
+        ]
+
+    class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong),
+            ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+            ("IoInfo", IO_COUNTERS),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+    ]
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        information = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        information.BasicLimitInformation.LimitFlags = 0x00002000
+        if not kernel32.SetInformationJobObject(
+            job, 9, ctypes.byref(information), ctypes.sizeof(information)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        process_handle = wintypes.HANDLE(int(process._handle))
+        if not kernel32.AssignProcessToJobObject(job, process_handle):
+            raise ctypes.WinError(ctypes.get_last_error())
+    except BaseException:
+        kernel32.CloseHandle(job)
+        raise
+    process._mux_job_handle = job
+
+
+def _close_windows_job(process: subprocess.Popen[Any]) -> None:
+    if os.name != "nt":
+        return
+    job = getattr(process, "_mux_job_handle", None)
+    if job is None:
+        return
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    process._mux_job_handle = None
+    if not kernel32.CloseHandle(job):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _resume_windows_process(process: subprocess.Popen[Any]) -> None:
+    if os.name != "nt":
+        return
+    import ctypes
+    from ctypes import wintypes
+    ntdll = ctypes.WinDLL("ntdll")
+    ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+    ntdll.NtResumeProcess.restype = wintypes.LONG
+    status = ntdll.NtResumeProcess(wintypes.HANDLE(int(process._handle)))
+    if status != 0:
+        raise OSError(f"NtResumeProcess failed with NTSTATUS 0x{status & 0xffffffff:08x}")
+
+
+def _popen_owned(*args: Any, **kwargs: Any) -> subprocess.Popen[Any]:
+    if os.name == "nt":
+        # Prevent target code from running or spawning descendants before its
+        # process is assigned to the kill-on-close Job Object.
+        kwargs["creationflags"] = kwargs.get("creationflags", 0) | 0x00000004
+    process = subprocess.Popen(*args, **kwargs)
+    try:
+        _assign_windows_kill_job(process)
+        _resume_windows_process(process)
+    except BaseException:
+        if getattr(process, "_mux_job_handle", None) is not None:
+            _terminate_process_group(process)
+        elif process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        raise
+    return process
+
+
 def _start_mux_command(item: dict[str, Any], receipt: dict[str, Any],
                        timeout_seconds: int, command_slot: Any
                        ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -821,7 +979,7 @@ def _start_mux_command(item: dict[str, Any], receipt: dict[str, Any],
     started = time.monotonic()
     process: subprocess.Popen[Any] | None = None
     try:
-        process = subprocess.Popen(
+        process = _popen_owned(
             _harden_command_argv(argv), cwd=cwd, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=_command_environment(argv), start_new_session=(os.name != "nt"),
