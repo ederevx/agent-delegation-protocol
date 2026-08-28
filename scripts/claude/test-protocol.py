@@ -129,6 +129,17 @@ def test_generated_workers() -> None:
                 f"common dispatcher contract embeds provider-specific policy: {provider_specific}")
     require("Send the JSON on stdin" not in common_contract,
             "common dispatcher contract requires an unavailable stdin transport")
+    ci_instructions = (
+        REPO_ROOT / "claude" / "agents" / "ci-foreground-bulk-worker.md"
+    ).read_text(encoding="utf-8")
+    for contract in (
+        "foreground `Bash`", "`timeout: 600000`", "Do not redirect or background",
+        "single provider lane", "Never start a second mux-scheduler process",
+    ):
+        require(contract in ci_instructions,
+                f"ci-claude dispatcher lacks foreground contract: {contract}")
+    require("run_in_background" not in ci_instructions,
+            "ci-claude dispatcher permits background provider work")
 
 
 def call_hook(home: Path, mode: str, payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -251,6 +262,19 @@ def test_installer_migrates_mux_scheduler_links(home: Path) -> None:
     require(result.returncode == 0, f"Claude uninstaller failed: {result.stderr}")
     require(not (protocol / "mux-scheduler.py").is_symlink(),
             "Claude uninstaller retained mux-scheduler executable")
+
+    env["CI_CLAUDE_FOREGROUND_ONLY"] = "1"
+    result = run(["bash", str(REPO_ROOT / "scripts" / "claude" / "install.sh")], env=env)
+    require(result.returncode == 0, f"foreground Claude installer failed: {result.stderr}")
+    installed_worker = home / "agents" / "bulk-worker.md"
+    require(
+        installed_worker.is_symlink()
+        and installed_worker.resolve()
+        == (REPO_ROOT / "claude" / "agents" / "ci-foreground-bulk-worker.md").resolve(),
+        "foreground installer selected the ordinary Claude worker",
+    )
+    result = run(["bash", str(REPO_ROOT / "scripts" / "claude" / "uninstall.sh")], env=env)
+    require(result.returncode == 0, f"foreground Claude uninstaller failed: {result.stderr}")
 
 
 def test_single_agent_gate(home: Path) -> None:
