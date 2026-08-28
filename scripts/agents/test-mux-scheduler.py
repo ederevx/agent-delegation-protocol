@@ -2,6 +2,7 @@
 """Focused self-tests for the agent catalog, mux-scheduler, and adapter template."""
 from __future__ import annotations
 
+import errno
 import json
 import importlib.util
 import os
@@ -45,7 +46,7 @@ def metadata(agent_id: str, argv: list[str] | None = None, *, native: bool = Fal
         "model": "test-model", "binding": binding,
         "capabilities": {
             "functions": ["audit", "edit"],
-            "runtimes": [runtime], "platforms": ["linux"],
+            "runtimes": [runtime], "platforms": [MUX_MODULE.runtime_platform()],
             "modes": ["read", "edit"], "workspaces": ["shared", "isolated"],
             "deliveries": ["native-agent" if native else "json-receipt"],
         },
@@ -123,6 +124,110 @@ class MuxSchedulerTests(unittest.TestCase):
         path = self.root / name
         path.write_text(body, encoding="utf-8")
         return path
+
+    def test_windows_file_lock_reuses_one_byte_sentinel(self) -> None:
+        lock_path = self.root / "stable-windows.lock"
+        fake_msvcrt = mock.Mock(LK_NBLCK=1, LK_UNLCK=2)
+        with (mock.patch.object(MUX_MODULE.os, "name", "nt"),
+              mock.patch.dict(sys.modules, {"msvcrt": fake_msvcrt})):
+            for _ in range(4):
+                with MUX_MODULE._file_lock(lock_path):
+                    pass
+
+        self.assertEqual(lock_path.stat().st_size, 1)
+        modes = [call.args[1] for call in fake_msvcrt.locking.call_args_list]
+        self.assertEqual(modes, [1, 2] * 4)
+
+    def test_windows_file_lock_retries_contention_until_acquired(self) -> None:
+        lock_path = self.root / "contended-windows.lock"
+        attempts = 0
+
+        def locking(_fd: int, mode: int, _length: int) -> None:
+            nonlocal attempts
+            if mode == 1:
+                attempts += 1
+                if attempts < 3:
+                    raise OSError(errno.EACCES, "lock is held")
+
+        fake_msvcrt = mock.Mock(LK_NBLCK=1, LK_UNLCK=2, locking=locking)
+        with (mock.patch.object(MUX_MODULE.os, "name", "nt"),
+              mock.patch.object(MUX_MODULE.time, "sleep") as sleep,
+              mock.patch.dict(sys.modules, {"msvcrt": fake_msvcrt})):
+            with MUX_MODULE._file_lock(lock_path):
+                self.assertEqual(attempts, 3)
+
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(lock_path.stat().st_size, 1)
+
+    def test_windows_file_lock_failure_never_unlocks_and_closes(self) -> None:
+        lock_path = self.root / "failed-windows.lock"
+        handle = mock.MagicMock()
+        handle.tell.return_value = 1
+        handle.fileno.return_value = 7
+        error = OSError(errno.EIO, "not a contention error")
+        fake_msvcrt = mock.Mock(LK_NBLCK=1, LK_UNLCK=2)
+        fake_msvcrt.locking.side_effect = error
+
+        with (mock.patch.object(MUX_MODULE.os, "name", "nt"),
+              mock.patch.object(Path, "open", return_value=handle),
+              mock.patch.dict(sys.modules, {"msvcrt": fake_msvcrt})):
+            with self.assertRaisesRegex(OSError, "not a contention error"):
+                with MUX_MODULE._file_lock(lock_path):
+                    self.fail("failed lock acquisition entered its protected region")
+
+        self.assertEqual(fake_msvcrt.locking.call_count, 1)
+        self.assertEqual(fake_msvcrt.locking.call_args.args[1], 1)
+        handle.close.assert_called_once_with()
+
+    def test_windows_command_slot_reuses_one_byte_sentinel(self) -> None:
+        fake_msvcrt = mock.Mock(LK_NBLCK=1, LK_UNLCK=2)
+        with (mock.patch.object(MUX_MODULE.os, "name", "nt"),
+              mock.patch.object(MUX_MODULE, "state_root", return_value=self.state),
+              mock.patch.dict(sys.modules, {"msvcrt": fake_msvcrt})):
+            for _ in range(4):
+                handle = MUX_MODULE._try_command_slot("stable", 1)
+                self.assertIsNotNone(handle)
+                MUX_MODULE._release_command_slot(handle)
+
+        lock_path = self.state / "command-slots" / "stable" / "0.lock"
+        self.assertEqual(lock_path.stat().st_size, 1)
+        modes = [call.args[1] for call in fake_msvcrt.locking.call_args_list]
+        self.assertEqual(modes, [1, 2] * 4)
+
+    def test_windows_command_slot_failed_acquire_closes_handle(self) -> None:
+        handle = mock.MagicMock()
+        handle.tell.return_value = 1
+        handle.fileno.return_value = 7
+        fake_msvcrt = mock.Mock(LK_NBLCK=1, LK_UNLCK=2)
+        fake_msvcrt.locking.side_effect = OSError(errno.EACCES, "slot held")
+
+        with (mock.patch.object(MUX_MODULE.os, "name", "nt"),
+              mock.patch.object(MUX_MODULE, "state_root", return_value=self.state),
+              mock.patch.object(Path, "open", return_value=handle),
+              mock.patch.dict(sys.modules, {"msvcrt": fake_msvcrt})):
+            self.assertIsNone(MUX_MODULE._try_command_slot("busy", 1))
+
+        self.assertEqual(fake_msvcrt.locking.call_count, 1)
+        self.assertEqual(fake_msvcrt.locking.call_args.args[1], 1)
+        handle.close.assert_called_once_with()
+
+    def test_windows_pid_alive_only_prunes_invalid_parameter(self) -> None:
+        invalid_parameter = OSError(errno.EINVAL, "invalid parameter")
+        invalid_parameter.winerror = 87
+        access_denied = PermissionError(errno.EACCES, "access denied")
+        unexpected = OSError(errno.EIO, "unexpected Windows failure")
+        unexpected.winerror = 31
+
+        with mock.patch.object(MUX_MODULE.os, "name", "nt"):
+            with mock.patch.object(MUX_MODULE.os, "kill", side_effect=invalid_parameter):
+                self.assertFalse(MUX_MODULE._pid_alive(123))
+            with mock.patch.object(MUX_MODULE.os, "kill", side_effect=access_denied):
+                self.assertTrue(MUX_MODULE._pid_alive(123))
+            with mock.patch.object(MUX_MODULE.os, "kill", side_effect=unexpected):
+                self.assertTrue(MUX_MODULE._pid_alive(123))
+            with mock.patch.object(
+                    MUX_MODULE.os, "kill", side_effect=OSError(errno.EIO, "unknown")):
+                self.assertTrue(MUX_MODULE._pid_alive(123))
 
     def test_list_accepts_the_same_capability_filters_as_select(self) -> None:
         self.write_agent(metadata("codex-only", [sys.executable, "unused.py"],
@@ -407,13 +512,18 @@ print(json.dumps({{"classification": "success", "seen": manifest}}))
         self.assertEqual(json.loads(result.stdout)["seen"], manifest)
         self.assertEqual(calls.read_text(), "1")
 
+        current_platform = MUX_MODULE.runtime_platform()
         selected = select_queue_backend(
-            self.catalog, self.routes, "bulk", "codex", "linux"
+            self.catalog, self.routes, "bulk", "codex", current_platform
         )
         self.assertIsNotNone(selected)
         self.assertEqual(selected["id"], "queued")
+        unsupported_platform = next(
+            platform for platform in ("linux", "darwin", "windows")
+            if platform != current_platform
+        )
         self.assertIsNone(select_queue_backend(
-            self.catalog, self.routes, "bulk", "codex", "windows"
+            self.catalog, self.routes, "bulk", "codex", unsupported_platform
         ))
 
     def test_queue_rejects_invalid_manifest_before_launch(self) -> None:
@@ -637,7 +747,11 @@ print(json.dumps({{"state": "complete", "classification": "success",
         self.assertEqual(receipt["command_execution"], {
             "requested": 2, "peak_concurrency": 2, "limit": 4,
         })
-        self.assertLess(elapsed, 0.65)
+        # Windows process startup dominates this wall-clock bound. The receipt
+        # and event ordering below prove overlap without relying on startup
+        # timing, so keep the tight performance guard on POSIX only.
+        if os.name != "nt":
+            self.assertLess(elapsed, 0.65)
         events = (self.root / "command-events").read_text().splitlines()
         self.assertEqual(set(events[:2]), {"start:A", "start:B"})
         self.assertEqual(set(events[2:]), {"end:A", "end:B"})
@@ -1084,6 +1198,101 @@ else:
                          ["cancelled", "failed"])
         self.assertEqual(marker.read_text(), "A")
 
+    @unittest.skipUnless(os.name == "nt", "Windows Job Object process-tree test")
+    def test_windows_scheduler_termination_kills_command_descendants(self) -> None:
+        command_started = self.root / "windows-command-started"
+        descendant_finished = self.root / "windows-descendant-finished"
+        descendant_code = (
+            "from pathlib import Path; import time; time.sleep(1.0); "
+            f"Path({str(descendant_finished)!r}).touch()"
+        )
+        command_code = (
+            "from pathlib import Path; import subprocess, sys, time; "
+            f"Path({str(command_started)!r}).touch(); "
+            f"subprocess.Popen([sys.executable, '-c', {descendant_code!r}]); "
+            "time.sleep(5)"
+        )
+        stub = self.make_stub("windows-tree-cooperative.py", f"""
+import json, sys
+value = json.load(sys.stdin)
+if value["operation"] == "start":
+    print(json.dumps({{"state": "ready", "token": "tree"}}))
+elif value["operation"] == "cancel":
+    print(json.dumps({{"state": "complete"}}))
+else:
+    print(json.dumps({{
+        "state": "permission_required", "token": "tree",
+        "request": {{"request_id": "request-tree", "tool_name": "Bash",
+                    "mux_execution": {{"argv": [{sys.executable!r}, "-c",
+                        {command_code!r}], "cwd": {str(self.root)!r}}}}},
+    }}))
+""")
+        self.write_agent(metadata("cooperative", [sys.executable, str(stub)],
+                                  cooperative=True))
+        self.write_routes(["cooperative"])
+        task_file = self.root / "windows-tree-task.json"
+        task_file.write_text(json.dumps({"id": "tree"}))
+        command = [
+            sys.executable, str(MUX), "--catalog", str(self.catalog),
+            "--routes", str(self.routes), "run", "--route", "bulk",
+            "--runtime", "codex", "--task-file", str(task_file),
+        ]
+        env = os.environ.copy()
+        env["AGENT_MUX_SCHEDULER_STATE_DIR"] = str(self.state)
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=env,
+        )
+        deadline = time.monotonic() + 5
+        while not command_started.exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertTrue(command_started.exists())
+        process.terminate()
+        process.communicate(timeout=5)
+        time.sleep(1.25)
+        self.assertFalse(
+            descendant_finished.exists(),
+            "Windows scheduler termination left a command descendant alive",
+        )
+
+    @unittest.skipUnless(os.name == "nt", "Windows suspended Job Object test")
+    def test_windows_job_assignment_precedes_immediate_descendant_spawn(self) -> None:
+        descendant_started = self.root / "immediate-descendant-started"
+        descendant_finished = self.root / "immediate-descendant-finished"
+        descendant_code = (
+            "from pathlib import Path; import time; "
+            f"Path({str(descendant_started)!r}).touch(); time.sleep(1.0); "
+            f"Path({str(descendant_finished)!r}).touch()"
+        )
+        target_code = (
+            "import subprocess, sys; "
+            f"subprocess.Popen([sys.executable, '-c', {descendant_code!r}])"
+        )
+        assign = MUX_MODULE._assign_windows_kill_job
+
+        def delayed_assign(process: subprocess.Popen[bytes]) -> None:
+            time.sleep(0.2)
+            assign(process)
+
+        with mock.patch.object(
+            MUX_MODULE, "_assign_windows_kill_job", side_effect=delayed_assign
+        ):
+            process = MUX_MODULE._popen_owned(
+                [sys.executable, "-c", target_code],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        process.wait(timeout=5)
+        deadline = time.monotonic() + 3
+        while not descendant_started.exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertTrue(descendant_started.exists())
+        MUX_MODULE._terminate_process_group(process)
+        time.sleep(1.25)
+        self.assertFalse(
+            descendant_finished.exists(),
+            "a descendant escaped before Windows Job Object assignment",
+        )
+
     @unittest.skipIf(os.name == "nt", "POSIX process-group signal test")
     def test_interrupt_cancels_token_and_command_process_group(self) -> None:
         command_started = self.root / "command-started"
@@ -1140,6 +1349,8 @@ else:
 
 
 class AdapterTemplateTests(unittest.TestCase):
+    repo = str(HERE.resolve())
+
     def invoke(self, task: object) -> subprocess.CompletedProcess[str]:
         return subprocess.run([sys.executable, str(ADAPTER)], input=json.dumps(task),
                               text=True, capture_output=True, check=False)
@@ -1147,19 +1358,20 @@ class AdapterTemplateTests(unittest.TestCase):
     def test_single_manifest_returns_bounded_not_configured_receipt(self) -> None:
         result = self.invoke({
             "id": "one", "prompt": "audit", "mode": "read",
-            "repo": "/repo", "allowed_paths": ["src"],
+            "repo": self.repo, "allowed_paths": ["src"],
             "preapproved_commands": ["git status"],
         })
         self.assertEqual(result.returncode, 1)
         receipt = json.loads(result.stdout)
         self.assertEqual(receipt["classification"], "backend_error")
         self.assertEqual(receipt["task_id"], "one")
+        self.assertIn("custom API call is not configured", receipt["error"])
 
     def test_batch_is_sequential_and_honors_stop_on_error(self) -> None:
         result = self.invoke({
             "tasks": [
-                {"id": "one", "prompt": "audit", "mode": "read", "repo": "/repo"},
-                {"id": "two", "prompt": "edit", "mode": "edit", "repo": "/repo"},
+                {"id": "one", "prompt": "audit", "mode": "read", "repo": self.repo},
+                {"id": "two", "prompt": "edit", "mode": "edit", "repo": self.repo},
             ],
             "stop_on_error": True,
         })
@@ -1172,20 +1384,31 @@ class AdapterTemplateTests(unittest.TestCase):
 
     def test_common_task_manifest_contract_is_enforced(self) -> None:
         valid = {
-            "prompt": "edit", "mode": "edit", "repo": "/repo",
+            "prompt": "edit", "mode": "edit", "repo": self.repo,
             "allowed_paths": ["src", "."],
             "validation": [["python3", "-m", "compileall", "src"]],
             "preapproved_commands": ["git status --short"],
         }
         result = self.invoke(valid)
-        self.assertEqual(json.loads(result.stdout)["classification"], "backend_error")
+        valid_receipt = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(valid_receipt["classification"], "backend_error")
+        self.assertIn("custom API call is not configured", valid_receipt["error"])
         invalid = (
             ({key: value for key, value in valid.items() if key != "repo"}, "repo"),
             ({**valid, "repo": "relative"}, "repo"),
-            ({**valid, "repo": "/repo/../outside"}, "repo"),
-            ({**valid, "repo": "/repo/.git/worktrees/task"}, "repo"),
+            ({**valid, "repo": str(Path(self.repo) / ".." / "outside")}, "repo"),
+            ({**valid, "repo": str(Path(self.repo) / ".git" / "worktrees" / "task")}, "repo"),
+            ({**valid, "repo": str(Path(self.repo) / ".GIT" / "worktrees" / "task")}, "repo"),
             ({**valid, "allowed_paths": ["../outside"]}, "allowed path"),
             ({**valid, "allowed_paths": ["nested/.git/config"]}, "allowed path"),
+            ({**valid, "allowed_paths": ["nested/.GIT/config"]}, "allowed path"),
+            ({**valid, "allowed_paths": [r"nested\.GIT\config"]}, "allowed path"),
+            ({**valid, "allowed_paths": ["/outside"]}, "allowed path"),
+            ({**valid, "allowed_paths": [r"\outside"]}, "allowed path"),
+            ({**valid, "allowed_paths": [r"C:outside"]}, "allowed path"),
+            ({**valid, "allowed_paths": [r"C:\outside"]}, "allowed path"),
+            ({**valid, "allowed_paths": [r"\\server\share\outside"]}, "allowed path"),
             ({**valid, "validation": ["python3 -m compileall"]}, "argv array"),
             ({**valid, "preapproved_commands": [["git", "status"]]}, "single-line"),
             ({**valid, "mode": "read", "validation": [["true"]]}, "edit mode"),
@@ -1198,16 +1421,37 @@ class AdapterTemplateTests(unittest.TestCase):
                 self.assertEqual(receipt["classification"], "invalid_task")
                 self.assertIn(expected, receipt["error"])
 
+    def test_windows_ads_paths_do_not_make_posix_colons_unsafe(self) -> None:
+        base = {"prompt": "audit", "mode": "read", "repo": self.repo}
+        cases = (
+            ({**base, "allowed_paths": ["src/file.txt:stream"]}, "allowed path"),
+            ({**base, "allowed_paths": [r"src\file.txt:stream"]}, "allowed path"),
+            ({**base, "repo": str(Path(self.repo) / "repo:stream")}, "repo"),
+        )
+        for task, expected in cases:
+            with self.subTest(task=task):
+                result = self.invoke(task)
+                receipt = json.loads(result.stdout)
+                if os.name == "nt":
+                    self.assertEqual(result.returncode, 64)
+                    self.assertEqual(receipt["classification"], "invalid_task")
+                    self.assertIn(expected, receipt["error"])
+                else:
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(receipt["classification"], "backend_error")
+                    self.assertIn("custom API call is not configured", receipt["error"])
+
     def test_cooperative_envelope_is_bounded_and_protocol_checked(self) -> None:
         result = self.invoke({
             "adapter_protocol": "cooperative-v1", "operation": "start",
             "quantum": {"unit": "agent_turn", "value": 4},
-            "task": {"id": "one", "prompt": "audit", "mode": "read", "repo": "/repo"},
+            "task": {"id": "one", "prompt": "audit", "mode": "read", "repo": self.repo},
         })
         self.assertEqual(result.returncode, 1)
         receipt = json.loads(result.stdout)
         self.assertEqual(receipt["state"], "failed")
         self.assertEqual(receipt["classification"], "backend_error")
+        self.assertIn("cooperative custom API start is not configured", receipt["error"])
 
         result = self.invoke({
             "adapter_protocol": "wrong", "operation": "step", "token": "opaque",

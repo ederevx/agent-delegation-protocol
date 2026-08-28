@@ -8,6 +8,8 @@
   "queue_policy": {
     "strategy": "round_robin",
     "virtual_slots": 4,
+    "command_concurrency": 4,
+    "command_timeout_seconds": 900,
     "quantum": {
       "unit": "agent_turn",
       "value": 4
