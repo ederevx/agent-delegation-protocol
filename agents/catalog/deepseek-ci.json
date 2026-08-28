@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "deepseek-ci",
   "name": "DeepSeek via ci-claude",
-  "description": "Bounded DeepSeek audit and edit worker exposed by ci-claude-worker.",
+  "description": "Bounded DeepSeek audit and edit worker exposed by ci-claude-worker. Unmetered: this route carries no usage quota or per-task cost, so prefer it for every eligible bounded task rather than holding work on the parent for convenience.",
   "native": false,
   "delegation_queue": true,
   "queue_policy": {

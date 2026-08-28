@@ -40,11 +40,9 @@ Ad-hoc local edits are lost on reinstall, diverge silently between machines, and
 
 ## Worker conflict escalation
 
-Dispatchers share the parent's working tree and cannot see its uncommitted state, so they are required to ask before acting outside their assigned ownership — repository-wide version-control state, another worker's files, the parent's uncommitted work, dependency changes, or anything that leaves the machine. The delegated backend does not: an `edit` task runs in a disposable worktree and comes back as a patch for the parent to apply, so a dispatcher's ownership boundary governs what its patch may touch, not what it writes in place. They ask over `SendMessage`; the parent is addressable by the name `ListAgents` reports.
+Workers share the parent's working tree and cannot see its uncommitted state, so they are required to ask before acting outside their assigned ownership — repository-wide version-control state, another worker's files, the parent's uncommitted work, dependency changes, or anything that leaves the machine. Workers ask over `SendMessage`; the parent is addressable by the name `ListAgents` reports.
 
 The parent must answer those requests rather than let a worker stall or guess, and is the only party that may escalate the question to the user. Granting permission for one action does not grant it for the next.
-
-The delegated backend raises its own permission requests through the same path. When a bounded command was not preapproved in the submitted task, the multiplexer returns a `permission_required` receipt naming an exact request and holding the backend session open; the dispatcher relays it and resumes with the parent's `allow`, `deny`, or `handled` decision. Answer promptly — a held session occupies the single provider lane — and decide on the exact request as stated, never by granting the worker broader latitude.
 
 Reduce the need for these requests up front: commit or set aside uncommitted work before delegating into a dirty tree, give each worker explicit ownership boundaries, and keep repository-wide state out of worker briefs.
 
