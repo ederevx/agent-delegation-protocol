@@ -344,17 +344,15 @@ def test_round_robin_delegation_queue(home: Path) -> None:
     require("round-robin delegation queue selected backend `test-queue`" in context,
             "round-robin queue selection was not injected")
     require("advertising 4 virtual slots" in context, "virtual slot count was not injected")
-    require("mux-scheduler `run`" in context, "per-dispatcher run contract was not injected")
+    require("mux-scheduler `queue`" in context, "singular queue contract was not injected")
+    require("singular scheduler process" in context, "singular scheduler ownership was not injected")
     state = json.loads((home / ".delegation-protocol" / "hook-state" / f"{session}.json").read_text())
     require(state["delegation_queue_strategy"] == "round_robin", "round-robin strategy was not recorded")
     require(state["delegation_queue_virtual_slots"] == 4, "virtual slot count was not recorded")
-    require(state["min_agents"] == 2, "round-robin queue did not preserve overlap enforcement")
+    require(state["min_agents"] == 1, "round-robin queue did not select one lifecycle dispatcher")
     call_hook(home, "subagent-start", {"session_id": session, "turn_id": "t1", "agent_id": "virtual-a"})
-    denied = call_hook(home, "pretool", {"session_id": session, "turn_id": "t1", "tool_name": "apply_patch", "tool_input": {}})
-    require(denied is not None, "round-robin queue unlocked after only one virtual dispatcher")
-    call_hook(home, "subagent-start", {"session_id": session, "turn_id": "t1", "agent_id": "virtual-b"})
     allowed = call_hook(home, "pretool", {"session_id": session, "turn_id": "t1", "tool_name": "apply_patch", "tool_input": {}})
-    require(allowed is None, "round-robin queue did not unlock after overlapping dispatchers")
+    require(allowed is None, "round-robin queue did not unlock after one dispatcher")
 
 
 def test_queue_fallbacks(root: Path) -> None:
