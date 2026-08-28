@@ -2,6 +2,7 @@
 """Self-test Codex delegation hooks and non-destructive hooks.json merging."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -132,6 +133,100 @@ def test_hooks_merge(home: Path) -> None:
     require(any(h.get("statusMessage") == "Existing hook" for g in after["hooks"]["PreToolUse"] for h in g.get("hooks", [])), "existing hook was not preserved")
     require(not any(str(h.get("statusMessage", "")).startswith("Delegation protocol:") for groups in after.get("hooks", {}).values() for g in groups for h in g.get("hooks", [])), "protocol hooks remained after uninstall")
 
+
+def test_codex_worker_install(root: Path) -> None:
+    balanced_source = REPO_ROOT / "codex" / "agents" / "balanced-worker.toml"
+    legacy_source = REPO_ROOT / "codex" / "agents" / "bulk-worker.toml"
+    env = dict(os.environ)
+    env["CODEX_HOME"] = str(root / "owned-link")
+    agents = Path(env["CODEX_HOME"]) / "agents"
+    agents.mkdir(parents=True)
+    balanced = agents / "balanced-worker.toml"
+    balanced.symlink_to(balanced_source)
+    legacy_bulk = agents / "bulk-worker.toml"
+    legacy_bulk.symlink_to(legacy_source)
+
+    result = run(["bash", str(INSTALLER)], env=env)
+    require(result.returncode == 0, f"installer failed: {result.stderr}")
+    require(balanced.is_symlink() and balanced.resolve() == balanced_source.resolve(),
+            "balanced worker link was not preserved")
+    require(not legacy_bulk.exists() and not legacy_bulk.is_symlink(),
+            "misnamed bulk worker link remained")
+    bulk = agents / "bulk_worker.toml"
+    require(bulk.is_file() and not bulk.is_symlink(),
+            "bulk worker was not installed as a regular file")
+    require(bulk.read_bytes() == (REPO_ROOT / "codex" / "agents" / "bulk_worker.toml").read_bytes(),
+            "installed bulk worker differs from its source")
+    worker_hash = root / "owned-link" / ".delegation-protocol" / "bulk-worker.sha256"
+    require(worker_hash.read_text(encoding="utf-8").strip() == hashlib.sha256(bulk.read_bytes()).hexdigest(),
+            "managed worker hash does not match the installed file")
+    if hasattr(os, "O_NOFOLLOW"):
+        fd = os.open(bulk, os.O_RDONLY | os.O_NOFOLLOW)
+        os.close(fd)
+    require({path.name for path in agents.glob("*.toml")} == {
+                "bulk_worker.toml", "balanced-worker.toml"},
+            "installer installed an unexpected custom agent")
+
+    result = run(["bash", str(INSTALLER)], env=env)
+    require(result.returncode == 0, f"idempotent reinstall failed: {result.stderr}")
+    result = run(["bash", str(UNINSTALLER)], env=env)
+    require(result.returncode == 0, f"uninstaller failed: {result.stderr}")
+    require(not bulk.exists(), "uninstaller left the unmodified managed worker copy")
+    result = run(["bash", str(UNINSTALLER)], env=env)
+    require(result.returncode == 0, f"idempotent uninstall failed: {result.stderr}")
+
+    modified_home = root / "modified-copy"
+    modified_env = dict(os.environ)
+    modified_env["CODEX_HOME"] = str(modified_home)
+    result = run(["bash", str(INSTALLER)], env=modified_env)
+    require(result.returncode == 0, f"modified-copy install failed: {result.stderr}")
+    modified_worker = modified_home / "agents" / "bulk_worker.toml"
+    modified_worker.write_text("# user modification\n", encoding="utf-8")
+    result = run(["bash", str(UNINSTALLER)], env=modified_env)
+    require(result.returncode == 0, f"modified-copy uninstall failed: {result.stderr}")
+    require(modified_worker.read_text(encoding="utf-8") == "# user modification\n",
+            "uninstaller removed a modified managed worker copy")
+
+    custom_home = root / "custom-file"
+    custom_agents = custom_home / "agents"
+    custom_agents.mkdir(parents=True)
+    custom_legacy = custom_agents / "balanced-worker.toml"
+    custom_legacy.write_text("model = \"user-owned\"\n", encoding="utf-8")
+    custom_env = dict(os.environ)
+    custom_env["CODEX_HOME"] = str(custom_home)
+    result = run(["bash", str(INSTALLER)], env=custom_env)
+    require(result.returncode != 0 and "Refusing to overwrite" in result.stderr,
+            "installer did not refuse a user-owned balanced worker")
+    require(custom_legacy.read_text(encoding="utf-8") == "model = \"user-owned\"\n",
+            "custom balanced worker file was changed")
+    result = run(["bash", str(UNINSTALLER)], env=custom_env)
+    require(result.returncode == 0, f"custom-file uninstall failed: {result.stderr}")
+    require(custom_legacy.read_text(encoding="utf-8") == "model = \"user-owned\"\n",
+            "custom balanced worker file was removed")
+
+    conflict_home = root / "conflict"
+    conflict_agents = conflict_home / "agents"
+    conflict_agents.mkdir(parents=True)
+    conflict_bulk = conflict_agents / "bulk_worker.toml"
+    conflict_bulk.write_text("model = \"user-owned\"\n", encoding="utf-8")
+    conflict_env = dict(os.environ)
+    conflict_env["CODEX_HOME"] = str(conflict_home)
+    result = run(["bash", str(INSTALLER)], env=conflict_env)
+    require(result.returncode != 0 and "Refusing to overwrite" in result.stderr,
+            "installer did not refuse a conflicting bulk worker")
+    require(conflict_bulk.read_text(encoding="utf-8") == "model = \"user-owned\"\n",
+            "conflicting bulk worker was changed")
+
+    identical_home = root / "identical-user-file"
+    identical_agents = identical_home / "agents"
+    identical_agents.mkdir(parents=True)
+    identical_bulk = identical_agents / "bulk_worker.toml"
+    identical_bulk.write_bytes((REPO_ROOT / "codex" / "agents" / "bulk_worker.toml").read_bytes())
+    identical_env = dict(os.environ)
+    identical_env["CODEX_HOME"] = str(identical_home)
+    result = run(["bash", str(INSTALLER)], env=identical_env)
+    require(result.returncode != 0 and "user-owned worker" in result.stderr,
+            "installer claimed an untracked user-owned worker")
 
 def test_single_gate(home: Path) -> None:
     session = "single"
@@ -298,6 +393,7 @@ def main() -> int:
     test_generated_workers()
     with tempfile.TemporaryDirectory(prefix="codex-delegation-test-") as tmp:
         root = Path(tmp)
+        test_codex_worker_install(root / "installer")
         test_hooks_merge(root / "merge")
         test_single_gate(root / "single")
         test_multi_overlap(root / "multi")

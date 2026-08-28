@@ -4,6 +4,7 @@ $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $CodexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
 $StateDir = Join-Path $CodexHome '.delegation-protocol'
 $State = Join-Path $StateDir 'state'
+$LegacyBulkHash = '1a53df02818dafb46b90fa0fea2bc840e50fcc4758c4172c40b8f48db23222f4'
 
 $Python = Get-Command python -ErrorAction SilentlyContinue
 if (-not $Python) { $Python = Get-Command py -ErrorAction SilentlyContinue }
@@ -19,13 +20,46 @@ function Remove-IfOurs([string]$Destination, [string]$Expected) {
     }
 }
 
-$BulkSource = Join-Path $RepoRoot 'codex\agents\bulk-worker.toml'
+function Remove-ManagedCopyIfOurs([string]$Destination, [string]$Expected, [string]$HashPath) {
+    $item = Get-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+    if ($item) {
+        if ($item.LinkType -eq 'SymbolicLink' -and $item.Target -contains $Expected) {
+            Remove-Item -LiteralPath $Destination -Force
+        } elseif (-not $item.PSIsContainer -and (Test-Path -LiteralPath $HashPath)) {
+            $actualHash = (Get-FileHash -LiteralPath $Destination).Hash.ToLowerInvariant()
+            $recordedHash = (Get-Content -Raw -LiteralPath $HashPath).Trim().ToLowerInvariant()
+            if ($actualHash -eq $recordedHash) {
+                Remove-Item -LiteralPath $Destination -Force
+            }
+        }
+    }
+    Remove-Item -LiteralPath $HashPath -Force -ErrorAction SilentlyContinue
+}
+
+function Remove-LegacyWorkerIfOurs([string]$Destination, [string]$Expected, [string]$LegacyHash) {
+    $item = Get-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+    if (-not $item) { return }
+    if ($item.LinkType -eq 'SymbolicLink') {
+        if ($item.Target -contains $Expected) {
+            Remove-Item -LiteralPath $Destination -Force
+        }
+        return
+    }
+    if (-not $item.PSIsContainer -and
+        (Get-FileHash -LiteralPath $Destination).Hash -eq $LegacyHash) {
+        Remove-Item -LiteralPath $Destination -Force
+    }
+}
+
+$BulkSource = Join-Path $RepoRoot 'codex\agents\bulk_worker.toml'
+$LegacyBulkSource = Join-Path $RepoRoot 'codex\agents\bulk-worker.toml'
 $BalancedSource = Join-Path $RepoRoot 'codex\agents\balanced-worker.toml'
 $HookSource = Join-Path $RepoRoot 'codex\hooks\delegation-enforcer.py'
 $MuxSource = Join-Path $RepoRoot 'scripts\agents\multiplexer.py'
 $CatalogSource = Join-Path $RepoRoot 'agents\catalog'
 $RoutesSource = Join-Path $RepoRoot 'agents\multiplexer.json'
-$BulkDest = Join-Path $CodexHome 'agents\bulk-worker.toml'
+$BulkDest = Join-Path $CodexHome 'agents\bulk_worker.toml'
+$LegacyBulkDest = Join-Path $CodexHome 'agents\bulk-worker.toml'
 $BalancedDest = Join-Path $CodexHome 'agents\balanced-worker.toml'
 $HookDest = Join-Path $CodexHome 'hooks\delegation-enforcer.py'
 $MuxDest = Join-Path $StateDir 'multiplexer.py'
@@ -35,7 +69,8 @@ $RoutesDest = Join-Path $StateDir 'multiplexer.json'
 & $PythonExe (Join-Path $RepoRoot 'scripts\codex\manage-hooks.py') uninstall --codex-home $CodexHome --hook-path $HookDest --python $PythonExe
 if ($LASTEXITCODE -ne 0) { throw "Codex hook uninstallation failed with exit code $LASTEXITCODE" }
 
-Remove-IfOurs $BulkDest $BulkSource
+Remove-ManagedCopyIfOurs $BulkDest $BulkSource (Join-Path $StateDir 'bulk-worker.sha256')
+Remove-LegacyWorkerIfOurs $LegacyBulkDest $LegacyBulkSource $LegacyBulkHash
 Remove-IfOurs $BalancedDest $BalancedSource
 Remove-IfOurs $HookDest $HookSource
 Remove-IfOurs $MuxDest $MuxSource
