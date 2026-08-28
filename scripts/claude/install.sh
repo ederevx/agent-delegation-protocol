@@ -15,6 +15,11 @@ fi
 
 "$python_exe" "$repo_root/scripts/agents/render-bulk-workers.py" --check
 
+worker_source="$repo_root/claude/agents/bulk-worker.md"
+if [[ "${CI_CLAUDE_FOREGROUND_ONLY:-0}" == "1" ]]; then
+  worker_source="$repo_root/claude/agents/ci-foreground-bulk-worker.md"
+fi
+
 mkdir -p "$claude_home/rules" "$claude_home/agents" "$claude_home/hooks" "$claude_home/.delegation-protocol"
 
 safe_link() {
@@ -43,7 +48,7 @@ remove_legacy_link_if_ours() {
 }
 
 safe_link "$repo_root/claude/rules/delegation-protocol.md" "$claude_home/rules/delegation-protocol.md"
-safe_link "$repo_root/claude/agents/bulk-worker.md" "$claude_home/agents/bulk-worker.md"
+safe_link "$worker_source" "$claude_home/agents/bulk-worker.md"
 safe_link "$repo_root/claude/hooks/delegation-enforcer.py" "$claude_home/hooks/delegation-enforcer.py"
 remove_legacy_link_if_ours "$claude_home/.delegation-protocol/multiplexer.py" "$repo_root/scripts/agents/multiplexer.py"
 remove_legacy_link_if_ours "$claude_home/.delegation-protocol/multiplexer.json" "$repo_root/agents/multiplexer.json"
