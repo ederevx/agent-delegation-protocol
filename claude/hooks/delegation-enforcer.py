@@ -25,7 +25,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-PROTOCOL_VERSION = 7
+PROTOCOL_VERSION = 8
 
 BULK_WORDS = (
     "bulk", "batch", "high-volume", "high volume", "many files", "many modules",
@@ -81,6 +81,15 @@ MUTATING_BASH = re.compile(
 MUTATING_POWERSHELL = re.compile(
     r"\b(?:Set-Content|Add-Content|Out-File|Remove-Item|Move-Item|Copy-Item|"
     r"New-Item|Rename-Item|Set-Item|Clear-Content)\b",
+    re.IGNORECASE,
+)
+
+# A turn opened by a relayed worker or peer message continues the obligations of the
+# turn already in flight. Its text is a worker's words, not the user's, so classifying
+# it would judge a report as if the user had typed it, and resetting evidence would
+# discard fan-out already performed for work still in progress.
+RELAYED_MESSAGE = re.compile(
+    r"\s*<(agent|teammate|cross-session)-message\b",
     re.IGNORECASE,
 )
 
@@ -471,10 +480,31 @@ def tool_is_mutating(event: dict[str, Any]) -> bool:
     return False
 
 
+def is_relayed_message(prompt: str) -> bool:
+    return bool(RELAYED_MESSAGE.match(prompt or ""))
+
+
 def handle_prompt(event: dict[str, Any]) -> None:
     session_id = event.get("session_id")
     previous = load_state(session_id)
-    classification = classify(str(event.get("prompt") or ""), previous)
+    prompt = str(event.get("prompt") or "")
+
+    # Carry the in-flight turn forward rather than reopening it. Only a real user turn
+    # re-classifies and clears evidence; a relayed message must not cost the parent the
+    # fan-out it already performed, nor demand fresh fan-out for the integration work
+    # that reading a worker's report begins.
+    if previous and not previous.get("completed") and is_relayed_message(prompt):
+        emit(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": policy_context(previous),
+                }
+            }
+        )
+        return
+
+    classification = classify(prompt, previous)
     classification["delegation_queue"] = False
     classification["delegation_queue_backend"] = None
     classification["delegation_queue_strategy"] = None
@@ -494,7 +524,7 @@ def handle_prompt(event: dict[str, Any]) -> None:
         session_id,
         {
             "version": PROTOCOL_VERSION,
-            "prompt": str(event.get("prompt") or ""),
+            "prompt": prompt,
             **classification,
             "completed": False,
         },
