@@ -346,13 +346,11 @@ def policy_context(c: dict[str, Any]) -> str:
             return base_text + (
                 f"\nHOOK CLASSIFICATION: this turn is delegation-eligible ({reasons}) and round-robin delegation "
                 f"queue selected backend `{c['delegation_queue_backend']}`, advertising {slots} virtual slots. "
-                "Before parent mutation, launch concurrent lifecycle-visible `bulk_worker` dispatchers: use one "
-                "dispatcher per independent workstream, up to the minimum of the independent workstream count, "
-                f"{slots} advertised slots, and the host's currently available child slots. Each dispatcher must "
-                "receive one bounded workstream and submit it independently through mux-scheduler `run`; the backend "
-                "round-robins those calls on its single physical lane. When the backend advertises at least two "
-                "slots, dispatchers must actually overlap if at least two child slots are available. Do not wait "
-                "for one dispatcher before launching the next. A "
+                "Before parent mutation, start one lifecycle-visible `bulk_worker` dispatcher. Give it every "
+                "independent workstream as one queue batch and "
+                "explicitly instruct it to submit the batch through mux-scheduler `queue`. The singular scheduler "
+                "process admits virtual agents in bounded waves, round-robins them on its physical provider lane, "
+                "and owns their concurrent command jobs; host-level dispatcher overlap is not required. A "
                 "queue failure must be reported and must never be replayed on a native backend."
             )
         return base_text + (
@@ -402,9 +400,7 @@ def handle_prompt(event: dict[str, Any]) -> None:
             c["delegation_queue_backend"] = queue["backend"]
             c["delegation_queue_strategy"] = queue["strategy"]
             c["delegation_queue_virtual_slots"] = queue["virtual_slots"]
-            c["min_agents"] = 2 if (
-                queue["strategy"] == "round_robin" and queue["virtual_slots"] >= 2
-            ) else 1
+            c["min_agents"] = 1
     if not c.get("carry_forward"):
         reset_evidence(session)
     save_state(session, {
@@ -486,14 +482,6 @@ def unmet(session: Any, state: dict[str, Any]) -> str | None:
         return (
             "Delegation protocol requires a bounded subagent for this bulk/high-volume turn. Start `bulk_worker` when suitable "
             "or another supported worker before parent implementation."
-        )
-    if state.get("delegation_queue_strategy") == "round_robin":
-        if fanout or (delegated and marker(session, "multi-unavailable").exists()):
-            return None
-        return (
-            "Round-robin delegation queue requires overlapping lifecycle-visible `bulk_worker` dispatchers when "
-            "capacity permits. Launch separate dispatchers for separate bounded workstreams; each must submit its "
-            "own task through mux-scheduler `run`."
         )
     if fanout or (delegated and marker(session, "multi-unavailable").exists()):
         return None

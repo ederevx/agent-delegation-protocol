@@ -18,7 +18,7 @@ Never silently retry an external task on the native model after it launches. Nat
 
 ## Parallel fan-out
 
-When an eligible task contains two or more independent subsystems, services, modules, packages, directories, test groups, data partitions, or other safely separable workstreams, use multiple subagents concurrently when runtime capacity permits it. A selected FIFO delegation queue uses one lifecycle-visible bulk dispatcher with one ordered `queue` batch. A selected round-robin queue exposes a virtual dispatcher pool: launch one lifecycle-visible dispatcher per independent workstream, up to the minimum of useful workstreams, advertised virtual slots, and available host child slots. Each dispatcher submits its own bounded task through mux-scheduler `run`, and the mux-scheduler interleaves them on the single physical provider lane.
+When an eligible task contains two or more independent subsystems, services, modules, packages, directories, test groups, data partitions, or other safely separable workstreams, use multiple subagents concurrently when runtime capacity permits it. A selected delegation queue is the exception: use one lifecycle-visible bulk dispatcher and one mux-scheduler `queue` batch. A FIFO backend preserves order; a round-robin backend treats batch items as virtual agents inside that singular scheduler process, interleaves them on the physical provider lane, and owns their concurrent command jobs up to its configured limits.
 
 For cooperative backends, the mux-scheduler owns authorized command execution. A command-waiting virtual agent releases the provider lane while bounded command jobs run concurrently; only deterministic or exact preapproved requests are automatic, and all others remain parent permission requests.
 
@@ -53,7 +53,7 @@ The installed Claude hook may:
 - classify a clear bulk/sharded prompt as delegation-required;
 - inject the delegation/fan-out policy into the current context;
 - deny parent mutation until required delegation evidence exists;
-- select delegation queue only through the installed mux-scheduler for a validated available single-stream backend, require actual overlapping workers for round-robin virtual pools and ordinary multi-subsystem fan-out, and preserve the one-dispatcher exception for FIFO queues;
+- select delegation queue only through the installed mux-scheduler for a validated available single-stream backend, require one lifecycle dispatcher for any selected queue, and require actual overlapping workers for ordinary native multi-subsystem fan-out;
 - block turn completion until the required delegation evidence exists;
 - record each worker whose task finished, and block new spawns and turn completion until those workers are dismissed with `TaskStop`;
 - fail open only when the Agent runtime/model/concurrency path is observed to be unavailable.

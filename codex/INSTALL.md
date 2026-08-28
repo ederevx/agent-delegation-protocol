@@ -101,7 +101,7 @@ python3 "$CODEX_HOME/.delegation-protocol/mux-scheduler.py" \
   run --route bulk --runtime codex
 ```
 
-Each catalog entry uses the same named-function and compatibility interface and declares a top-level `native` boolean plus either a native Codex binding or a custom command/API adapter. Each backend declares its own numeric `priority`; routes in `agents/mux-scheduler.json` are membership lists with no scheduling order. A one-lane backend advertising a round-robin `queue_policy` accepts concurrent dispatchers up to its `virtual_slots` and interleaves them on the single lane; one without that policy queues overlapping dispatchers.
+Each catalog entry uses the same named-function and compatibility interface and declares a top-level `native` boolean plus either a native Codex binding or a custom command/API adapter. Each backend declares its own numeric `priority`; routes in `agents/mux-scheduler.json` are membership lists with no scheduling order. A one-lane backend advertising a round-robin `queue_policy` accepts one queue batch and interleaves its in-process virtual agents up to `virtual_slots` on the single lane.
 
 The dispatcher executes natively only for a valid `native_required` receipt with exit status 69 selecting the Codex-native backend. Once an external adapter launches, its receipt is returned without automatic native retry.
 
@@ -150,7 +150,7 @@ Hooks are enabled by default in current Codex releases. If your `config.toml` ex
 
 ## Multi-agent behavior
 
-For clear independent subsystems, the policy and hook require concurrent lifecycle-visible fan-out. A round-robin one-lane backend supports that fan-out up to its advertised virtual slots, interleaving those dispatchers rather than opening overlapping provider requests; a backend without a queue policy queues them instead. Atomic marker files record active `SubagentStart`/`SubagentStop` state so simultaneous hook processes do not race on one shared counter.
+For clear independent subsystems, the policy and hook ordinarily require concurrent lifecycle-visible fan-out. A selected delegation queue is the exception: one dispatcher submits one batch, and a round-robin one-lane backend interleaves its in-process virtual agents up to the advertised slot limit rather than opening overlapping provider requests. Atomic marker files record active `SubagentStart`/`SubagentStop` state so simultaneous hook processes do not race on one shared counter.
 
 The protocol does not set a fixed global concurrency cap because Codex already manages a default and existing users may have deliberately configured `agents.max_concurrent_threads_per_session`. Existing concurrency policy is preserved.
 

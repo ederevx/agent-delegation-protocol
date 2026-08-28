@@ -59,7 +59,7 @@ python3 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.delegation-protocol/mux-scheduler.
 
 The shared catalog gives every backend the same capability interface, numeric priority, and a top-level `native` boolean, followed by either a native Claude binding or a custom command/API adapter. Routes are backend membership lists with no scheduling order, so priority changes stay out of the Claude worker.
 
-A one-lane API is protected by the mux-scheduler lock, but that does not reduce the backend to one worker: a backend advertising a round-robin `queue_policy` accepts as many concurrent dispatchers as its `virtual_slots`, and the lock interleaves their slices instead of serializing whole tasks. A backend without that policy runs overlapping dispatchers one after another. The dispatcher executes natively only for a valid `native_required` receipt with exit status 69 selecting `native-claude-bulk`. An external launch is never silently retried with Haiku or another provider.
+A one-lane API is protected by the mux-scheduler lock. A backend advertising a round-robin `queue_policy` accepts one queue batch and interleaves its in-process virtual agents up to `virtual_slots` instead of serializing whole tasks. The lifecycle dispatcher executes natively only for a valid `native_required` receipt with exit status 69 selecting `native-claude-bulk`. An external launch is never silently retried with Haiku or another provider.
 
 The worker emits the adapter's exact task schema: `mode`, absolute `repo`, and non-empty `prompt` are required; `allowed_paths` are repository-relative; `validation` contains argv arrays only for edit tasks; and `preapproved_commands` contains bounded single-line command strings. It does not substitute similar-looking field names or representations.
 
@@ -87,7 +87,7 @@ The hook participates in these lifecycle events:
 - `PreToolUse` for core mutation tools, `Agent`, and `TaskStop` — denies parent mutation on an eligible bulk task until required delegation has occurred, denies new worker spawns while finished workers are still held, and records each `TaskStop` as a dismissal.
 - `Stop` — blocks the parent from ending an eligible turn until required delegation has occurred and every finished worker has been dismissed.
 
-For multi-subsystem work, enforcement requires overlapping lifecycle-visible subagents. A round-robin one-lane backend meets that requirement up to its advertised virtual slots, with the mux-scheduler interleaving their provider calls; only a backend without a queue policy serializes them. Atomic per-agent marker files avoid races between simultaneous lifecycle hook processes.
+For multi-subsystem work, enforcement ordinarily requires overlapping lifecycle-visible subagents. A selected delegation queue is the exception: one lifecycle dispatcher submits one batch, and a round-robin one-lane backend interleaves its virtual agents up to the advertised slot limit. Atomic per-agent marker files avoid races between simultaneous lifecycle hook processes.
 
 ## Settings configured
 
@@ -146,7 +146,7 @@ Then start a fresh Claude Code session and confirm:
 1. `~/.claude/settings.json` contains the protocol hook handlers alongside existing hooks.
 2. `bulk-worker` is visible as a custom subagent.
 3. A clearly bulk request triggers a required subagent before parent mutation.
-4. A request spanning independent frontend/backend/test work triggers concurrent lifecycle-visible fan-out, bounded by the selected backend's virtual slots when that backend is a round-robin one-lane backend.
+4. A request spanning independent frontend/backend/test work triggers concurrent lifecycle-visible fan-out, or one lifecycle dispatcher with a multi-item queue batch when a delegation queue is selected.
 5. `/context` still shows all pre-existing applicable instructions plus the supplementary rule.
 
 ## Uninstall
