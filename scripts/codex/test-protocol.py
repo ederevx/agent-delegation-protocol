@@ -404,7 +404,10 @@ def test_worker_dismissal(home: Path) -> None:
     call_hook(home, "subagent-stop", {"session_id": session, "turn_id": "t1", "agent_id": "w1@session"})
     # Worker w1 is now finished but not dismissed, and no dismissal tool has been observed yet
     result = call_hook(home, "stop", {"session_id": session, "turn_id": "t1", "stop_hook_active": False})
-    require(result is None or result.get("hookSpecificOutput") is not None, "stop blocked without dismissal-tool marker (should warn instead)")
+    require(result is not None and isinstance(result.get("systemMessage"), str),
+            "stop did not emit a schema-valid warning without a dismissal-tool marker")
+    require("hookSpecificOutput" not in result, "stop warning used unsupported hookSpecificOutput")
+    require("w1" in result["systemMessage"], "stop warning did not identify the held worker")
 
     # Test 2: after dismissal-shaped tool call is observed, finished worker DOES cause stop to block
     call_hook(home, "pretool", {"session_id": session, "turn_id": "t1", "tool_name": "TaskStop", "tool_input": {"task_id": "dummy"}})
