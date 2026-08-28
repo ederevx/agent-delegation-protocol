@@ -10,7 +10,7 @@ The protocol is supplementary: existing applicable instructions, hooks, and sett
 
 For eligible bulk/high-volume work, preserve frontier-model effort for planning, ambiguity, difficult reasoning, architecture, integration, conflict resolution, and final validation. Delegate bounded work to the cheapest suitable worker.
 
-When a task contains multiple independent workstreams, use concurrent lifecycle-visible agents when runtime capacity permits it. A one-lane backend does not push that work back onto the parent: when it advertises a round-robin `queue_policy`, its `virtual_slots` set how many dispatchers may run at once and the mux-scheduler interleaves them on the single physical lane. Only a backend without that policy serializes its dispatchers.
+When a task contains multiple independent workstreams, use concurrent lifecycle-visible agents when runtime capacity permits it. A selected delegation queue is the exception: one lifecycle-visible dispatcher submits all workstreams to one mux-scheduler process. On a one-lane backend advertising a round-robin `queue_policy`, `virtual_slots` controls how many in-process virtual agents the scheduler interleaves on the physical lane.
 
 ```text
 Frontier parent / coordinator
@@ -59,10 +59,10 @@ adapter envelopes tagged with `adapter_protocol: cooperative-v1`. Start returns
 the next process, while complete and failed receipts are terminal. The
 mux-scheduler owns a fair,
 cross-process ticket queue and releases the provider lane after every slice,
-so several lifecycle-visible dispatchers make interleaved progress without
+so one queued batch of virtual agents makes interleaved progress without
 ever issuing concurrent requests to the one-lane provider. Dead-process
-tickets are pruned. Virtual slots advertise host fan-out capacity, not extra
-provider throughput. A yielded adapter may include a bounded
+tickets are pruned. Virtual slots bound in-process virtual-agent concurrency,
+not provider throughput. A yielded adapter may include a bounded
 `retry_after_seconds` delay; this lets temporary physical-lane contention
 re-enter the fair queue without consuming an agent-turn budget or spinning.
 
@@ -180,7 +180,7 @@ Codex now uses a four-layer implementation:
 3. **Agent mux-scheduler** — capability-filtered, priority-ordered routing across native bindings and custom command/API adapters.
 4. **Lifecycle hooks** — `UserPromptSubmit`, `SubagentStart`, `SubagentStop`, `PreToolUse`, `PostToolUse(Agent)`, and `Stop` mechanically gate clear bulk/sharded work.
 
-For multi-subsystem tasks the Codex hook requires evidence of **actual overlapping workers**, not merely two sequential agent runs. A one-lane backend still satisfies that requirement when it advertises round-robin virtual slots: the workers overlap up to that slot count while the mux-scheduler interleaves their provider calls on the one lane.
+For ordinary multi-subsystem tasks the Codex hook requires evidence of **actual overlapping workers**, not merely two sequential agent runs. When it selects a delegation queue, it instead requires one lifecycle-visible dispatcher and one queue batch; a round-robin mux-scheduler interleaves the batch's virtual agents on the provider lane and runs authorized command jobs concurrently.
 
 **Important:** current Codex requires non-managed hooks to be reviewed/trusted. After installation, restart Codex, run `/hooks`, review the protocol definition, and trust/enable it. Until then, the AGENTS policy/custom workers are installed but mechanical hook enforcement may be skipped.
 
@@ -212,7 +212,7 @@ Claude installation manages only the configured Claude home (normally `~/.claude
 - explicit subagent concurrency/depth defaults when absent;
 - experimental agent teams when absent, as an optional additional coordination capability.
 
-Claude enforcement is not text-only. The hook classifies clear bulk/sharded requests, records actual worker starts/stops, denies parent mutation before required delegation, and blocks turn completion until delegation requirements are satisfied. Independent-subsystem work uses overlapping lifecycle-visible workers; a one-lane backend advertising round-robin virtual slots supports that overlap up to its slot count, with the mux-scheduler interleaving the calls on its single lane.
+Claude enforcement is not text-only. The hook classifies clear bulk/sharded requests, records actual worker starts/stops, denies parent mutation before required delegation, and blocks turn completion until delegation requirements are satisfied. Independent-subsystem work ordinarily uses overlapping lifecycle-visible workers. A selected delegation queue instead uses one dispatcher and one queue batch; a round-robin mux-scheduler interleaves its virtual agents on the single lane.
 
 See [`claude/INSTALL.md`](claude/INSTALL.md).
 

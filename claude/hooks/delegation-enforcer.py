@@ -433,14 +433,12 @@ def policy_context(classification: dict[str, Any]) -> str:
                     base
                     + f"\nHOOK CLASSIFICATION: this prompt is delegation-eligible ({reasons}) and round-robin "
                     f"delegation queue selected backend `{classification['delegation_queue_backend']}`, advertising "
-                    f"{slots} virtual slots. Before parent mutation, spawn concurrent lifecycle-visible "
-                    "`bulk-worker` dispatchers: use one dispatcher per independent workstream, up to the minimum "
-                    f"of the independent workstream count, {slots} advertised slots, and the host's currently "
-                    "available child slots. Give each dispatcher one bounded workstream and instruct it to submit "
-                    "that task independently through mux-scheduler `run`; the backend round-robins those calls on its "
-                    "single physical lane. When the backend advertises at least two slots, dispatchers must actually "
-                    "overlap if at least two child slots are available. Do not wait for one dispatcher before "
-                    "spawning the next. A queue failure must be "
+                    f"{slots} virtual slots. Before parent mutation, spawn one lifecycle-visible `bulk-worker` "
+                    "dispatcher. Give it every independent workstream as one queue batch and explicitly instruct "
+                    "it to submit the batch through "
+                    "mux-scheduler `queue`. The singular scheduler process round-robins those virtual agents on its "
+                    "physical provider lane in bounded waves and owns their concurrent command jobs; host-level "
+                    "dispatcher overlap is not required. A queue failure must be "
                     "reported and must never be replayed on a native backend."
                 )
             return (
@@ -516,9 +514,7 @@ def handle_prompt(event: dict[str, Any]) -> None:
             classification["delegation_queue_backend"] = queue["backend"]
             classification["delegation_queue_strategy"] = queue["strategy"]
             classification["delegation_queue_virtual_slots"] = queue["virtual_slots"]
-            classification["min_agents"] = 2 if (
-                queue["strategy"] == "round_robin" and queue["virtual_slots"] >= 2
-            ) else 1
+            classification["min_agents"] = 1
     reset_evidence(session_id)
     save_state(
         session_id,
@@ -621,17 +617,6 @@ def unmet_reason(session_id: Any, state: dict[str, Any]) -> str | None:
         return (
             "Delegation protocol requires a subagent for this bulk/high-volume turn, but none has been started. "
             "Spawn a bounded worker (prefer `bulk-worker` for mechanical work) before parent implementation."
-        )
-
-    if state.get("delegation_queue_strategy") == "round_robin":
-        if fanout:
-            return None
-        if delegated and marker(session_id, "multi-unavailable").exists():
-            return None
-        return (
-            "Round-robin delegation queue requires overlapping lifecycle-visible `bulk-worker` dispatchers when "
-            "capacity permits. Spawn separate dispatchers for separate bounded workstreams; each must submit its "
-            "own task through mux-scheduler `run`."
         )
 
     if fanout:
