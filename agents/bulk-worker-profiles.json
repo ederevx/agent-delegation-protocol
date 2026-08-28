@@ -7,6 +7,9 @@
       "runtime": "claude",
       "config_home": "the active Claude config directory (normally `~/.claude`)",
       "parent_channel": "`SendMessage` (use `ListAgents` to identify the parent)",
+      "task_transport_contract": [
+        "Create one bounded task JSON file under your scratchpad with `Write`, validate that it is non-empty JSON, and keep its absolute path through any permission resume. Do not interpolate the task through the shell or send it on stdin. Remove only that worker-owned task file after a terminal receipt or launch failure."
+      ],
       "launch_contract": [
         "Invoke the multiplexer through `Bash`. Redirect stdout to a receipt file under your scratchpad and stderr beside it so output survives an expired foreground call. Pass `timeout: 600000` for a submission expected to finish within that ceiling; otherwise use `run_in_background: true` and wait for the completion notification. Never poll it with a sleep loop."
       ],
@@ -36,6 +39,9 @@
       "runtime": "codex",
       "config_home": "the active Codex home (normally `~/.codex`)",
       "parent_channel": "the collaboration channel available to the worker",
+      "task_transport_contract": [
+        "`exec_command` cannot attach an stdin payload. Create a fresh worker-owned scratch directory under `~/tmp` with `mktemp -d`, write the bounded JSON to `task.json` there with `apply_patch`, validate that it is non-empty JSON, and keep its absolute path through any permission resume. Do not interpolate the task through the shell or send it on stdin. After a terminal receipt or launch failure, delete only that task file with `apply_patch` and remove the exact empty scratch directory with `rmdir`."
+      ],
       "launch_contract": [
         "Invoke the multiplexer through `exec_command` with `login: true` and `yield_time_ms: 30000`. Do not background or redirect the command, and do not invoke a second multiplexer process for the same assignment. If the command cannot be launched, report the exact launch failure without replaying the task."
       ],
