@@ -94,6 +94,19 @@ def require(value: bool, message: str) -> None:
 def test_generated_workers() -> None:
     result = run([sys.executable, str(WORKER_RENDERER), "--check"])
     require(result.returncode == 0, f"generated bulk workers are stale: {result.stderr}")
+    worker = REPO_ROOT / "codex" / "agents" / "bulk_worker.toml"
+    instructions = tomllib.loads(worker.read_text(encoding="utf-8"))[
+        "developer_instructions"
+    ]
+    for contract in (
+        "For `native_required`", "whose `runtime` is `codex`",
+        "When an external backend launches", "Never redo that task natively",
+    ):
+        require(contract in instructions,
+                f"Codex dispatcher lacks dual-mode contract: {contract}")
+    for provider_specific in ("DeepSeek", "CheapestInference", "deepseek-ci", "7200"):
+        require(provider_specific not in instructions,
+                f"Codex dispatcher embeds provider-specific policy: {provider_specific}")
 
 
 def call_hook(home: Path, mode: str, payload: dict[str, Any]) -> dict[str, Any] | None:

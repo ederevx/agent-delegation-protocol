@@ -101,6 +101,8 @@ def test_generated_workers() -> None:
         encoding="utf-8"
     )
     for contract in (
+        "For `native_required`", "whose `runtime` is `claude`",
+        "When an external backend launches", "Never redo that task natively",
         "Redirect stdout to a receipt file under your scratchpad",
         "`timeout: 600000`",
         "`run_in_background: true`",
@@ -114,6 +116,9 @@ def test_generated_workers() -> None:
     for codex_only in ("`exec_command`", "`write_stdin`", "`yield_time_ms`"):
         require(codex_only not in instructions,
                 f"Claude dispatcher incorrectly uses Codex mechanic: {codex_only}")
+    for provider_specific in ("DeepSeek", "CheapestInference", "deepseek-ci", "7200"):
+        require(provider_specific not in instructions,
+                f"Claude dispatcher embeds provider-specific policy: {provider_specific}")
 
 
 def call_hook(home: Path, mode: str, payload: dict[str, Any]) -> dict[str, Any] | None:
