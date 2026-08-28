@@ -34,6 +34,38 @@
         "max_turns": 30
       }
     },
+    "claude_ci_foreground": {
+      "host_name": "Claude",
+      "runtime": "claude",
+      "config_home": "the isolated ci-claude config directory",
+      "parent_channel": "`SendMessage` (use `ListAgents` to identify the parent)",
+      "task_transport_contract": [
+        "Create one bounded task JSON file under your scratchpad with `Write`, validate that it is non-empty JSON, and keep its absolute path through any permission resume. Do not interpolate the task through the shell or send it on stdin. Remove only that worker-owned task file after a terminal receipt or launch failure."
+      ],
+      "launch_contract": [
+        "Invoke the mux-scheduler once through foreground `Bash` with `timeout: 600000`. Do not redirect or background the command: the owning ci-claude session must remain paused while its worker uses the single provider lane. If the command cannot finish within that ceiling, report the exact failure without replaying the task."
+      ],
+      "permission_contract": [
+        "Ask the parent through `SendMessage`, including the request's `tool_name`, `tool_input`, and `reason` plus your recommendation. Wait for the answer, then write the exact resolution to a bounded JSON file and pass it with `--resolution-file`. Use `allow` for one exact single-use grant, `deny` to continue without the operation, or `handled` with a bounded JSON `result` when the parent performed it."
+      ],
+      "waiting_contract": [
+        "Classify the foreground command's receipt before interpreting its exit status. Never start a second mux-scheduler process for the same assignment."
+      ],
+      "conflict_contract": [
+        "A backend permission request uses the same escalation path: relay it to the parent and never widen it into a standing grant."
+      ],
+      "lifecycle_contract": [
+        "Return the report through the foreground Agent result. You remain alive and hold a slot after completion, so the parent dismisses you after reading the report."
+      ],
+      "output": {
+        "path": "claude/agents/ci-foreground-bulk-worker.md",
+        "format": "claude-markdown",
+        "name": "bulk-worker",
+        "model": "haiku",
+        "effort": "medium",
+        "max_turns": 30
+      }
+    },
     "codex": {
       "host_name": "Codex",
       "runtime": "codex",
@@ -43,7 +75,7 @@
         "`exec_command` cannot attach an stdin payload. Create a fresh worker-owned scratch directory under `~/tmp` with `mktemp -d`, write the bounded JSON to `task.json` there with `apply_patch`, validate that it is non-empty JSON, and keep its absolute path through any permission resume. Do not interpolate the task through the shell or send it on stdin. After a terminal receipt or launch failure, delete only that task file with `apply_patch` and remove the exact empty scratch directory with `rmdir`."
       ],
       "launch_contract": [
-        "Invoke the mux-scheduler through `exec_command` with `login: true` and `yield_time_ms: 30000`. Do not background or redirect the command, and do not invoke a second mux-scheduler process for the same assignment. If the command cannot be launched, report the exact launch failure without replaying the task."
+        "Invoke this one trusted mux-scheduler command through `exec_command` with `sandbox_permissions: \"require_escalated\"`, `login: true`, `yield_time_ms: 30000`, and the justification `Allow the trusted DeepSeek mux-scheduler to use its global coordination state and provider network for this delegated task?`. Do not try it sandboxed first, do not request a reusable prefix rule, do not background or redirect the command, and do not invoke a second mux-scheduler process for the same assignment. If escalation is denied or the command cannot be launched, report the exact failure without replaying the task."
       ],
       "permission_contract": [
         "Relay the receipt to the parent and stop for its decision. On a parent follow-up carrying an `allow`, `deny`, or `handled` resolution, submit that exact resolution to `mux-scheduler.py resume`."
