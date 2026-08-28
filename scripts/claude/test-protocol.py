@@ -563,6 +563,59 @@ def test_outstanding_debt_reported_once(home: Path) -> None:
     )
 
 
+def test_relayed_message_continues_turn(home: Path) -> None:
+    """A worker's report arrives as a prompt; it must not reopen the turn."""
+    session = "relayed-message-test"
+    call_hook(home, "prompt", {
+        "session_id": session,
+        "prompt": "Implement independent frontend and backend subsystems, plus their separate tests.",
+    })
+    for agent in ("frontend-worker", "backend-worker"):
+        call_hook(home, "subagent-start", {
+            "session_id": session,
+            "agent_id": agent,
+            "agent_type": "bulk-worker",
+        })
+    allowed = call_hook(home, "pretool", {
+        "session_id": session,
+        "tool_name": "Write",
+        "tool_input": {"file_path": "integration.txt"},
+    })
+    require(allowed is None, "fan-out did not unlock parent mutation")
+
+    # The relayed report itself carries shard wording. Re-classifying it would judge the
+    # worker's words as the user's, and resetting evidence would revoke the fan-out above.
+    call_hook(home, "prompt", {
+        "session_id": session,
+        "prompt": (
+            '<agent-message from="frontend-worker">\n'
+            "Finished the independent frontend and backend modules and their separate tests.\n"
+            "</agent-message>"
+        ),
+    })
+    still_allowed = call_hook(home, "pretool", {
+        "session_id": session,
+        "tool_name": "Write",
+        "tool_input": {"file_path": "integration.txt"},
+    })
+    require(still_allowed is None, "a relayed worker report revoked fan-out evidence and re-blocked integration")
+
+    # A genuine user turn must still reclassify and gate normally.
+    call_hook(home, "prompt", {
+        "session_id": session,
+        "prompt": "Now refactor independent frontend and backend subsystems, plus their separate tests.",
+    })
+    denied = call_hook(home, "pretool", {
+        "session_id": session,
+        "tool_name": "Write",
+        "tool_input": {"file_path": "integration.txt"},
+    })
+    require(
+        denied is not None and denied["hookSpecificOutput"]["permissionDecision"] == "deny",
+        "a real user turn failed to reset delegation evidence",
+    )
+
+
 def main() -> int:
     require(HOOK.exists(), f"missing hook: {HOOK}")
     require(SETTINGS_MANAGER.exists(), f"missing settings manager: {SETTINGS_MANAGER}")
@@ -579,6 +632,7 @@ def main() -> int:
         test_dismissal_lifecycle(root / "dismissal-home")
         test_unlaunched_agent_creates_no_debt(root / "phantom-home")
         test_outstanding_debt_reported_once(root / "once-home")
+        test_relayed_message_continues_turn(root / "relayed-home")
     print("Claude delegation protocol self-test: PASS")
     return 0
 
