@@ -22,6 +22,7 @@ DEFAULT_MAX_INPUT = 1024 * 1024
 DEFAULT_MAX_OUTPUT = 2 * 1024 * 1024
 ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 INFERENCE_ENV = "AGENT_INFERENCE_CONFIG"
+MAX_PRIORITY = 100
 
 
 class ConfigurationError(Exception):
@@ -108,13 +109,13 @@ def validate_agent(agent: Any, source: str) -> dict[str, Any]:
         raise ConfigurationError(f"{source}: metadata must be a JSON object")
     _reject_unknown(agent, {
         "schema_version", "id", "name", "description", "native",
-        "delegation_queue", "provider", "model", "binding", "capabilities",
-        "limits", "queue_policy", "inference",
+        "delegation_queue", "priority", "provider", "model", "binding",
+        "capabilities", "limits", "queue_policy", "inference",
     }, source)
     required = {
         "schema_version", "id", "name", "description", "native",
-        "delegation_queue", "provider", "model", "binding", "capabilities",
-        "limits",
+        "delegation_queue", "priority", "provider", "model", "binding",
+        "capabilities", "limits",
     }
     missing = sorted(required - set(agent))
     if missing:
@@ -128,6 +129,12 @@ def validate_agent(agent: Any, source: str) -> dict[str, Any]:
         raise ConfigurationError(f"{source}: native must be boolean")
     if not isinstance(agent["delegation_queue"], bool):
         raise ConfigurationError(f"{source}: delegation_queue must be boolean")
+    priority = agent["priority"]
+    if (not isinstance(priority, int) or isinstance(priority, bool)
+            or not 0 <= priority <= MAX_PRIORITY):
+        raise ConfigurationError(
+            f"{source}: priority must be an integer from 0 to {MAX_PRIORITY}"
+        )
     for field in ("name", "description", "provider", "model"):
         if not isinstance(agent[field], str) or not agent[field].strip():
             raise ConfigurationError(f"{source}: {field} must be a non-empty string")
@@ -319,9 +326,10 @@ def candidates(route: str, routes: dict[str, list[str]], agents: dict[str, dict[
                filters: dict[str, str | None], required: list[str]) -> list[dict[str, Any]]:
     if route not in routes:
         raise InputError(f"unknown route: {route}")
-    return [agents[agent_id] for agent_id in routes[route]
-            if matches(agents[agent_id], filters, required)
-            and is_available(agents[agent_id])]
+    selected = [agents[agent_id] for agent_id in routes[route]
+                if matches(agents[agent_id], filters, required)
+                and is_available(agents[agent_id])]
+    return sorted(selected, key=lambda agent: (-agent["priority"], agent["id"]))
 
 
 def runtime_platform() -> str:
@@ -333,7 +341,7 @@ def runtime_platform() -> str:
 def select_queue_backend(catalog_dir: Path, routes_path: Path, route: str,
                          runtime: str, platform: str | None = None
                          ) -> dict[str, Any] | None:
-    """Return the first available queue backend on a validated route."""
+    """Return the highest-priority available queue backend on a validated route."""
     agents = load_catalog(catalog_dir)
     routes = load_routes(routes_path, agents)
     filters = {

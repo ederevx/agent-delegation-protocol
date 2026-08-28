@@ -57,7 +57,7 @@ python3 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.delegation-protocol/multiplexer.py
   run --route bulk --runtime claude
 ```
 
-The shared catalog gives every backend the same capability interface and a top-level `native` boolean, followed by either a native Claude binding or a custom command/API adapter. The route is only an ordered list of backend IDs, so priority can be rearranged without putting provider-specific logic in the Claude worker.
+The shared catalog gives every backend the same capability interface, numeric priority, and a top-level `native` boolean, followed by either a native Claude binding or a custom command/API adapter. Routes are backend membership lists with no scheduling order, so priority changes stay out of the Claude worker.
 
 A one-lane API is protected by the multiplexer lock, so overlapping dispatchers queue and run sequentially. The dispatcher executes natively only for a valid `native_required` receipt with exit status 69 selecting `native-claude-bulk`. An external launch is never silently retried with Haiku or another provider.
 
