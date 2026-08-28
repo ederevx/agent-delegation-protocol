@@ -5,6 +5,7 @@
   "description": "Replace with a concise description of the bounded worker.",
   "native": false,
   "delegation_queue": true,
+  "priority": 0,
   "provider": "replace-with-provider",
   "model": "replace-with-model",
   "inference": {

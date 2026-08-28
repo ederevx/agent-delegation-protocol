@@ -31,6 +31,7 @@ def install_queue_fixture(home: Path, runtime: str, condition: str) -> None:
         "description": "Isolated single-stream queue fixture.",
         "native": False,
         "delegation_queue": True,
+        "priority": 100,
         "provider": "test",
         "model": "test",
         "binding": {
