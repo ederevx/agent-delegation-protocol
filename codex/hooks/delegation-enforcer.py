@@ -564,8 +564,8 @@ def handle_stop(event: dict[str, Any]) -> None:
             return
         for name in unreported:
             touch(nagged_dir(session) / name)
-        emit({"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": dismissal_reason(
-            unreported, "when this build exposes a stop/dismiss call; otherwise they are released at session end")}})
+        emit({"systemMessage": dismissal_reason(
+            unreported, "when this build exposes a stop/dismiss call; otherwise they are released at session end")})
         return
 
     if state:
