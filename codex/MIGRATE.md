@@ -119,12 +119,16 @@ Do not simplify this into replacement of the user's instructions.
 Verify:
 
 ```text
-$CODEX_HOME/agents/bulk-worker.toml
-  -> <REPO_ROOT>/codex/agents/bulk-worker.toml
+$CODEX_HOME/agents/bulk_worker.toml
+  (regular file copied from <REPO_ROOT>/codex/agents/bulk_worker.toml)
 
 $CODEX_HOME/agents/balanced-worker.toml
   -> <REPO_ROOT>/codex/agents/balanced-worker.toml
 ```
+
+The worker must not remain a symlink. Codex can discover a symlinked definition but rejects it
+when spawning the selected role. The installer safely migrates its own earlier symlink and records
+the installed copy's hash so later reinstalls can refresh it without overwriting user changes.
 
 The intended routing is:
 

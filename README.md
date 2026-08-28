@@ -110,7 +110,12 @@ Both hooks record each finished-but-undismissed worker and gate on it: new spawn
 
 ## Changes belong in this repository
 
-Installed hooks, worker definitions, rules, and instruction files are symlinked back here, so editing an installed file edits this repository. Procedural changes to delegation behavior belong in a commit here, never as an in-place patch to an agent's configuration directory: local edits are lost on reinstall, diverge between machines, and leave the other agent's half inconsistent.
+Installed hooks, rules, and instruction files are symlinked back here. Claude's worker definition is
+also symlinked; Codex's worker is a managed regular-file copy because Codex rejects symlinked role
+files at spawn time. Procedural changes to delegation behavior belong in a commit here and are
+applied through the installer, never as an in-place patch to an agent's configuration directory:
+local edits are lost on reinstall, diverge between machines, and leave the other agent's half
+inconsistent.
 
 The two host worker files are generated artifacts. Edit
 [`agents/bulk-worker-common.md.tmpl`](agents/bulk-worker-common.md.tmpl) for
@@ -235,7 +240,9 @@ bash scripts/codex/install.sh   # Codex only
 bash scripts/claude/install.sh  # Claude only
 ```
 
-Codex composed-global mode needs reinstall to refresh the composed instruction file. Both agents' symlinked hook/agent files pick up repository changes immediately, while rerunning the appropriate installer refreshes protocol-owned hook/settings entries.
+Codex composed-global mode and its managed worker copy need reinstall to refresh. Symlinked
+hook/agent assets pick up repository changes immediately, while rerunning the appropriate installer
+refreshes copied files and protocol-owned hook/settings entries.
 
 For upgrades from a materially older installation layout, use the applicable `MIGRATE.md` rather than improvising cleanup.
 

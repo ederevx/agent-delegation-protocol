@@ -60,7 +60,7 @@ Dismiss each worker as soon as its result has been read and integrated, using wh
 
 ## Local changes belong in this repository
 
-The installed hooks, worker definitions, and instruction files are symlinked back into the agent-delegation-protocol repository, so editing an installed file edits the repository. Any procedural change to delegation behavior — hook logic, gating conditions, worker definitions, installer or hooks-manager behavior — must be made in that repository and committed there, not patched in place in an agent's configuration directory.
+The installed hooks and instruction files are symlinked back into the agent-delegation-protocol repository. The Codex worker definition is a managed regular-file copy because Codex rejects symlinked role files at spawn time. Any procedural change to delegation behavior — hook logic, gating conditions, worker definitions, installer or hooks-manager behavior — must be made in that repository and committed there, then applied through the installer rather than patched in place in an agent's configuration directory.
 
 Ad-hoc local edits are lost on reinstall, diverge silently between machines, and leave the other agent's half inconsistent.
 
