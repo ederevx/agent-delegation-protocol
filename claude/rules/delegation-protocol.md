@@ -10,15 +10,17 @@ Existing `CLAUDE.md`, `CLAUDE.local.md`, project rules, managed policy, permissi
 
 Preserve the strongest parent model for planning, ambiguity, architecture, difficult debugging, integration, conflict resolution, and final validation. Delegate bounded repetitive or high-volume work to the cheapest suitable supported subagent.
 
-Prefer `bulk-worker` for low-risk mechanical work. It is a lifecycle-visible dispatcher that submits a bounded task to the installed agent multiplexer, then returns the external receipt or executes natively only when the selected native backend requests it. Escalate a delegated unit when the selected backend's declared capabilities are insufficient.
+Prefer `bulk-worker` for low-risk mechanical work. It is a lifecycle-visible dispatcher that submits a bounded task to the installed agent mux-scheduler, then returns the external receipt or executes natively only when the selected native backend requests it. Escalate a delegated unit when the selected backend's declared capabilities are insufficient.
 
-The multiplexer is agent-agnostic. Each backend has one metadata document declaring a common capability interface, availability checks, limits, numeric priority, and either a native runtime binding or a custom command/API adapter. Its top-level `native` boolean distinguishes those bindings. Routes are backend membership lists with no scheduling order. Selection filters by required capabilities, runtime, and availability before taking the highest-priority tier; equal priorities are equivalent and may be resolved by caller judgment without changing route order.
+The mux-scheduler is agent-agnostic. Each backend has one metadata document declaring a common capability interface, availability checks, limits, numeric priority, and either a native runtime binding or a custom command/API adapter. Its top-level `native` boolean distinguishes those bindings. Routes are backend membership lists with no scheduling order. Selection filters by required capabilities, runtime, and availability before taking the highest-priority tier; equal priorities are equivalent and may be resolved by caller judgment without changing route order.
 
-Never silently retry an external task on the native model after it launches. Native execution is valid only when the multiplexer selects the matching native backend before launch and returns its documented native-required receipt.
+Never silently retry an external task on the native model after it launches. Native execution is valid only when the mux-scheduler selects the matching native backend before launch and returns its documented native-required receipt.
 
 ## Parallel fan-out
 
-When an eligible task contains two or more independent subsystems, services, modules, packages, directories, test groups, data partitions, or other safely separable workstreams, use multiple subagents concurrently when runtime capacity permits it. A selected FIFO delegation queue uses one lifecycle-visible bulk dispatcher with one ordered `queue` batch. A selected round-robin queue exposes a virtual dispatcher pool: launch one lifecycle-visible dispatcher per independent workstream, up to the minimum of useful workstreams, advertised virtual slots, and available host child slots. Each dispatcher submits its own bounded task through multiplexer `run`, and the multiplexer interleaves them on the single physical provider lane.
+When an eligible task contains two or more independent subsystems, services, modules, packages, directories, test groups, data partitions, or other safely separable workstreams, use multiple subagents concurrently when runtime capacity permits it. A selected FIFO delegation queue uses one lifecycle-visible bulk dispatcher with one ordered `queue` batch. A selected round-robin queue exposes a virtual dispatcher pool: launch one lifecycle-visible dispatcher per independent workstream, up to the minimum of useful workstreams, advertised virtual slots, and available host child slots. Each dispatcher submits its own bounded task through mux-scheduler `run`, and the mux-scheduler interleaves them on the single physical provider lane.
+
+For cooperative backends, the mux-scheduler owns authorized command execution. A command-waiting virtual agent releases the provider lane while bounded command jobs run concurrently; only deterministic or exact preapproved requests are automatic, and all others remain parent permission requests.
 
 Do not serialize naturally parallel work through one worker merely for convenience. Give workers non-overlapping primary ownership, explicit boundaries, acceptance criteria, and validation commands. Use worktree/equivalent isolation when parallel write-heavy work would otherwise conflict.
 
@@ -51,7 +53,7 @@ The installed Claude hook may:
 - classify a clear bulk/sharded prompt as delegation-required;
 - inject the delegation/fan-out policy into the current context;
 - deny parent mutation until required delegation evidence exists;
-- select delegation queue only through the installed multiplexer for a validated available single-stream backend, require actual overlapping workers for round-robin virtual pools and ordinary multi-subsystem fan-out, and preserve the one-dispatcher exception for FIFO queues;
+- select delegation queue only through the installed mux-scheduler for a validated available single-stream backend, require actual overlapping workers for round-robin virtual pools and ordinary multi-subsystem fan-out, and preserve the one-dispatcher exception for FIFO queues;
 - block turn completion until the required delegation evidence exists;
 - record each worker whose task finished, and block new spawns and turn completion until those workers are dismissed with `TaskStop`;
 - fail open only when the Agent runtime/model/concurrency path is observed to be unavailable.

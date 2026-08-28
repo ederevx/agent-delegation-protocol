@@ -28,8 +28,10 @@ remove_if_ours() {
 remove_if_ours "$claude_home/rules/delegation-protocol.md" "$repo_root/claude/rules/delegation-protocol.md"
 remove_if_ours "$claude_home/agents/bulk-worker.md" "$repo_root/claude/agents/bulk-worker.md"
 remove_if_ours "$claude_home/hooks/delegation-enforcer.py" "$repo_root/claude/hooks/delegation-enforcer.py"
+remove_if_ours "$claude_home/.delegation-protocol/mux-scheduler.py" "$repo_root/scripts/agents/mux-scheduler.py"
 remove_if_ours "$claude_home/.delegation-protocol/multiplexer.py" "$repo_root/scripts/agents/multiplexer.py"
 remove_if_ours "$claude_home/.delegation-protocol/catalog" "$repo_root/agents/catalog"
+remove_if_ours "$claude_home/.delegation-protocol/mux-scheduler.json" "$repo_root/agents/mux-scheduler.json"
 remove_if_ours "$claude_home/.delegation-protocol/multiplexer.json" "$repo_root/agents/multiplexer.json"
 
 rm -f "$claude_home/.delegation-protocol/settings.before-first-install.json" \

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Lifecycle-visible dispatcher for bounded, repetitive, low-risk bulk work. Routes through the installed agent multiplexer and runs natively only after a validated native handoff.",
+  "description": "Lifecycle-visible dispatcher for bounded, repetitive, low-risk bulk work. Routes through the installed agent mux-scheduler and runs natively only after a validated native handoff.",
   "profiles": {
     "claude": {
       "host_name": "Claude",
@@ -11,13 +11,13 @@
         "Create one bounded task JSON file under your scratchpad with `Write`, validate that it is non-empty JSON, and keep its absolute path through any permission resume. Do not interpolate the task through the shell or send it on stdin. Remove only that worker-owned task file after a terminal receipt or launch failure."
       ],
       "launch_contract": [
-        "Invoke the multiplexer through `Bash`. Redirect stdout to a receipt file under your scratchpad and stderr beside it so output survives an expired foreground call. Pass `timeout: 600000` for a submission expected to finish within that ceiling; otherwise use `run_in_background: true` and wait for the completion notification. Never poll it with a sleep loop."
+        "Invoke the mux-scheduler through `Bash`. Redirect stdout to a receipt file under your scratchpad and stderr beside it so output survives an expired foreground call. Pass `timeout: 600000` for a submission expected to finish within that ceiling; otherwise use `run_in_background: true` and wait for the completion notification. Never poll it with a sleep loop."
       ],
       "permission_contract": [
         "Ask the parent through `SendMessage`, including the request's `tool_name`, `tool_input`, and `reason` plus your recommendation. Wait for the answer, then write the exact resolution to a bounded JSON file and pass it with `--resolution-file`. Use `allow` for one exact single-use grant, `deny` to continue without the operation, or `handled` with a bounded JSON `result` when the parent performed it."
       ],
       "waiting_contract": [
-        "Read the receipt capture before reacting to a foreground timeout. If it is empty and the background run remains alive, keep waiting. Never start a second multiplexer process for the same assignment."
+        "Read the receipt capture before reacting to a foreground timeout. If it is empty and the background run remains alive, keep waiting. Never start a second mux-scheduler process for the same assignment."
       ],
       "conflict_contract": [
         "A backend permission request uses the same escalation path: relay it to the parent and never widen it into a standing grant."
@@ -43,13 +43,13 @@
         "`exec_command` cannot attach an stdin payload. Create a fresh worker-owned scratch directory under `~/tmp` with `mktemp -d`, write the bounded JSON to `task.json` there with `apply_patch`, validate that it is non-empty JSON, and keep its absolute path through any permission resume. Do not interpolate the task through the shell or send it on stdin. After a terminal receipt or launch failure, delete only that task file with `apply_patch` and remove the exact empty scratch directory with `rmdir`."
       ],
       "launch_contract": [
-        "Invoke the multiplexer through `exec_command` with `login: true` and `yield_time_ms: 30000`. Do not background or redirect the command, and do not invoke a second multiplexer process for the same assignment. If the command cannot be launched, report the exact launch failure without replaying the task."
+        "Invoke the mux-scheduler through `exec_command` with `login: true` and `yield_time_ms: 30000`. Do not background or redirect the command, and do not invoke a second mux-scheduler process for the same assignment. If the command cannot be launched, report the exact launch failure without replaying the task."
       ],
       "permission_contract": [
-        "Relay the receipt to the parent and stop for its decision. On a parent follow-up carrying an `allow`, `deny`, or `handled` resolution, submit that exact resolution to `multiplexer.py resume`."
+        "Relay the receipt to the parent and stop for its decision. On a parent follow-up carrying an `allow`, `deny`, or `handled` resolution, submit that exact resolution to `mux-scheduler.py resume`."
       ],
       "waiting_contract": [
-        "In Codex, `yield_time_ms` is only a yield interval. If `exec_command` returns a `session_id`, preserve it and continue the same process with `write_stdin`, empty `chars`, and `yield_time_ms: 60000` until the tool returns an `exit_code`. Collect every output chunk. Do not redirect the receipt, background the shell command, or invoke a second multiplexer process."
+        "In Codex, `yield_time_ms` is only a yield interval. If `exec_command` returns a `session_id`, preserve it and continue the same process with `write_stdin`, empty `chars`, and `yield_time_ms: 60000` until the tool returns an `exit_code`. Collect every output chunk. Do not redirect the receipt, background the shell command, or invoke a second mux-scheduler process."
       ],
       "conflict_contract": [
         "If no parent channel is available, stop and report instead of guessing."

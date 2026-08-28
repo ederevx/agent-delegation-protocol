@@ -38,6 +38,13 @@ safe_link() {
   ln -s "$src" "$dst"
 }
 
+remove_legacy_link_if_ours() {
+  local dst="$1" expected="$2"
+  if [[ -L "$dst" && "$(readlink "$dst")" == "$expected" ]]; then
+    rm "$dst"
+  fi
+}
+
 sha256_file() {
   "$python_exe" -c \
     'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' \
@@ -151,14 +158,16 @@ install_managed_copy \
   "$state_dir/bulk-worker.sha256"
 safe_link "$repo_root/codex/agents/balanced-worker.toml" "$codex_home/agents/balanced-worker.toml"
 safe_link "$repo_root/codex/hooks/delegation-enforcer.py" "$codex_home/hooks/delegation-enforcer.py"
-safe_link "$repo_root/scripts/agents/multiplexer.py" "$state_dir/multiplexer.py"
+remove_legacy_link_if_ours "$state_dir/multiplexer.py" "$repo_root/scripts/agents/multiplexer.py"
+remove_legacy_link_if_ours "$state_dir/multiplexer.json" "$repo_root/agents/multiplexer.json"
+safe_link "$repo_root/scripts/agents/mux-scheduler.py" "$state_dir/mux-scheduler.py"
 safe_link "$repo_root/agents/catalog" "$state_dir/catalog"
-safe_link "$repo_root/agents/multiplexer.json" "$state_dir/multiplexer.json"
+safe_link "$repo_root/agents/mux-scheduler.json" "$state_dir/mux-scheduler.json"
 
 "$python_exe" "$repo_root/scripts/codex/manage-hooks.py" install \
   --codex-home "$codex_home" \
   --hook-path "$codex_home/hooks/delegation-enforcer.py" \
   --python "$python_exe"
 
-echo "Installed Codex delegation protocol only: supplementary AGENTS instructions, worker tiers, agent multiplexer, and lifecycle hooks."
+echo "Installed Codex delegation protocol only: supplementary AGENTS instructions, worker tiers, agent mux-scheduler, and lifecycle hooks."
 echo "Restart Codex, run /hooks, and review/trust the Agent Delegation Protocol hooks before relying on mechanical enforcement."

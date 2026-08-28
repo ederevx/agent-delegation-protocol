@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stdlib-only template for a multiplexer command/JSON agent adapter."""
+"""Stdlib-only template for a mux-scheduler command/JSON agent adapter."""
 from __future__ import annotations
 
 import json
@@ -32,7 +32,7 @@ def relative_path(value: Any, index: int) -> str:
 
 
 def load_inference_config() -> dict[str, Any] | None:
-    """Load the multiplexer-validated, provider-neutral inference profile."""
+    """Load the mux-scheduler-validated, provider-neutral inference profile."""
     raw = os.environ.get(INFERENCE_ENV)
     if raw is None:
         return None
@@ -166,8 +166,17 @@ def cooperative_start(task: dict[str, Any], quantum: dict[str, Any],
     raise AdapterError("cooperative custom API start is not configured")
 
 
-def cooperative_step(token: str, quantum: dict[str, Any]) -> tuple[str, Any]:
-    """TODO: resume durable state for at most one quantum."""
+def cooperative_step(token: str, quantum: dict[str, Any],
+                     permission_resolution: dict[str, Any] | None = None
+                     ) -> tuple[str, Any]:
+    """TODO: resume durable state for at most one quantum.
+
+    To delegate an already-authorized command, return ``permission_required``
+    with a bounded request containing ``request_id``, ``tool_name: Bash``,
+    ``tool_input``, and ``mux_execution`` with exact ``argv`` and absolute
+    ``cwd``. On the next step, consume the correlated ``handled`` resolution.
+    Requests without ``mux_execution`` retain the parent permission flow.
+    """
     raise AdapterError("cooperative custom API step is not configured")
 
 
@@ -234,11 +243,13 @@ def execute_cooperative(value: dict[str, Any]) -> tuple[dict[str, Any], int]:
                 task, quantum, load_inference_config()
             )
         elif operation == "step":
-            state, payload = cooperative_step(token, quantum)
+            state, payload = cooperative_step(
+                token, quantum, value.get("permission_resolution")
+            )
         else:
             payload = cooperative_cancel(token, str(value.get("reason", "cancelled")))
             state = "complete"
-        if state not in ("ready", "yielded", "complete"):
+        if state not in ("ready", "yielded", "permission_required", "complete"):
             raise AdapterError("cooperative implementation returned an invalid state")
         receipt: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION, "classification": "success",
@@ -248,6 +259,11 @@ def execute_cooperative(value: dict[str, Any]) -> tuple[dict[str, Any], int]:
             if not isinstance(payload, str) or not payload:
                 raise AdapterError("yielded state requires an opaque string token")
             receipt["token"] = payload
+        elif state == "permission_required":
+            if not isinstance(payload, dict):
+                raise AdapterError("permission_required requires a request object")
+            receipt["token"] = token
+            receipt["request"] = payload
         else:
             receipt["response"] = payload
         return receipt, 0

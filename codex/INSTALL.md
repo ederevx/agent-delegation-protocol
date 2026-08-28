@@ -13,8 +13,8 @@ Current Codex supports stronger enforcement than an `AGENTS.md`-only design, but
 The protocol therefore uses:
 
 1. **Global AGENTS authorization/semantic policy** — explicitly authorizes subagents and parallel delegation, while preserving pre-existing global instructions.
-2. **Custom worker agents** — make `bulk_worker` a lifecycle-visible multiplexer dispatcher while preserving `balanced_worker` as a stronger native tier.
-3. **Agent multiplexer** — selects the first available backend that supplies the task's required capabilities from an easily reordered priority list.
+2. **Custom worker agents** — make `bulk_worker` a lifecycle-visible mux-scheduler dispatcher while preserving `balanced_worker` as a stronger native tier.
+3. **Agent mux-scheduler** — selects the first available backend that supplies the task's required capabilities from an easily reordered priority list.
 4. **Lifecycle hooks** — mechanically classify clear bulk/sharded turns, observe real subagent starts/stops, block parent mutation until delegation requirements are met, and block turn completion until required delegation/fan-out evidence exists.
 
 This is stronger than using text instructions alone and safer than globally setting every subagent's default model to Luna.
@@ -33,7 +33,7 @@ Windows PowerShell:
 .\scripts\codex\install.ps1
 ```
 
-Python 3 is required for the local enforcement hook and agent multiplexer.
+Python 3 is required for the local enforcement hook and agent mux-scheduler.
 
 ## Global instruction installation
 
@@ -77,31 +77,31 @@ user-modified or unrelated file.
 
 Declared agent names/model tiers:
 
-- `bulk_worker` — lifecycle-visible bulk dispatcher; its Luna configuration is used only when the multiplexer selects `native-codex-bulk`.
+- `bulk_worker` — lifecycle-visible bulk dispatcher; its Luna configuration is used only when the mux-scheduler selects `native-codex-bulk`.
 - `balanced_worker` — `gpt-5.6-terra`, medium reasoning; moderately difficult delegated units.
 
 Custom-agent files are preferred over setting `agents.default_subagent_model = "gpt-5.6-luna"` globally. A global default would make Luna the inherited model for all otherwise-unspecified subagents, including tasks that need more reasoning. Custom roles preserve cheap routing while leaving escalation available.
 
 The protocol deliberately does not require per-call `model` overrides for the normal cheap-worker path. That reduces dependence on client surfaces where model/agent metadata may be hidden or awkward to express. Explicit model overrides remain available when the current runtime exposes them.
 
-## Agent multiplexer
+## Agent mux-scheduler
 
 The installer also adds symlinks under `$CODEX_HOME/.delegation-protocol/`:
 
 ```text
-multiplexer.py   -> <clone>/scripts/agents/multiplexer.py
+mux-scheduler.py   -> <clone>/scripts/agents/mux-scheduler.py
 catalog          -> <clone>/agents/catalog
-multiplexer.json -> <clone>/agents/multiplexer.json
+mux-scheduler.json -> <clone>/agents/mux-scheduler.json
 ```
 
 The bulk worker submits one bounded common JSON task or ordered batch with:
 
 ```bash
-python3 "$CODEX_HOME/.delegation-protocol/multiplexer.py" \
+python3 "$CODEX_HOME/.delegation-protocol/mux-scheduler.py" \
   run --route bulk --runtime codex
 ```
 
-Each catalog entry uses the same named-function and compatibility interface and declares a top-level `native` boolean plus either a native Codex binding or a custom command/API adapter. Each backend declares its own numeric `priority`; routes in `agents/multiplexer.json` are membership lists with no scheduling order. A one-lane backend advertising a round-robin `queue_policy` accepts concurrent dispatchers up to its `virtual_slots` and interleaves them on the single lane; one without that policy queues overlapping dispatchers.
+Each catalog entry uses the same named-function and compatibility interface and declares a top-level `native` boolean plus either a native Codex binding or a custom command/API adapter. Each backend declares its own numeric `priority`; routes in `agents/mux-scheduler.json` are membership lists with no scheduling order. A one-lane backend advertising a round-robin `queue_policy` accepts concurrent dispatchers up to its `virtual_slots` and interleaves them on the single lane; one without that policy queues overlapping dispatchers.
 
 The dispatcher executes natively only for a valid `native_required` receipt with exit status 69 selecting the Codex-native backend. Once an external adapter launches, its receipt is returned without automatic native retry.
 
@@ -129,7 +129,7 @@ Installed events:
 - `SubagentStop` — removes the worker from the active set.
 - `PreToolUse` — denies parent mutation on a classified bulk/sharded turn until required delegation evidence exists. Codex can apply this to shell commands, `apply_patch`, MCP calls, and other local function tools.
 - `PostToolUse` matching `Agent` — observes failed Agent/spawn results so enforcement can fail open when the requested worker/runtime is genuinely unavailable.
-- `Stop` — prevents the parent turn from completing until required delegation requirements are met. For multi-subsystem work, the hook requires overlapping workers; backend calls may still be serialized by the multiplexer.
+- `Stop` — prevents the parent turn from completing until required delegation requirements are met. For multi-subsystem work, the hook requires overlapping workers; backend calls may still be serialized by the mux-scheduler.
 
 The hook is a guardrail, not a sandbox. Specialized tool paths may opt out of normal tool hooks; the `Stop` gate provides a second enforcement point.
 

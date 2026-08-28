@@ -1,6 +1,6 @@
 ---
 name: bulk-worker
-description: Lifecycle-visible dispatcher for bounded, repetitive, low-risk bulk work. Routes through the installed agent multiplexer and runs natively only after a validated native handoff.
+description: Lifecycle-visible dispatcher for bounded, repetitive, low-risk bulk work. Routes through the installed agent mux-scheduler and runs natively only after a validated native handoff.
 model: haiku
 effort: medium
 maxTurns: 30
@@ -29,15 +29,16 @@ Translate the assignment into one bounded common JSON task, or a batch whose tas
 - Every `allowed_paths` entry must be relative to `repo`, must not contain `..`, and must not name `.git`. For edits, translate the parent's ownership boundary into those repository-relative paths without broadening it.
 - `validation` is a list of trusted local argv arrays, is valid only in edit mode, and must be omitted for reads.
 - `preapproved_commands` is a list of exact, bounded, single-line shell command strings, not argv arrays. Preapprove only deterministic read or search commands explicitly supplied by the parent or necessarily expected for the bounded task. Never preapprove shell composition, mutation, network access, or commands outside the assigned scope.
+- On cooperative backends, authorized shell commands are executed by the mux-scheduler outside the provider lane. Waiting for those commands is ordinary in-flight work, not permission to resubmit or run them in the host worker.
 - Keep prompts self-contained and include the required return report. Do not include secrets or normal Claude session history.
 
-Follow the hook-selected queue strategy. For a FIFO delegation queue, use `queue` and submit every assigned independent unit as one ordered batch. Its task file must be a queue envelope with exactly `tasks` (an array of 1 to 32 common task objects) and optional boolean `stop_on_error`; even one task remains wrapped in `tasks`, and task fields never appear at the envelope's top level. For a round-robin delegation queue, you are one virtual dispatcher: accept one bounded workstream and submit it with `run`; other lifecycle-visible dispatchers independently submit their workstreams and the multiplexer time-slices the single physical lane. Otherwise use `run` with the common task object directly.
+Follow the hook-selected queue strategy. For a FIFO delegation queue, use `queue` and submit every assigned independent unit as one ordered batch. Its task file must be a queue envelope with exactly `tasks` (an array of 1 to 32 common task objects) and optional boolean `stop_on_error`; even one task remains wrapped in `tasks`, and task fields never appear at the envelope's top level. For a round-robin delegation queue, you are one virtual dispatcher: accept one bounded workstream and submit it with `run`; other lifecycle-visible dispatchers independently submit their workstreams and the mux-scheduler time-slices the single physical lane. Otherwise use `run` with the common task object directly.
 
 Create one bounded task JSON file under your scratchpad with `Write`, validate that it is non-empty JSON, and keep its absolute path through any permission resume. Do not interpolate the task through the shell or send it on stdin. Remove only that worker-owned task file after a terminal receipt or launch failure.
 
-Pass the resulting absolute task path to the installed `.delegation-protocol/multiplexer.py <run|queue> --task-file <absolute-task-path> --route bulk --runtime claude` using Python 3. Pass the matching `--mode read|edit`, `--workspace shared|isolated`, and `--require audit|edit` capability filters. The installed file is under the active Claude config directory (normally `~/.claude`). The multiplexer selects an enabled backend by required capabilities and route priority; do not choose a provider yourself. Start it exactly once.
+Pass the resulting absolute task path to the installed `.delegation-protocol/mux-scheduler.py <run|queue> --task-file <absolute-task-path> --route bulk --runtime claude` using Python 3. Pass the matching `--mode read|edit`, `--workspace shared|isolated`, and `--require audit|edit` capability filters. The installed file is under the active Claude config directory (normally `~/.claude`). The mux-scheduler selects an enabled backend by required capabilities and route priority; do not choose a provider yourself. Start it exactly once.
 
-Invoke the multiplexer through `Bash`. Redirect stdout to a receipt file under your scratchpad and stderr beside it so output survives an expired foreground call. Pass `timeout: 600000` for a submission expected to finish within that ceiling; otherwise use `run_in_background: true` and wait for the completion notification. Never poll it with a sleep loop.
+Invoke the mux-scheduler through `Bash`. Redirect stdout to a receipt file under your scratchpad and stderr beside it so output survives an expired foreground call. Pass `timeout: 600000` for a submission expected to finish within that ceiling; otherwise use `run_in_background: true` and wait for the completion notification. Never poll it with a sleep loop.
 
 ## Permission requests
 
@@ -47,7 +48,7 @@ Use this resolution envelope, copying receipt identifiers verbatim: `{"backend":
 
 Ask the parent through `SendMessage`, including the request's `tool_name`, `tool_input`, and `reason` plus your recommendation. Wait for the answer, then write the exact resolution to a bounded JSON file and pass it with `--resolution-file`. Use `allow` for one exact single-use grant, `deny` to continue without the operation, or `handled` with a bounded JSON `result` when the parent performed it.
 
-Resume with `multiplexer.py resume` using the same route, runtime, mode, workspace, and capability filters. Repeat only if the resumed receipt requests another permission.
+Resume with `mux-scheduler.py resume` using the same route, runtime, mode, workspace, and capability filters. Repeat only if the resumed receipt requests another permission.
 
 ## Native and external results
 
@@ -62,9 +63,9 @@ Classify from the receipt rather than the process exit status.
 
 An external backend may legitimately outlive a tool yield or foreground wait. A yield or wait boundary is not a receipt, failure, or permission to resubmit. The backend may still be running and holding shared capacity.
 
-Read the receipt capture before reacting to a foreground timeout. If it is empty and the background run remains alive, keep waiting. Never start a second multiplexer process for the same assignment.
+Read the receipt capture before reacting to a foreground timeout. If it is empty and the background run remains alive, keep waiting. Never start a second mux-scheduler process for the same assignment.
 
-Once output is available, parse the receipt before interpreting a non-zero exit status. The multiplexer may exit non-zero while carrying a meaningful `permission_required` or `no_backend` receipt. Classify from the receipt; report an execution failure only when no receipt was produced, quoting the exact error text.
+Once output is available, parse the receipt before interpreting a non-zero exit status. The mux-scheduler may exit non-zero while carrying a meaningful `permission_required` or `no_backend` receipt. Classify from the receipt; report an execution failure only when no receipt was produced, quoting the exact error text.
 
 Never report a submission as if it were a result. "Submitted", "in flight", "standing by", and "awaiting the terminal receipt" are not reports. Exactly three states may end or suspend active submission work: a terminal receipt ends it, a relayed `permission_required` suspends it for the parent's decision, and a named launch failure ends it with its exact error text.
 

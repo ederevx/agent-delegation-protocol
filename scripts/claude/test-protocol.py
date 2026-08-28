@@ -14,7 +14,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HOOK = REPO_ROOT / "claude" / "hooks" / "delegation-enforcer.py"
 SETTINGS_MANAGER = REPO_ROOT / "scripts" / "claude" / "manage-settings.py"
-MULTIPLEXER = REPO_ROOT / "scripts" / "agents" / "multiplexer.py"
+MUX_SCHEDULER = REPO_ROOT / "scripts" / "agents" / "mux-scheduler.py"
 WORKER_RENDERER = REPO_ROOT / "scripts" / "agents" / "render-bulk-workers.py"
 
 
@@ -22,7 +22,7 @@ def install_queue_fixture(home: Path, runtime: str, condition: str) -> None:
     installed = home / ".delegation-protocol"
     catalog = installed / "catalog"
     catalog.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(MULTIPLEXER, installed / "multiplexer.py")
+    shutil.copy2(MUX_SCHEDULER, installed / "mux-scheduler.py")
     executable = sys.executable if condition != "unavailable" else "missing-queue-adapter-for-test"
     metadata: dict[str, Any] = {
         "schema_version": 1,
@@ -54,7 +54,7 @@ def install_queue_fixture(home: Path, runtime: str, condition: str) -> None:
         metadata["limits"] = {"max_concurrency": 2}
     (catalog / "test-queue.json").write_text(json.dumps(metadata), encoding="utf-8")
     members = ["missing-backend"] if condition == "misconfigured" else ["test-queue"]
-    (installed / "multiplexer.json").write_text(json.dumps({
+    (installed / "mux-scheduler.json").write_text(json.dumps({
         "schema_version": 1, "routes": {"bulk": members},
     }), encoding="utf-8")
 
@@ -71,7 +71,7 @@ def install_round_robin_queue_fixture(home: Path, runtime: str, slots: int = 4) 
         "quantum": {"unit": "agent_turn", "value": 4},
     }
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
-    (installed / "multiplexer.py").write_text(
+    (installed / "mux-scheduler.py").write_text(
         "import json\n"
         "def select_queue_backend(catalog, routes, route, runtime, platform=None):\n"
         "    return json.loads((catalog / 'test-queue.json').read_text(encoding='utf-8'))\n",
@@ -228,6 +228,31 @@ def test_settings_merge(home: Path) -> None:
     ), "protocol hooks remained after uninstall")
 
 
+def test_installer_migrates_mux_scheduler_links(home: Path) -> None:
+    protocol = home / ".delegation-protocol"
+    protocol.mkdir(parents=True)
+    legacy_mux = protocol / "multiplexer.py"
+    legacy_routes = protocol / "multiplexer.json"
+    legacy_mux.symlink_to(REPO_ROOT / "scripts" / "agents" / "multiplexer.py")
+    legacy_routes.symlink_to(REPO_ROOT / "agents" / "multiplexer.json")
+    env = dict(os.environ)
+    env["CLAUDE_CONFIG_DIR"] = str(home)
+
+    result = run(["bash", str(REPO_ROOT / "scripts" / "claude" / "install.sh")], env=env)
+    require(result.returncode == 0, f"Claude installer failed: {result.stderr}")
+    require(not legacy_mux.is_symlink() and not legacy_routes.is_symlink(),
+            "Claude installer retained legacy multiplexer links")
+    require((protocol / "mux-scheduler.py").is_symlink(),
+            "Claude mux-scheduler executable link was not installed")
+    require((protocol / "mux-scheduler.json").is_symlink(),
+            "Claude mux-scheduler route link was not installed")
+
+    result = run(["bash", str(REPO_ROOT / "scripts" / "claude" / "uninstall.sh")], env=env)
+    require(result.returncode == 0, f"Claude uninstaller failed: {result.stderr}")
+    require(not (protocol / "mux-scheduler.py").is_symlink(),
+            "Claude uninstaller retained mux-scheduler executable")
+
+
 def test_single_agent_gate(home: Path) -> None:
     session = "single-agent-test"
     prompt = call_hook(home, "prompt", {
@@ -333,7 +358,7 @@ def test_round_robin_delegation_queue(home: Path) -> None:
     require("round-robin delegation queue selected backend `test-queue`" in context,
             "round-robin queue selection was not injected")
     require("advertising 4 virtual slots" in context, "virtual slot count was not injected")
-    require("multiplexer `run`" in context, "per-dispatcher run contract was not injected")
+    require("mux-scheduler `run`" in context, "per-dispatcher run contract was not injected")
     state = json.loads((home / ".delegation-protocol" / "sessions" / f"{session}.json").read_text())
     require(state["delegation_queue_strategy"] == "round_robin", "round-robin strategy was not recorded")
     require(state["delegation_queue_virtual_slots"] == 4, "virtual slot count was not recorded")
@@ -662,6 +687,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="delegation-protocol-test-") as tmp:
         root = Path(tmp)
         test_settings_merge(root / "settings-home")
+        test_installer_migrates_mux_scheduler_links(root / "installer-home")
         test_single_agent_gate(root / "single-home")
         test_multi_agent_overlap_gate(root / "multi-home")
         test_delegation_queue(root / "queue-home")

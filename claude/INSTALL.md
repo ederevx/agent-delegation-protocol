@@ -20,7 +20,7 @@ Windows PowerShell:
 .\scripts\claude\install.ps1
 ```
 
-Python 3 is required for the local enforcement hook and agent multiplexer.
+Python 3 is required for the local enforcement hook and agent mux-scheduler.
 
 ## Installed symlinks
 
@@ -36,37 +36,37 @@ The installer refuses to overwrite an unrelated file or symlink at any destinati
 ~/.claude/hooks/delegation-enforcer.py
   -> <clone>/claude/hooks/delegation-enforcer.py
 
-~/.claude/.delegation-protocol/multiplexer.py
-  -> <clone>/scripts/agents/multiplexer.py
+~/.claude/.delegation-protocol/mux-scheduler.py
+  -> <clone>/scripts/agents/mux-scheduler.py
 
 ~/.claude/.delegation-protocol/catalog
   -> <clone>/agents/catalog
 
-~/.claude/.delegation-protocol/multiplexer.json
-  -> <clone>/agents/multiplexer.json
+~/.claude/.delegation-protocol/mux-scheduler.json
+  -> <clone>/agents/mux-scheduler.json
 ```
 
 The Markdown rule is a semantic/supporting policy layer. Mechanical enforcement is performed by hooks and settings.
 
-## Agent multiplexer
+## Agent mux-scheduler
 
 The bulk worker is a lifecycle-visible dispatcher. It submits one bounded common JSON task or ordered batch with:
 
 ```bash
-python3 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.delegation-protocol/multiplexer.py" \
+python3 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.delegation-protocol/mux-scheduler.py" \
   run --route bulk --runtime claude
 ```
 
 The shared catalog gives every backend the same capability interface, numeric priority, and a top-level `native` boolean, followed by either a native Claude binding or a custom command/API adapter. Routes are backend membership lists with no scheduling order, so priority changes stay out of the Claude worker.
 
-A one-lane API is protected by the multiplexer lock, but that does not reduce the backend to one worker: a backend advertising a round-robin `queue_policy` accepts as many concurrent dispatchers as its `virtual_slots`, and the lock interleaves their slices instead of serializing whole tasks. A backend without that policy runs overlapping dispatchers one after another. The dispatcher executes natively only for a valid `native_required` receipt with exit status 69 selecting `native-claude-bulk`. An external launch is never silently retried with Haiku or another provider.
+A one-lane API is protected by the mux-scheduler lock, but that does not reduce the backend to one worker: a backend advertising a round-robin `queue_policy` accepts as many concurrent dispatchers as its `virtual_slots`, and the lock interleaves their slices instead of serializing whole tasks. A backend without that policy runs overlapping dispatchers one after another. The dispatcher executes natively only for a valid `native_required` receipt with exit status 69 selecting `native-claude-bulk`. An external launch is never silently retried with Haiku or another provider.
 
 The worker emits the adapter's exact task schema: `mode`, absolute `repo`, and non-empty `prompt` are required; `allowed_paths` are repository-relative; `validation` contains argv arrays only for edit tasks; and `preapproved_commands` contains bounded single-line command strings. It does not substitute similar-looking field names or representations.
 
-Submission is not always one round trip. A task may name up to 32 exact `preapproved_commands`; anything else the backend needs pauses it, and the multiplexer returns a `permission_required` receipt carrying the exact request and a resume `token` while the backend session and edit worktree stay retained. The dispatcher relays that request to the parent and resumes with the parent's decision:
+Submission is not always one round trip. A task may name up to 32 exact `preapproved_commands`; anything else the backend needs pauses it, and the mux-scheduler returns a `permission_required` receipt carrying the exact request and a resume `token` while the backend session and edit worktree stay retained. The dispatcher relays that request to the parent and resumes with the parent's decision:
 
 ```bash
-python3 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.delegation-protocol/multiplexer.py" \
+python3 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.delegation-protocol/mux-scheduler.py" \
   resume --route bulk --runtime claude --resolution-file resolution.json
 ```
 
@@ -87,7 +87,7 @@ The hook participates in these lifecycle events:
 - `PreToolUse` for core mutation tools, `Agent`, and `TaskStop` — denies parent mutation on an eligible bulk task until required delegation has occurred, denies new worker spawns while finished workers are still held, and records each `TaskStop` as a dismissal.
 - `Stop` — blocks the parent from ending an eligible turn until required delegation has occurred and every finished worker has been dismissed.
 
-For multi-subsystem work, enforcement requires overlapping lifecycle-visible subagents. A round-robin one-lane backend meets that requirement up to its advertised virtual slots, with the multiplexer interleaving their provider calls; only a backend without a queue policy serializes them. Atomic per-agent marker files avoid races between simultaneous lifecycle hook processes.
+For multi-subsystem work, enforcement requires overlapping lifecycle-visible subagents. A round-robin one-lane backend meets that requirement up to its advertised virtual slots, with the mux-scheduler interleaving their provider calls; only a backend without a queue policy serializes them. Atomic per-agent marker files avoid races between simultaneous lifecycle hook processes.
 
 ## Settings configured
 
@@ -105,7 +105,7 @@ When the following environment entries are absent from `settings.json`, the inst
 
 Existing values are preserved rather than overwritten; the installer warns when an existing value conflicts with the protocol default.
 
-The installer deliberately does **not** set `CLAUDE_CODE_SUBAGENT_MODEL`. That variable outranks per-invocation and agent-definition model selection, so globally pinning it to Haiku would prevent escalation. Instead, `bulk-worker.md` specifies `model: haiku` for the native binding, while the multiplexer may select an external backend and the parent remains free to choose a stronger model when necessary.
+The installer deliberately does **not** set `CLAUDE_CODE_SUBAGENT_MODEL`. That variable outranks per-invocation and agent-definition model selection, so globally pinning it to Haiku would prevent escalation. Instead, `bulk-worker.md` specifies `model: haiku` for the native binding, while the mux-scheduler may select an external backend and the parent remains free to choose a stronger model when necessary.
 
 Agent teams are optional. The mandatory baseline uses ordinary subagents because they are broadly available and directly observable through `SubagentStart`/`SubagentStop`. Teams may be used for complex independent subsystems that benefit from peer-to-peer coordination.
 

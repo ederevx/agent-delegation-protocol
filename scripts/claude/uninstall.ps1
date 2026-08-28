@@ -20,15 +20,15 @@ function Remove-IfOurs([string]$Destination, [string]$Expected) {
 $RuleSource = Join-Path $RepoRoot 'claude\rules\delegation-protocol.md'
 $AgentSource = Join-Path $RepoRoot 'claude\agents\bulk-worker.md'
 $HookSource = Join-Path $RepoRoot 'claude\hooks\delegation-enforcer.py'
-$MuxSource = Join-Path $RepoRoot 'scripts\agents\multiplexer.py'
+$MuxSource = Join-Path $RepoRoot 'scripts\agents\mux-scheduler.py'
 $CatalogSource = Join-Path $RepoRoot 'agents\catalog'
-$RoutesSource = Join-Path $RepoRoot 'agents\multiplexer.json'
+$RoutesSource = Join-Path $RepoRoot 'agents\mux-scheduler.json'
 $RuleDest = Join-Path $ClaudeHome 'rules\delegation-protocol.md'
 $AgentDest = Join-Path $ClaudeHome 'agents\bulk-worker.md'
 $HookDest = Join-Path $ClaudeHome 'hooks\delegation-enforcer.py'
-$MuxDest = Join-Path $ClaudeHome '.delegation-protocol\multiplexer.py'
+$MuxDest = Join-Path $ClaudeHome '.delegation-protocol\mux-scheduler.py'
 $CatalogDest = Join-Path $ClaudeHome '.delegation-protocol\catalog'
-$RoutesDest = Join-Path $ClaudeHome '.delegation-protocol\multiplexer.json'
+$RoutesDest = Join-Path $ClaudeHome '.delegation-protocol\mux-scheduler.json'
 
 & $PythonExe (Join-Path $RepoRoot 'scripts\claude\manage-settings.py') uninstall --claude-home $ClaudeHome --hook-path $HookDest --python $PythonExe
 if ($LASTEXITCODE -ne 0) { throw "Claude settings uninstallation failed with exit code $LASTEXITCODE" }
@@ -37,8 +37,10 @@ Remove-IfOurs $RuleDest $RuleSource
 Remove-IfOurs $AgentDest $AgentSource
 Remove-IfOurs $HookDest $HookSource
 Remove-IfOurs $MuxDest $MuxSource
+Remove-IfOurs (Join-Path $ClaudeHome '.delegation-protocol\multiplexer.py') (Join-Path $RepoRoot 'scripts\agents\multiplexer.py')
 Remove-IfOurs $CatalogDest $CatalogSource
 Remove-IfOurs $RoutesDest $RoutesSource
+Remove-IfOurs (Join-Path $ClaudeHome '.delegation-protocol\multiplexer.json') (Join-Path $RepoRoot 'agents\multiplexer.json')
 
 $ProtocolState = Join-Path $ClaudeHome '.delegation-protocol'
 foreach ($owned in @('settings.before-first-install.json', 'settings-manifest.json')) {
