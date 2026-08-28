@@ -40,7 +40,7 @@ Ad-hoc local edits are lost on reinstall, diverge silently between machines, and
 
 ## Worker conflict escalation
 
-Workers share the parent's working tree and cannot see its uncommitted state, so they are required to ask before acting outside their assigned ownership — repository-wide version-control state, another worker's files, the parent's uncommitted work, dependency changes, or anything that leaves the machine. Workers ask over `SendMessage`; the parent is addressable by the name `ListAgents` reports.
+Dispatchers share the parent's working tree and cannot see its uncommitted state, so they are required to ask before acting outside their assigned ownership — repository-wide version-control state, another worker's files, the parent's uncommitted work, dependency changes, or anything that leaves the machine. The delegated backend does not: an `edit` task runs in a disposable worktree and comes back as a patch for the parent to apply, so a dispatcher's ownership boundary governs what its patch may touch, not what it writes in place. They ask over `SendMessage`; the parent is addressable by the name `ListAgents` reports.
 
 The parent must answer those requests rather than let a worker stall or guess, and is the only party that may escalate the question to the user. Granting permission for one action does not grant it for the next.
 
