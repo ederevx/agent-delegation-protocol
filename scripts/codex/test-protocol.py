@@ -105,6 +105,8 @@ def test_generated_workers() -> None:
         "`exec_command` cannot attach an stdin payload", "--task-file",
         "fresh worker-owned scratch directory under `~/tmp`", "`apply_patch`",
         "validate that it is non-empty JSON", "remove the exact empty scratch directory",
+        "queue envelope with exactly `tasks`", "even one task remains wrapped in `tasks`",
+        "task fields never appear at the envelope's top level",
     ):
         require(contract in instructions,
                 f"Codex dispatcher lacks dual-mode contract: {contract}")
