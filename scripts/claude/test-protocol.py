@@ -97,6 +97,23 @@ def require(condition: bool, message: str) -> None:
 def test_generated_workers() -> None:
     result = run([sys.executable, str(WORKER_RENDERER), "--check"])
     require(result.returncode == 0, f"generated bulk workers are stale: {result.stderr}")
+    instructions = (REPO_ROOT / "claude" / "agents" / "bulk-worker.md").read_text(
+        encoding="utf-8"
+    )
+    for contract in (
+        "Redirect stdout to a receipt file under your scratchpad",
+        "`timeout: 600000`",
+        "`run_in_background: true`",
+        "Read the receipt capture before reacting to a foreground timeout",
+        "parse the receipt before interpreting a non-zero exit status",
+        "Classify from the receipt",
+        "report an execution failure only when no receipt was produced",
+    ):
+        require(contract in instructions,
+                f"Claude dispatcher lacks required waiting contract: {contract}")
+    for codex_only in ("`exec_command`", "`write_stdin`", "`yield_time_ms`"):
+        require(codex_only not in instructions,
+                f"Claude dispatcher incorrectly uses Codex mechanic: {codex_only}")
 
 
 def call_hook(home: Path, mode: str, payload: dict[str, Any]) -> dict[str, Any] | None:

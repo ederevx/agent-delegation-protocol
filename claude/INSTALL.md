@@ -61,6 +61,19 @@ The shared catalog gives every backend the same capability interface and a top-l
 
 A one-lane API is protected by the multiplexer lock, so overlapping dispatchers queue and run sequentially. The dispatcher executes natively only for a valid `native_required` receipt with exit status 69 selecting `native-claude-bulk`. An external launch is never silently retried with Haiku or another provider.
 
+The worker emits the adapter's exact task schema: `mode`, absolute `repo`, and non-empty `prompt` are required; `allowed_paths` are repository-relative; `validation` contains argv arrays only for edit tasks; and `preapproved_commands` contains bounded single-line command strings. It does not substitute similar-looking field names or representations.
+
+Submission is not always one round trip. A task may name up to 32 exact `preapproved_commands`; anything else the backend needs pauses it, and the multiplexer returns a `permission_required` receipt carrying the exact request and a resume `token` while the backend session and edit worktree stay retained. The dispatcher relays that request to the parent and resumes with the parent's decision:
+
+```bash
+python3 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.delegation-protocol/multiplexer.py" \
+  resume --route bulk --runtime claude --resolution-file resolution.json
+```
+
+`allow` grants the one exact command once, `deny` resumes without it, and `handled` passes back a bounded JSON `result` the parent produced itself. Waiting does not consume the task timeout.
+
+An external backend advertising isolated-patch delivery may run in a disposable detached worktree and return its edits only as `evidence.patch`. The dispatcher returns that patch for the parent to apply and review. Native execution instead follows the assigned shared-worktree ownership contract.
+
 ## Hooks installed into settings.json
 
 The installer merges protocol-owned entries into `~/.claude/settings.json`; it does not replace unrelated settings or hooks.
