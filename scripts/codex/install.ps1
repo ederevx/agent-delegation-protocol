@@ -25,6 +25,13 @@ function New-SafeSymlink([string]$Source, [string]$Destination) {
     New-Item -ItemType SymbolicLink -Path $Destination -Target $Source | Out-Null
 }
 
+function Remove-LegacyLinkIfOurs([string]$Destination, [string]$Expected) {
+    $item = Get-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+    if ($item -and $item.LinkType -eq 'SymbolicLink' -and $item.Target -contains $Expected) {
+        Remove-Item -LiteralPath $Destination -Force
+    }
+}
+
 function Install-ManagedCopy([string]$Source, [string]$Destination, [string]$HashPath) {
     $sourceHash = (Get-FileHash -LiteralPath $Source).Hash.ToLowerInvariant()
     $item = Get-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
@@ -116,21 +123,23 @@ $BulkSource = Join-Path $RepoRoot 'codex\agents\bulk_worker.toml'
 $LegacyBulkSource = Join-Path $RepoRoot 'codex\agents\bulk-worker.toml'
 $BalancedSource = Join-Path $RepoRoot 'codex\agents\balanced-worker.toml'
 $HookSource = Join-Path $RepoRoot 'codex\hooks\delegation-enforcer.py'
-$MuxSource = Join-Path $RepoRoot 'scripts\agents\multiplexer.py'
+$MuxSource = Join-Path $RepoRoot 'scripts\agents\mux-scheduler.py'
 $CatalogSource = Join-Path $RepoRoot 'agents\catalog'
-$RoutesSource = Join-Path $RepoRoot 'agents\multiplexer.json'
+$RoutesSource = Join-Path $RepoRoot 'agents\mux-scheduler.json'
 $BulkDest = Join-Path $CodexHome 'agents\bulk_worker.toml'
 $LegacyBulkDest = Join-Path $CodexHome 'agents\bulk-worker.toml'
 $BalancedDest = Join-Path $CodexHome 'agents\balanced-worker.toml'
 $HookDest = Join-Path $CodexHome 'hooks\delegation-enforcer.py'
-$MuxDest = Join-Path $StateDir 'multiplexer.py'
+$MuxDest = Join-Path $StateDir 'mux-scheduler.py'
 $CatalogDest = Join-Path $StateDir 'catalog'
-$RoutesDest = Join-Path $StateDir 'multiplexer.json'
+$RoutesDest = Join-Path $StateDir 'mux-scheduler.json'
 
 Remove-LegacyWorkerIfOurs $LegacyBulkDest $LegacyBulkSource $LegacyBulkHash
 Install-ManagedCopy $BulkSource $BulkDest (Join-Path $StateDir 'bulk-worker.sha256')
 New-SafeSymlink $BalancedSource $BalancedDest
 New-SafeSymlink $HookSource $HookDest
+Remove-LegacyLinkIfOurs (Join-Path $StateDir 'multiplexer.py') (Join-Path $RepoRoot 'scripts\agents\multiplexer.py')
+Remove-LegacyLinkIfOurs (Join-Path $StateDir 'multiplexer.json') (Join-Path $RepoRoot 'agents\multiplexer.json')
 New-SafeSymlink $MuxSource $MuxDest
 New-SafeSymlink $CatalogSource $CatalogDest
 New-SafeSymlink $RoutesSource $RoutesDest
@@ -138,5 +147,5 @@ New-SafeSymlink $RoutesSource $RoutesDest
 & $PythonExe (Join-Path $RepoRoot 'scripts\codex\manage-hooks.py') install --codex-home $CodexHome --hook-path $HookDest --python $PythonExe
 if ($LASTEXITCODE -ne 0) { throw "Codex hook installation failed with exit code $LASTEXITCODE" }
 
-Write-Host 'Installed Codex delegation protocol only: supplementary AGENTS instructions, worker tiers, agent multiplexer, and lifecycle hooks.'
+Write-Host 'Installed Codex delegation protocol only: supplementary AGENTS instructions, worker tiers, agent mux-scheduler, and lifecycle hooks.'
 Write-Host 'Restart Codex, run /hooks, and review/trust the Agent Delegation Protocol hooks before relying on mechanical enforcement.'

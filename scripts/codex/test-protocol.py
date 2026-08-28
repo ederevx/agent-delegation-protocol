@@ -16,7 +16,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HOOK = REPO_ROOT / "codex" / "hooks" / "delegation-enforcer.py"
 MANAGER = REPO_ROOT / "scripts" / "codex" / "manage-hooks.py"
-MULTIPLEXER = REPO_ROOT / "scripts" / "agents" / "multiplexer.py"
+MUX_SCHEDULER = REPO_ROOT / "scripts" / "agents" / "mux-scheduler.py"
 INSTALLER = REPO_ROOT / "scripts" / "codex" / "install.sh"
 UNINSTALLER = REPO_ROOT / "scripts" / "codex" / "uninstall.sh"
 WORKER_RENDERER = REPO_ROOT / "scripts" / "agents" / "render-bulk-workers.py"
@@ -26,7 +26,7 @@ def install_queue_fixture(home: Path, runtime: str, condition: str) -> None:
     installed = home / ".delegation-protocol"
     catalog = installed / "catalog"
     catalog.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(MULTIPLEXER, installed / "multiplexer.py")
+    shutil.copy2(MUX_SCHEDULER, installed / "mux-scheduler.py")
     executable = sys.executable if condition != "unavailable" else "missing-queue-adapter-for-test"
     metadata: dict[str, Any] = {
         "schema_version": 1,
@@ -58,7 +58,7 @@ def install_queue_fixture(home: Path, runtime: str, condition: str) -> None:
         metadata["limits"] = {"max_concurrency": 2}
     (catalog / "test-queue.json").write_text(json.dumps(metadata), encoding="utf-8")
     members = ["missing-backend"] if condition == "misconfigured" else ["test-queue"]
-    (installed / "multiplexer.json").write_text(json.dumps({
+    (installed / "mux-scheduler.json").write_text(json.dumps({
         "schema_version": 1, "routes": {"bulk": members},
     }), encoding="utf-8")
 
@@ -75,7 +75,7 @@ def install_round_robin_queue_fixture(home: Path, runtime: str, slots: int = 4) 
         "quantum": {"unit": "agent_turn", "value": 4},
     }
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
-    (installed / "multiplexer.py").write_text(
+    (installed / "mux-scheduler.py").write_text(
         "import json\n"
         "def select_queue_backend(catalog, routes, route, runtime, platform=None):\n"
         "    return json.loads((catalog / 'test-queue.json').read_text(encoding='utf-8'))\n",
@@ -166,6 +166,12 @@ def test_codex_worker_install(root: Path) -> None:
     env["CODEX_HOME"] = str(root / "owned-link")
     agents = Path(env["CODEX_HOME"]) / "agents"
     agents.mkdir(parents=True)
+    protocol_state = Path(env["CODEX_HOME"]) / ".delegation-protocol"
+    protocol_state.mkdir()
+    legacy_mux = protocol_state / "multiplexer.py"
+    legacy_routes = protocol_state / "multiplexer.json"
+    legacy_mux.symlink_to(REPO_ROOT / "scripts" / "agents" / "multiplexer.py")
+    legacy_routes.symlink_to(REPO_ROOT / "agents" / "multiplexer.json")
     balanced = agents / "balanced-worker.toml"
     balanced.symlink_to(balanced_source)
     legacy_bulk = agents / "bulk-worker.toml"
@@ -177,6 +183,12 @@ def test_codex_worker_install(root: Path) -> None:
             "balanced worker link was not preserved")
     require(not legacy_bulk.exists() and not legacy_bulk.is_symlink(),
             "misnamed bulk worker link remained")
+    require(not legacy_mux.is_symlink() and not legacy_routes.is_symlink(),
+            "legacy multiplexer links remained after mux-scheduler migration")
+    require((protocol_state / "mux-scheduler.py").is_symlink(),
+            "mux-scheduler executable link was not installed")
+    require((protocol_state / "mux-scheduler.json").is_symlink(),
+            "mux-scheduler route link was not installed")
     bulk = agents / "bulk_worker.toml"
     require(bulk.is_file() and not bulk.is_symlink(),
             "bulk worker was not installed as a regular file")
@@ -195,7 +207,7 @@ def test_codex_worker_install(root: Path) -> None:
         "`exec_command`", "`yield_time_ms: 30000`", "`session_id`",
         "`write_stdin`", "empty `chars`", "`yield_time_ms: 60000`",
         "`yield_time_ms` is only a yield interval", "until the tool returns an `exit_code`",
-        "Do not redirect the receipt", "invoke a second multiplexer process",
+        "Do not redirect the receipt", "invoke a second mux-scheduler process",
     ):
         require(contract in instructions,
                 f"Codex dispatcher lacks required contract: {contract}")
@@ -332,7 +344,7 @@ def test_round_robin_delegation_queue(home: Path) -> None:
     require("round-robin delegation queue selected backend `test-queue`" in context,
             "round-robin queue selection was not injected")
     require("advertising 4 virtual slots" in context, "virtual slot count was not injected")
-    require("multiplexer `run`" in context, "per-dispatcher run contract was not injected")
+    require("mux-scheduler `run`" in context, "per-dispatcher run contract was not injected")
     state = json.loads((home / ".delegation-protocol" / "hook-state" / f"{session}.json").read_text())
     require(state["delegation_queue_strategy"] == "round_robin", "round-robin strategy was not recorded")
     require(state["delegation_queue_virtual_slots"] == 4, "virtual slot count was not recorded")

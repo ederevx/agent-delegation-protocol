@@ -55,16 +55,16 @@ $BulkSource = Join-Path $RepoRoot 'codex\agents\bulk_worker.toml'
 $LegacyBulkSource = Join-Path $RepoRoot 'codex\agents\bulk-worker.toml'
 $BalancedSource = Join-Path $RepoRoot 'codex\agents\balanced-worker.toml'
 $HookSource = Join-Path $RepoRoot 'codex\hooks\delegation-enforcer.py'
-$MuxSource = Join-Path $RepoRoot 'scripts\agents\multiplexer.py'
+$MuxSource = Join-Path $RepoRoot 'scripts\agents\mux-scheduler.py'
 $CatalogSource = Join-Path $RepoRoot 'agents\catalog'
-$RoutesSource = Join-Path $RepoRoot 'agents\multiplexer.json'
+$RoutesSource = Join-Path $RepoRoot 'agents\mux-scheduler.json'
 $BulkDest = Join-Path $CodexHome 'agents\bulk_worker.toml'
 $LegacyBulkDest = Join-Path $CodexHome 'agents\bulk-worker.toml'
 $BalancedDest = Join-Path $CodexHome 'agents\balanced-worker.toml'
 $HookDest = Join-Path $CodexHome 'hooks\delegation-enforcer.py'
-$MuxDest = Join-Path $StateDir 'multiplexer.py'
+$MuxDest = Join-Path $StateDir 'mux-scheduler.py'
 $CatalogDest = Join-Path $StateDir 'catalog'
-$RoutesDest = Join-Path $StateDir 'multiplexer.json'
+$RoutesDest = Join-Path $StateDir 'mux-scheduler.json'
 
 & $PythonExe (Join-Path $RepoRoot 'scripts\codex\manage-hooks.py') uninstall --codex-home $CodexHome --hook-path $HookDest --python $PythonExe
 if ($LASTEXITCODE -ne 0) { throw "Codex hook uninstallation failed with exit code $LASTEXITCODE" }
@@ -74,8 +74,10 @@ Remove-LegacyWorkerIfOurs $LegacyBulkDest $LegacyBulkSource $LegacyBulkHash
 Remove-IfOurs $BalancedDest $BalancedSource
 Remove-IfOurs $HookDest $HookSource
 Remove-IfOurs $MuxDest $MuxSource
+Remove-IfOurs (Join-Path $StateDir 'multiplexer.py') (Join-Path $RepoRoot 'scripts\agents\multiplexer.py')
 Remove-IfOurs $CatalogDest $CatalogSource
 Remove-IfOurs $RoutesDest $RoutesSource
+Remove-IfOurs (Join-Path $StateDir 'multiplexer.json') (Join-Path $RepoRoot 'agents\multiplexer.json')
 
 if (Test-Path $State) {
     $lines = Get-Content $State
