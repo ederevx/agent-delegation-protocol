@@ -6,16 +6,29 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 1
 MAX_INPUT_BYTES = 1024 * 1024
 MAX_TASKS = 32
 INFERENCE_ENV = "AGENT_INFERENCE_CONFIG"
+MAX_PERMISSION_COMMANDS = 32
 
 
 class AdapterError(Exception):
     """A deterministic input or backend adapter failure."""
+
+
+def relative_path(value: Any, index: int) -> str:
+    if not isinstance(value, str) or not value or "\0" in value:
+        raise AdapterError(
+            f"task {index}: allowed_paths entries must be non-empty strings"
+        )
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts or ".git" in path.parts:
+        raise AdapterError(f"task {index}: unsafe allowed path: {value!r}")
+    return path.as_posix().rstrip("/") or "."
 
 
 def load_inference_config() -> dict[str, Any] | None:
@@ -42,6 +55,8 @@ def validate_task(value: Any, index: int = 0) -> dict[str, Any]:
     prompt = task.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         raise AdapterError(f"task {index}: prompt must be a non-empty string")
+    if len(prompt.encode("utf-8")) > 48 * 1024:
+        raise AdapterError(f"task {index}: prompt exceeds 49152 bytes")
     mode = task.get("mode")
     if mode not in ("read", "edit"):
         raise AdapterError(f"task {index}: mode must be 'read' or 'edit'")
@@ -51,6 +66,58 @@ def validate_task(value: Any, index: int = 0) -> dict[str, Any]:
         or "\0" in task_id or "\n" in task_id
     ):
         raise AdapterError(f"task {index}: id must be a bounded single-line string")
+    repo = task.get("repo")
+    if (
+        not isinstance(repo, str) or not Path(repo).is_absolute() or "\0" in repo
+        or ".." in Path(repo).parts or ".git" in Path(repo).parts
+    ):
+        raise AdapterError(f"task {index}: repo must be an absolute path")
+    task["repo"] = str(Path(repo).resolve())
+    allowed = task.get("allowed_paths", [])
+    if not isinstance(allowed, list) or len(allowed) > 128:
+        raise AdapterError(
+            f"task {index}: allowed_paths must be a list of at most 128 paths"
+        )
+    task["allowed_paths"] = [relative_path(item, index) for item in allowed]
+    preapproved = task.get("preapproved_commands", [])
+    if not isinstance(preapproved, list) or len(preapproved) > MAX_PERMISSION_COMMANDS:
+        raise AdapterError(
+            f"task {index}: preapproved_commands must be a list of at most "
+            f"{MAX_PERMISSION_COMMANDS} commands"
+        )
+    if any(
+        not isinstance(command, str) or not command.strip() or "\0" in command
+        or "\n" in command or len(command.encode("utf-8")) > 4096
+        for command in preapproved
+    ):
+        raise AdapterError(
+            f"task {index}: preapproved_commands must contain bounded single-line strings"
+        )
+    task["preapproved_commands"] = list(dict.fromkeys(preapproved))
+    validations = task.get("validation", [])
+    if not isinstance(validations, list) or len(validations) > 16:
+        raise AdapterError(
+            f"task {index}: validation must be a list of at most 16 argv arrays"
+        )
+    checked: list[list[str]] = []
+    for command in validations:
+        if not isinstance(command, list) or not command or len(command) > 32:
+            raise AdapterError(
+                f"task {index}: each validation must be a non-empty argv array "
+                "of at most 32 strings"
+            )
+        if any(
+            not isinstance(argument, str) or not argument or "\0" in argument
+            or len(argument.encode("utf-8")) > 4096
+            for argument in command
+        ):
+            raise AdapterError(
+                f"task {index}: validation arguments must be bounded non-empty strings"
+            )
+        checked.append(command)
+    if mode == "read" and checked:
+        raise AdapterError(f"task {index}: validation commands require edit mode")
+    task["validation"] = checked
     return task
 
 

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -157,6 +158,30 @@ def test_codex_worker_install(root: Path) -> None:
             "bulk worker was not installed as a regular file")
     require(bulk.read_bytes() == (REPO_ROOT / "codex" / "agents" / "bulk_worker.toml").read_bytes(),
             "installed bulk worker differs from its source")
+    worker_config = tomllib.loads(bulk.read_text(encoding="utf-8"))
+    require("sandbox_workspace_write" not in worker_config,
+            "bulk dispatcher carries an unexpected sandbox widening")
+    instructions = worker_config.get("developer_instructions", "")
+    require("`login: true`" in instructions,
+            "bulk dispatcher may lose an installed adapter from PATH")
+    for contract in (
+        "Every task must contain `mode`", "Every `allowed_paths` entry must be relative",
+        "`validation` is a list", "valid only in edit mode",
+        "`preapproved_commands` is a list", "not argv arrays",
+        "`exec_command`", "`yield_time_ms: 30000`", "`session_id`",
+        "`write_stdin`", "empty `chars`", "`yield_time_ms: 60000`",
+        "`yield_time_ms` is only a yield interval", "until the tool returns an `exit_code`",
+        "Do not redirect the receipt", "invoke a second multiplexer process",
+    ):
+        require(contract in instructions,
+                f"DeepSeek dispatcher lacks required contract: {contract}")
+    require("capture file" not in instructions,
+            "Codex dispatcher incorrectly relies on a shell capture file")
+    require("run_in_background" not in instructions,
+            "Codex dispatcher incorrectly uses Claude's background-call contract")
+    for claude_only in ("`SendMessage`", "`TaskStop`", "`timeout: 600000`"):
+        require(claude_only not in instructions,
+                f"Codex dispatcher incorrectly uses Claude mechanic: {claude_only}")
     worker_hash = root / "owned-link" / ".delegation-protocol" / "bulk-worker.sha256"
     require(worker_hash.read_text(encoding="utf-8").strip() == hashlib.sha256(bulk.read_bytes()).hexdigest(),
             "managed worker hash does not match the installed file")

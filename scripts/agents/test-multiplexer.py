@@ -701,7 +701,11 @@ class AdapterTemplateTests(unittest.TestCase):
                               text=True, capture_output=True, check=False)
 
     def test_single_manifest_returns_bounded_not_configured_receipt(self) -> None:
-        result = self.invoke({"id": "one", "prompt": "audit", "mode": "read"})
+        result = self.invoke({
+            "id": "one", "prompt": "audit", "mode": "read",
+            "repo": "/repo", "allowed_paths": ["src"],
+            "preapproved_commands": ["git status"],
+        })
         self.assertEqual(result.returncode, 1)
         receipt = json.loads(result.stdout)
         self.assertEqual(receipt["classification"], "backend_error")
@@ -710,8 +714,8 @@ class AdapterTemplateTests(unittest.TestCase):
     def test_batch_is_sequential_and_honors_stop_on_error(self) -> None:
         result = self.invoke({
             "tasks": [
-                {"id": "one", "prompt": "audit", "mode": "read"},
-                {"id": "two", "prompt": "edit", "mode": "edit"},
+                {"id": "one", "prompt": "audit", "mode": "read", "repo": "/repo"},
+                {"id": "two", "prompt": "edit", "mode": "edit", "repo": "/repo"},
             ],
             "stop_on_error": True,
         })
@@ -722,11 +726,39 @@ class AdapterTemplateTests(unittest.TestCase):
             "requested": 2, "completed": 1, "succeeded": 0, "failed": 1, "skipped": 1,
         })
 
+    def test_common_task_manifest_contract_is_enforced(self) -> None:
+        valid = {
+            "prompt": "edit", "mode": "edit", "repo": "/repo",
+            "allowed_paths": ["src", "."],
+            "validation": [["python3", "-m", "compileall", "src"]],
+            "preapproved_commands": ["git status --short"],
+        }
+        result = self.invoke(valid)
+        self.assertEqual(json.loads(result.stdout)["classification"], "backend_error")
+        invalid = (
+            ({key: value for key, value in valid.items() if key != "repo"}, "repo"),
+            ({**valid, "repo": "relative"}, "repo"),
+            ({**valid, "repo": "/repo/../outside"}, "repo"),
+            ({**valid, "repo": "/repo/.git/worktrees/task"}, "repo"),
+            ({**valid, "allowed_paths": ["../outside"]}, "allowed path"),
+            ({**valid, "allowed_paths": ["nested/.git/config"]}, "allowed path"),
+            ({**valid, "validation": ["python3 -m compileall"]}, "argv array"),
+            ({**valid, "preapproved_commands": [["git", "status"]]}, "single-line"),
+            ({**valid, "mode": "read", "validation": [["true"]]}, "edit mode"),
+        )
+        for task, expected in invalid:
+            with self.subTest(expected=expected):
+                result = self.invoke(task)
+                receipt = json.loads(result.stdout)
+                self.assertEqual(result.returncode, 64)
+                self.assertEqual(receipt["classification"], "invalid_task")
+                self.assertIn(expected, receipt["error"])
+
     def test_cooperative_envelope_is_bounded_and_protocol_checked(self) -> None:
         result = self.invoke({
             "adapter_protocol": "cooperative-v1", "operation": "start",
             "quantum": {"unit": "agent_turn", "value": 4},
-            "task": {"id": "one", "prompt": "audit", "mode": "read"},
+            "task": {"id": "one", "prompt": "audit", "mode": "read", "repo": "/repo"},
         })
         self.assertEqual(result.returncode, 1)
         receipt = json.loads(result.stdout)
