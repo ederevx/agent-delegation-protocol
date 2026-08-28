@@ -5,6 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 codex_home="${CODEX_HOME:-$HOME/.codex}"
 state_dir="$codex_home/.delegation-protocol"
 runtime_dir="$repo_root/.runtime/codex"
+legacy_bulk_sha256="1a53df02818dafb46b90fa0fea2bc840e50fcc4758c4172c40b8f48db23222f4"
 
 if command -v python3 >/dev/null 2>&1; then
   python_exe="$(command -v python3)"
@@ -35,6 +36,61 @@ safe_link() {
     exit 1
   fi
   ln -s "$src" "$dst"
+}
+
+sha256_file() {
+  "$python_exe" -c \
+    'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' \
+    "$1"
+}
+
+install_managed_copy() {
+  local src="$1" dst="$2" hash_file="$3"
+  local source_sha256 current_sha256 recorded_sha256=""
+  source_sha256="$(sha256_file "$src")"
+
+  if [[ -L "$dst" ]]; then
+    if [[ "$(readlink "$dst")" != "$src" ]]; then
+      echo "Refusing to replace existing symlink: $dst -> $(readlink "$dst")" >&2
+      exit 1
+    fi
+    rm "$dst"
+  elif [[ -e "$dst" ]]; then
+    if [[ ! -f "$dst" ]]; then
+      echo "Refusing to overwrite existing path: $dst" >&2
+      exit 1
+    fi
+    current_sha256="$(sha256_file "$dst")"
+    if [[ -f "$hash_file" ]]; then
+      recorded_sha256="$(tr -d '[:space:]' < "$hash_file")"
+    fi
+    if [[ -z "$recorded_sha256" ]]; then
+      echo "Refusing to overwrite user-owned worker: $dst" >&2
+      exit 1
+    fi
+    if [[ "$current_sha256" != "$source_sha256" && "$current_sha256" != "$recorded_sha256" ]]; then
+      echo "Refusing to overwrite modified or user-owned worker: $dst" >&2
+      exit 1
+    fi
+  fi
+
+  cp "$src" "$dst"
+  printf '%s\n' "$source_sha256" > "$hash_file"
+}
+
+remove_legacy_worker_if_ours() {
+  local dst="$1" expected="$2" legacy_sha256="$3"
+  if [[ -L "$dst" && "$(readlink "$dst")" == "$expected" ]]; then
+    rm "$dst"
+  elif [[ -f "$dst" && ! -L "$dst" ]]; then
+    local actual_sha256
+    actual_sha256="$("$python_exe" -c \
+      'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' \
+      "$dst")"
+    if [[ "$actual_sha256" == "$legacy_sha256" ]]; then
+      rm "$dst"
+    fi
+  fi
 }
 
 install_global_instructions() {
@@ -85,7 +141,14 @@ install_global_instructions() {
 }
 
 install_global_instructions
-safe_link "$repo_root/codex/agents/bulk-worker.toml" "$codex_home/agents/bulk-worker.toml"
+remove_legacy_worker_if_ours \
+  "$codex_home/agents/bulk-worker.toml" \
+  "$repo_root/codex/agents/bulk-worker.toml" \
+  "$legacy_bulk_sha256"
+install_managed_copy \
+  "$repo_root/codex/agents/bulk_worker.toml" \
+  "$codex_home/agents/bulk_worker.toml" \
+  "$state_dir/bulk-worker.sha256"
 safe_link "$repo_root/codex/agents/balanced-worker.toml" "$codex_home/agents/balanced-worker.toml"
 safe_link "$repo_root/codex/hooks/delegation-enforcer.py" "$codex_home/hooks/delegation-enforcer.py"
 safe_link "$repo_root/scripts/agents/multiplexer.py" "$state_dir/multiplexer.py"

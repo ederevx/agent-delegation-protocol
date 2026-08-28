@@ -59,15 +59,21 @@ This composition remains useful even with hooks because current Codex multi-agen
 
 ## Custom workers
 
-The installer adds symlinks:
+The installer adds a managed regular-file copy:
 
 ```text
-~/.codex/agents/bulk-worker.toml
-  -> <clone>/codex/agents/bulk-worker.toml
+~/.codex/agents/bulk_worker.toml
+  (copied from <clone>/codex/agents/bulk_worker.toml)
 
 ~/.codex/agents/balanced-worker.toml
   -> <clone>/codex/agents/balanced-worker.toml
 ```
+
+The regular file is intentional. Current Codex discovers agent definitions through symlinks but
+reopens the selected role with no-follow protection when spawning it, so a symlink is advertised
+yet fails at runtime with `agent type is currently not available`. The installer records the
+copy's hash, refreshes an unmodified protocol-owned copy on reinstall, and refuses to overwrite a
+user-modified or unrelated file.
 
 Declared agent names/model tiers:
 
@@ -180,4 +186,7 @@ Windows PowerShell:
 .\scripts\codex\uninstall.ps1
 ```
 
-Uninstall removes only protocol-owned hook handlers, symlinks, and known state files, and restores a preserved prior `AGENTS.override.md` where applicable. Unrelated files inside `.delegation-protocol` are preserved. It does not modify Claude.
+Uninstall removes only protocol-owned hook handlers, symlinks, an unmodified managed worker copy,
+and known state files, and restores a preserved prior `AGENTS.override.md` where applicable. A
+modified worker copy and unrelated files inside `.delegation-protocol` are preserved. It does not
+modify Claude.
