@@ -10,6 +10,9 @@ if (-not $Python) { $Python = Get-Command py -ErrorAction SilentlyContinue }
 if (-not $Python) { throw 'Python 3 is required for Codex hook enforcement.' }
 $PythonExe = $Python.Source
 
+& $PythonExe (Join-Path $RepoRoot 'scripts\agents\render-bulk-workers.py') --check
+if ($LASTEXITCODE -ne 0) { throw "Generated bulk workers are stale (exit code $LASTEXITCODE)" }
+
 New-Item -ItemType Directory -Force -Path $CodexHome, (Join-Path $CodexHome 'agents'), (Join-Path $CodexHome 'hooks'), $StateDir, $RuntimeDir | Out-Null
 
 function New-SafeSymlink([string]$Source, [string]$Destination) {

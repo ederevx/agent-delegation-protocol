@@ -15,6 +15,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 HOOK = REPO_ROOT / "codex" / "hooks" / "delegation-enforcer.py"
 MANAGER = REPO_ROOT / "scripts" / "codex" / "manage-hooks.py"
 MULTIPLEXER = REPO_ROOT / "scripts" / "agents" / "multiplexer.py"
+INSTALLER = REPO_ROOT / "scripts" / "codex" / "install.sh"
+UNINSTALLER = REPO_ROOT / "scripts" / "codex" / "uninstall.sh"
+WORKER_RENDERER = REPO_ROOT / "scripts" / "agents" / "render-bulk-workers.py"
 
 
 def install_queue_fixture(home: Path, runtime: str, condition: str) -> None:
@@ -84,6 +87,11 @@ def run(cmd: list[str], *, env: dict[str, str] | None = None, stdin: dict[str, A
 def require(value: bool, message: str) -> None:
     if not value:
         raise AssertionError(message)
+
+
+def test_generated_workers() -> None:
+    result = run([sys.executable, str(WORKER_RENDERER), "--check"])
+    require(result.returncode == 0, f"generated bulk workers are stale: {result.stderr}")
 
 
 def call_hook(home: Path, mode: str, payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -284,6 +292,10 @@ def test_worker_dismissal(home: Path) -> None:
 def main() -> int:
     require(HOOK.exists(), f"missing {HOOK}")
     require(MANAGER.exists(), f"missing {MANAGER}")
+    require(INSTALLER.exists(), f"missing {INSTALLER}")
+    require(UNINSTALLER.exists(), f"missing {UNINSTALLER}")
+    require(WORKER_RENDERER.exists(), f"missing {WORKER_RENDERER}")
+    test_generated_workers()
     with tempfile.TemporaryDirectory(prefix="codex-delegation-test-") as tmp:
         root = Path(tmp)
         test_hooks_merge(root / "merge")

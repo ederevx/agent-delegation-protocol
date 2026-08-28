@@ -8,6 +8,9 @@ if (-not $Python) { $Python = Get-Command py -ErrorAction SilentlyContinue }
 if (-not $Python) { throw 'Python 3 is required for the Claude delegation hook.' }
 $PythonExe = $Python.Source
 
+& $PythonExe (Join-Path $RepoRoot 'scripts\agents\render-bulk-workers.py') --check
+if ($LASTEXITCODE -ne 0) { throw "Generated bulk workers are stale (exit code $LASTEXITCODE)" }
+
 New-Item -ItemType Directory -Force -Path (Join-Path $ClaudeHome 'rules'), (Join-Path $ClaudeHome 'agents'), (Join-Path $ClaudeHome 'hooks'), (Join-Path $ClaudeHome '.delegation-protocol') | Out-Null
 
 function New-SafeSymlink([string]$Source, [string]$Destination) {

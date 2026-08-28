@@ -112,6 +112,19 @@ Both hooks record each finished-but-undismissed worker and gate on it: new spawn
 
 Installed hooks, worker definitions, rules, and instruction files are symlinked back here, so editing an installed file edits this repository. Procedural changes to delegation behavior belong in a commit here, never as an in-place patch to an agent's configuration directory: local edits are lost on reinstall, diverge between machines, and leave the other agent's half inconsistent.
 
+The two host worker files are generated artifacts. Edit
+[`agents/bulk-worker-common.md.tmpl`](agents/bulk-worker-common.md.tmpl) for
+shared semantics and [`agents/bulk-worker-profiles.json`](agents/bulk-worker-profiles.json)
+for host transport or lifecycle differences, then regenerate both definitions:
+
+```bash
+python3 scripts/agents/render-bulk-workers.py
+python3 scripts/agents/render-bulk-workers.py --check
+```
+
+Both host installers and protocol test suites run `--check` and refuse stale
+artifacts, preventing a fix from landing in only the Claude or Codex worker.
+
 ## Clone once
 
 Keep the clone at a stable path because installed metadata/hooks are symlinked back to it.
@@ -203,6 +216,7 @@ Both runbooks make preservation, independent installation, self-test verificatio
 These tests use temporary config directories and do not modify your live Codex or Claude configuration:
 
 ```bash
+python3 scripts/agents/render-bulk-workers.py --check
 python3 scripts/agents/test-multiplexer.py
 python3 scripts/codex/test-protocol.py
 python3 scripts/claude/test-protocol.py
@@ -263,12 +277,15 @@ claude/
   rules/
     delegation-protocol.md
 agents/
+  bulk-worker-common.md.tmpl
+  bulk-worker-profiles.json
   catalog/
   multiplexer.json
   templates/
     custom-agent.json
 scripts/
   agents/
+    render-bulk-workers.py
     multiplexer.py
     custom-adapter-template.py
   codex/
