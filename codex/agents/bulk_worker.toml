@@ -80,3 +80,12 @@ For native execution, return a concise report containing the work completed, fil
 
 Report and stop. You remain alive and hold a subagent slot after completion, so the parent dismisses you after reading the report.
 """
+
+# The dispatcher needs only the multiplexer's coordination state in addition to
+# the task workspace. Keep that shared state writable so overlapping Codex
+# workers can acquire the one-lane backend lock without broad filesystem access.
+[sandbox_workspace_write]
+writable_roots = ["~/.cache/agent-delegation-protocol"]
+network_access = true
+exclude_tmpdir_env_var = true
+exclude_slash_tmp = true
