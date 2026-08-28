@@ -44,6 +44,8 @@ Workers share the parent's working tree and cannot see its uncommitted state, so
 
 The parent must answer those requests rather than let a worker stall or guess, and is the only party that may escalate the question to the user. Granting permission for one action does not grant it for the next.
 
+The delegated backend raises its own permission requests through the same path. When a bounded command was not preapproved in the submitted task, the multiplexer returns a `permission_required` receipt naming an exact request and holding the backend session open; the dispatcher relays it and resumes with the parent's `allow`, `deny`, or `handled` decision. Answer promptly — a held session occupies the single provider lane — and decide on the exact request as stated, never by granting the worker broader latitude.
+
 Reduce the need for these requests up front: commit or set aside uncommitted work before delegating into a dirty tree, give each worker explicit ownership boundaries, and keep repository-wide state out of worker briefs.
 
 ## Hook interaction
