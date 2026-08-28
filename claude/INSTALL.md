@@ -67,7 +67,7 @@ The installer merges protocol-owned entries into `~/.claude/settings.json`; it d
 
 The hook participates in these lifecycle events:
 
-- `UserPromptSubmit` — conservatively classifies the turn and injects the mandatory delegation/fan-out policy into Claude's context.
+- `UserPromptSubmit` — conservatively classifies the turn and injects the mandatory delegation/fan-out policy into Claude's context. A relayed worker or peer message arrives on this event too, but continues the turn already in flight instead of reopening it: its text is a worker's words rather than the user's, so classifying it would judge a report as if the user had typed it, and clearing evidence would revoke fan-out the parent has already performed and demand more of it for the integration work that reading the report begins.
 - `SubagentStart` — records delegation, tracks active workers, and injects bounded-worker requirements into each spawned subagent.
 - `SubagentStop` — removes the worker from the active set and records it as finished but still held.
 - `PostToolUseFailure` for `Agent` — detects runtime/model/concurrency failures so enforcement can fail open only when delegation is actually unavailable.
