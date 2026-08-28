@@ -404,9 +404,14 @@ def test_worker_dismissal(home: Path) -> None:
     require(is_dismissal_tool("kill_task"), "kill_task not recognized as dismissal tool")
     require(is_dismissal_tool("AgentStop"), "AgentStop not recognized as dismissal tool")
     require(is_dismissal_tool("terminate_worker"), "terminate_worker not recognized as dismissal tool")
+    require(not is_dismissal_tool("collaboration.interrupt_agent"),
+            "collaboration.interrupt_agent incorrectly treated as slot-releasing dismissal")
     require(not is_dismissal_tool("Bash"), "Bash incorrectly recognized as dismissal tool")
     require(not is_dismissal_tool("Agent"), "Agent incorrectly recognized as dismissal tool")
     require(not is_dismissal_tool("apply_patch"), "apply_patch incorrectly recognized as dismissal tool")
+    lifecycle_context = module.policy_context({"requires_delegation": False})
+    require("FINAL_ANSWER" in lifecycle_context and "before doing more work" in lifecycle_context,
+            "parent policy does not prioritize dismissal immediately after result collection")
 
     # Test 1: finished worker with NO dismissal tool observed -> stop does NOT block
     call_hook(home, "prompt", {"session_id": session, "turn_id": "t1", "prompt": "Create a bulk task."})
