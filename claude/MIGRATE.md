@@ -171,6 +171,8 @@ After migration, the intended behavior is:
 - fail open only when delegation is genuinely unavailable due to runtime/model/tool failure or higher-priority policy;
 - keep the parent responsible for integration, conflict resolution, and final validation.
 
+A delegated task may require permissions the backend cannot grant itself. The multiplexer returns a `permission_required` receipt containing the exact request and a resume token. The dispatcher relays that receipt to the parent and resumes using `multiplexer.py resume --resolution-file` with an `allow`, `deny`, or `handled` decision. Waiting does not consume the task timeout.
+
 Do not weaken this by converting the implementation back into text-only instructions.
 
 ## Phase 5 — Existing configuration preservation
