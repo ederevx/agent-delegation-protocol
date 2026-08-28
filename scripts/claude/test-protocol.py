@@ -111,6 +111,8 @@ def test_generated_workers() -> None:
         "parse the receipt before interpreting a non-zero exit status",
         "Classify from the receipt",
         "report an execution failure only when no receipt was produced",
+        "task JSON file under your scratchpad", "`Write`", "--task-file",
+        "validate that it is non-empty JSON", "Do not interpolate the task through the shell",
     ):
         require(contract in instructions,
                 f"Claude dispatcher lacks required waiting contract: {contract}")
@@ -123,6 +125,8 @@ def test_generated_workers() -> None:
     for provider_specific in ("DeepSeek", "CheapestInference", "deepseek-ci", "7200"):
         require(provider_specific not in common_contract,
                 f"common dispatcher contract embeds provider-specific policy: {provider_specific}")
+    require("Send the JSON on stdin" not in common_contract,
+            "common dispatcher contract requires an unavailable stdin transport")
 
 
 def call_hook(home: Path, mode: str, payload: dict[str, Any]) -> dict[str, Any] | None:

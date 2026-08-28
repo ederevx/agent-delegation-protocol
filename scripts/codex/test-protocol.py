@@ -102,6 +102,9 @@ def test_generated_workers() -> None:
     for contract in (
         "For `native_required`", "whose `runtime` is `codex`",
         "When an external backend launches", "Never redo that task natively",
+        "`exec_command` cannot attach an stdin payload", "--task-file",
+        "fresh worker-owned scratch directory under `~/tmp`", "`apply_patch`",
+        "validate that it is non-empty JSON", "remove the exact empty scratch directory",
     ):
         require(contract in instructions,
                 f"Codex dispatcher lacks dual-mode contract: {contract}")
@@ -111,6 +114,8 @@ def test_generated_workers() -> None:
     for provider_specific in ("DeepSeek", "CheapestInference", "deepseek-ci", "7200"):
         require(provider_specific not in common_contract,
                 f"common dispatcher contract embeds provider-specific policy: {provider_specific}")
+    require("Send the JSON on stdin" not in common_contract,
+            "common dispatcher contract requires an unavailable stdin transport")
 
 
 def call_hook(home: Path, mode: str, payload: dict[str, Any]) -> dict[str, Any] | None:

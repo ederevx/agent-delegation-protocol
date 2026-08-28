@@ -28,6 +28,9 @@ def render_body(template: str, profile: dict[str, Any]) -> str:
         "RUNTIME": profile["runtime"],
         "CONFIG_HOME": profile["config_home"],
         "PARENT_CHANNEL": profile["parent_channel"],
+        "TASK_TRANSPORT_CONTRACT": paragraph_text(
+            profile["task_transport_contract"], "task_transport_contract"
+        ),
         "LAUNCH_CONTRACT": paragraph_text(profile["launch_contract"], "launch_contract"),
         "PERMISSION_CONTRACT": paragraph_text(profile["permission_contract"], "permission_contract"),
         "WAITING_CONTRACT": paragraph_text(profile["waiting_contract"], "waiting_contract"),
