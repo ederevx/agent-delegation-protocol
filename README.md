@@ -112,7 +112,7 @@ parent spawns worker → worker works → worker reports
         ↓                                    ↓
    slot occupied ←──── still idle ←──── task finished
         ↓
-parent dismisses worker (TaskStop / build's stop-task call)
+parent dismisses worker (TaskStop / build's true dismiss call)
         ↓
    slot released → available for the next worker
 ```

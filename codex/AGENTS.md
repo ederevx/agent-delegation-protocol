@@ -58,7 +58,7 @@ Reduce the need for these requests up front: commit or set aside uncommitted wor
 
 A worker does not disappear when its task ends. It goes idle and keeps holding a concurrency slot until it is explicitly dismissed, so a turn that spawns workers and never dismisses them steadily consumes the budget for the rest of the session.
 
-Dismiss each worker as soon as its result has been read and integrated, using whatever stop/dismiss call this build exposes for a running task or agent. Dismiss finished workers before spawning replacements rather than accumulating idle ones. Do not dismiss a worker whose output has not been collected yet, and do not keep one alive merely because it might be useful later — spawn a fresh worker when new work appears.
+A delivered `FINAL_ANSWER` or final-status notification counts as collecting the worker's result. Immediately after reading it, dismiss the worker using whatever true stop/dismiss call this build exposes before doing more work. `collaboration.interrupt_agent` does not count when its contract says the agent remains available. Dismiss finished workers before spawning replacements rather than accumulating idle ones. Do not dismiss a worker whose output has not been collected yet, and do not keep one alive merely because it might be useful later — spawn a fresh worker when new work appears.
 
 ## Local changes belong in this repository
 

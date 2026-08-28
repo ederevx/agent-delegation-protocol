@@ -179,7 +179,9 @@ def worker_key(value: Any) -> str:
 def is_dismissal_tool(name: str) -> bool:
     """Codex's dismissal primitive is not fixed across builds, so match the shape.
 
-    Any tool whose name pairs a stop/kill/dismiss verb with a task/agent noun counts.
+    Any tool whose name pairs a stop/kill/dismiss verb with a task/agent noun
+    counts. ``interrupt_agent`` deliberately does not count: that call leaves
+    the agent available and therefore does not release its lifecycle slot.
     """
     return bool(DISMISSAL_TOOL.search(name))
 
@@ -334,7 +336,10 @@ def policy_context(c: dict[str, Any]) -> str:
         "(GPT-5.6 Luna) for low-risk repetitive/high-volume work and `balanced_worker` (GPT-5.6 Terra) when a delegated "
         "unit needs more reasoning. For independent subsystems/shards, launch multiple workers concurrently unless this "
         "hook explicitly selects delegation queue. Give workers non-overlapping scope, acceptance criteria, validation commands, "
-        "and require concise evidence reports. The parent is the single integration authority."
+        "and require concise evidence reports. The parent is the single integration authority. "
+        "A delivered FINAL_ANSWER or final-status notification counts as collecting a worker's result; immediately after "
+        "reading it, call the build's true stop/dismiss primitive before doing more work. `interrupt_agent` is not a "
+        "dismissal when its contract says the agent remains available."
     )
     if not c.get("requires_delegation"):
         return base_text
