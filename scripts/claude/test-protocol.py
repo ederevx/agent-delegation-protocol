@@ -116,9 +116,12 @@ def test_generated_workers() -> None:
     for codex_only in ("`exec_command`", "`write_stdin`", "`yield_time_ms`"):
         require(codex_only not in instructions,
                 f"Claude dispatcher incorrectly uses Codex mechanic: {codex_only}")
+    common_contract = (REPO_ROOT / "agents" / "bulk-worker-common.md.tmpl").read_text(
+        encoding="utf-8"
+    )
     for provider_specific in ("DeepSeek", "CheapestInference", "deepseek-ci", "7200"):
-        require(provider_specific not in instructions,
-                f"Claude dispatcher embeds provider-specific policy: {provider_specific}")
+        require(provider_specific not in common_contract,
+                f"common dispatcher contract embeds provider-specific policy: {provider_specific}")
 
 
 def call_hook(home: Path, mode: str, payload: dict[str, Any]) -> dict[str, Any] | None:
