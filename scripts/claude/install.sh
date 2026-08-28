@@ -13,6 +13,8 @@ else
   exit 1
 fi
 
+"$python_exe" "$repo_root/scripts/agents/render-bulk-workers.py" --check
+
 mkdir -p "$claude_home/rules" "$claude_home/agents" "$claude_home/hooks" "$claude_home/.delegation-protocol"
 
 safe_link() {

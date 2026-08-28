@@ -15,6 +15,8 @@ else
   exit 1
 fi
 
+"$python_exe" "$repo_root/scripts/agents/render-bulk-workers.py" --check
+
 mkdir -p "$codex_home" "$codex_home/agents" "$codex_home/hooks" "$state_dir" "$runtime_dir"
 
 safe_link() {

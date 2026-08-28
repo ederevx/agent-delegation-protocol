@@ -15,6 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 HOOK = REPO_ROOT / "claude" / "hooks" / "delegation-enforcer.py"
 SETTINGS_MANAGER = REPO_ROOT / "scripts" / "claude" / "manage-settings.py"
 MULTIPLEXER = REPO_ROOT / "scripts" / "agents" / "multiplexer.py"
+WORKER_RENDERER = REPO_ROOT / "scripts" / "agents" / "render-bulk-workers.py"
 
 
 def install_queue_fixture(home: Path, runtime: str, condition: str) -> None:
@@ -91,6 +92,11 @@ def run(cmd: list[str], *, env: dict[str, str] | None = None, stdin: dict[str, A
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+def test_generated_workers() -> None:
+    result = run([sys.executable, str(WORKER_RENDERER), "--check"])
+    require(result.returncode == 0, f"generated bulk workers are stale: {result.stderr}")
 
 
 def call_hook(home: Path, mode: str, payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -619,6 +625,8 @@ def test_relayed_message_continues_turn(home: Path) -> None:
 def main() -> int:
     require(HOOK.exists(), f"missing hook: {HOOK}")
     require(SETTINGS_MANAGER.exists(), f"missing settings manager: {SETTINGS_MANAGER}")
+    require(WORKER_RENDERER.exists(), f"missing worker renderer: {WORKER_RENDERER}")
+    test_generated_workers()
     with tempfile.TemporaryDirectory(prefix="delegation-protocol-test-") as tmp:
         root = Path(tmp)
         test_settings_merge(root / "settings-home")
