@@ -11,6 +11,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
@@ -597,6 +598,9 @@ if resolution is None:
     elif kind == "output":
         argv = [{sys.executable!r}, "-c",
                 "import sys; print('x'*50000); print('y'*50000,file=sys.stderr)"]
+    elif kind == "control":
+        argv = [{sys.executable!r}, "-c",
+                "import sys; sys.stdout.buffer.write(bytes(50000))"]
     else:
         argv = [{sys.executable!r}, "-c", {command_code!r}, name]
     print(json.dumps({{
@@ -646,9 +650,103 @@ print(json.dumps({{"state": "complete", "classification": "success",
             {item["result"]["stdout"].strip() for item in delivered}, {"A", "B"}
         )
 
+    def test_command_limit_is_shared_across_scheduler_processes(self) -> None:
+        stub = self.command_cooperative_stub()
+        agent = metadata("cooperative", [sys.executable, str(stub)], cooperative=True)
+        agent["queue_policy"]["command_concurrency"] = 2
+        self.write_agent(agent)
+        self.write_routes(["cooperative"])
+        command = [
+            sys.executable, str(MUX), "--catalog", str(self.catalog),
+            "--routes", str(self.routes), "queue", "--route", "bulk",
+            "--runtime", "codex",
+        ]
+        env = os.environ.copy()
+        env["AGENT_MUX_SCHEDULER_STATE_DIR"] = str(self.state)
+        first = subprocess.Popen(
+            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, env=env,
+        )
+        second = subprocess.Popen(
+            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, env=env,
+        )
+        outputs = [
+            first.communicate(json.dumps({"tasks": [{"id": "A"}, {"id": "B"}]}),
+                              timeout=8),
+            second.communicate(json.dumps({"tasks": [{"id": "C"}, {"id": "D"}]}),
+                               timeout=8),
+        ]
+        self.assertEqual((first.returncode, second.returncode), (0, 0), outputs)
+        active = peak = 0
+        for event in (self.root / "command-events").read_text().splitlines():
+            active += 1 if event.startswith("start:") else -1
+            peak = max(peak, active)
+            self.assertGreaterEqual(active, 0, event)
+        self.assertEqual(active, 0)
+        self.assertEqual(peak, 2)
+
+    def test_command_environment_is_an_allowlist_and_git_is_hardened(self) -> None:
+        source = {
+            "PATH": os.environ.get("PATH", ""), "LANG": "C.UTF-8",
+            "LC_CTYPE": "C.UTF-8", "TERM": "xterm", "TMPDIR": str(self.root),
+            "SSH_AUTH_SOCK": "/credential/socket", "KUBECONFIG": "/credential/kube",
+            "DATABASE_URL": "postgres://credential", "lowercase_token": "credential",
+            "OPENAI_API_KEY": "credential", "HOME": "/credential/home",
+        }
+        with mock.patch.dict(os.environ, source, clear=True):
+            child_env = MUX_MODULE._command_environment([sys.executable, "-V"])
+        self.assertEqual(child_env, {
+            "PATH": source["PATH"], "LANG": "C.UTF-8", "LC_CTYPE": "C.UTF-8",
+            "TERM": "xterm", "TMPDIR": str(self.root),
+        })
+
+        repository = self.root / "hostile-repository"
+        repository.mkdir()
+        initialized = subprocess.run(
+            ["git", "init", "--quiet"], cwd=repository,
+            capture_output=True, text=True, check=False,
+        )
+        if initialized.returncode != 0:
+            self.skipTest("git is unavailable")
+        marker = self.root / "fsmonitor-ran"
+        helper = self.make_stub("hostile-fsmonitor.sh", f"#!/bin/sh\ntouch {marker}\n")
+        helper.chmod(0o700)
+        tracked = repository / "tracked"
+        tracked.write_text("before\n")
+        subprocess.run(
+            ["git", "add", "tracked"], cwd=repository,
+            check=True, capture_output=True, text=True,
+        )
+        tracked.write_text("after\n")
+        subprocess.run(
+            ["git", "config", "core.fsmonitor", str(helper)], cwd=repository,
+            check=True, capture_output=True, text=True,
+        )
+        subprocess.run(
+            ["git", "config", "diff.external", str(helper)], cwd=repository,
+            check=True, capture_output=True, text=True,
+        )
+        subprocess.run(
+            MUX_MODULE._harden_command_argv(["git", "diff", "--", "tracked"]),
+            cwd=repository, env=MUX_MODULE._command_environment(["git"]),
+            check=True, capture_output=True, text=True,
+        )
+        self.assertFalse(marker.exists())
+
+    def test_cooperative_envelopes_advertise_mux_command_capability(self) -> None:
+        envelope = json.loads(MUX_MODULE._cooperative_envelope(
+            "start", {"unit": "agent_turn", "value": 4}, task={"id": "A"}
+        ))
+        self.assertEqual(envelope["scheduler"], {
+            "protocol_version": 1,
+            "capabilities": ["mux-command-execution-v1"],
+        })
+
     def test_mux_command_results_cover_spawn_timeout_and_output_bounds(self) -> None:
         cases = (("spawn", "spawn_error"), ("timeout", "timed_out"),
-                 ("output", "stdout_truncated"))
+                 ("output", "stdout_truncated"),
+                 ("control", "stdout_truncated"))
         for kind, expected in cases:
             with self.subTest(kind=kind):
                 results = self.root / "command-results.jsonl"
@@ -669,6 +767,80 @@ print(json.dumps({{"state": "complete", "classification": "success",
                 if kind == "output":
                     self.assertLessEqual(len(delivered["stdout"].encode()), 24 * 1024)
                     self.assertTrue(delivered["stderr_truncated"])
+                self.assertLess(
+                    len(json.dumps({
+                        "request_id": "request-" + kind,
+                        "decision": "handled", "result": delivered,
+                    }, ensure_ascii=False).encode()), 60 * 1024
+                )
+
+    def test_handled_result_bounds_large_argv_and_error_on_the_wire(self) -> None:
+        resolution = MUX_MODULE._bounded_handled_resolution("r" * 4096, {
+            "argv": ["a" * 4096 for _ in range(64)],
+            "returncode": None, "stdout": "x" * 50000, "stderr": "y" * 50000,
+            "duration_seconds": 0.0, "timed_out": False,
+            "spawn_error": "z" * 200000, "stdout_truncated": False,
+            "stderr_truncated": False,
+        })
+        self.assertLess(
+            len(json.dumps(resolution, ensure_ascii=False).encode()), 60 * 1024
+        )
+        self.assertTrue(resolution["result"]["argv_truncated"])
+        self.assertTrue(resolution["result"]["spawn_error_truncated"])
+
+    def test_command_wait_does_not_consume_cooperative_task_deadline(self) -> None:
+        stub = self.make_stub("deadline-cooperative.py", f"""
+import json, sys, time
+value = json.load(sys.stdin)
+time.sleep(.2)
+if value["operation"] == "start":
+    print(json.dumps({{"state": "ready", "token": "A:ready"}}))
+elif value.get("permission_resolution") is None:
+    print(json.dumps({{
+        "state": "permission_required", "token": "A:command",
+        "request": {{"request_id": "request-A", "tool_name": "Bash",
+                    "mux_execution": {{"argv": [{sys.executable!r}, "-c",
+                        "import time; time.sleep(.7)"], "cwd": {str(self.root)!r}}}}},
+    }}))
+else:
+    print(json.dumps({{"state": "complete", "exit_code": 0}}))
+""")
+        agent = metadata("cooperative", [sys.executable, str(stub)], cooperative=True)
+        agent["binding"]["timeout_seconds"] = 1
+        agent["queue_policy"]["command_timeout_seconds"] = 1
+        self.write_agent(agent)
+        self.write_routes(["cooperative"])
+        result = self.run_mux("run", "--route", "bulk", "--runtime", "codex",
+                              task={"id": "A"})
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_virtual_slots_admit_a_large_manifest_in_waves(self) -> None:
+        events = self.root / "virtual-events"
+        stub = self.make_stub("virtual-cooperative.py", f"""
+import json, sys
+from pathlib import Path
+value = json.load(sys.stdin)
+name = value.get("task", {{}}).get("id") or value["token"]
+with Path({str(events)!r}).open("a") as handle:
+    handle.write(value["operation"] + ":" + name + "\\n")
+if value["operation"] == "start":
+    print(json.dumps({{"state": "ready", "token": name}}))
+else:
+    print(json.dumps({{"state": "complete", "exit_code": 0}}))
+""")
+        agent = metadata("cooperative", [sys.executable, str(stub)], cooperative=True)
+        agent["queue_policy"]["virtual_slots"] = 2
+        self.write_agent(agent)
+        self.write_routes(["cooperative"])
+        result = self.run_mux(
+            "queue", "--route", "bulk", "--runtime", "codex",
+            task={"tasks": [{"id": name} for name in "ABCD"]},
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(events.read_text().splitlines(), [
+            "start:A", "start:B", "step:A", "step:B",
+            "start:C", "start:D", "step:C", "step:D",
+        ])
 
     def test_cooperative_run_interleaves_across_processes(self) -> None:
         stub = self.cooperative_stub(delay=0.15)
@@ -877,6 +1049,94 @@ else:
         self.assertEqual([job["state"] for job in receipt["jobs"]],
                          ["failed", "cancelled"])
         self.assertEqual(marker.read_text(), "B")
+
+    def test_stop_on_error_cancels_peer_paused_for_parent_permission(self) -> None:
+        marker = self.root / "permission-cancelled"
+        stub = self.make_stub("permission-stop-cooperative.py", f"""
+import json, sys
+from pathlib import Path
+value = json.load(sys.stdin)
+if value["operation"] == "start":
+    print(json.dumps({{"state": "ready", "token": value["task"]["id"]}}))
+elif value["operation"] == "cancel":
+    Path({str(marker)!r}).write_text(value["token"])
+    print(json.dumps({{"state": "complete"}}))
+elif value["token"] == "A":
+    print(json.dumps({{
+        "state": "permission_required", "token": "A",
+        "request": {{"request_id": "parent-A", "tool_name": "Write",
+                    "tool_input": {{"path": "owned.txt"}}}},
+    }}))
+else:
+    print(json.dumps({{"state": "failed", "classification": "task_failed",
+                      "exit_code": 3}}))
+""")
+        self.write_agent(metadata("cooperative", [sys.executable, str(stub)],
+                                  cooperative=True))
+        self.write_routes(["cooperative"])
+        result = self.run_mux(
+            "queue", "--route", "bulk", "--runtime", "codex",
+            task={"tasks": [{"id": "A"}, {"id": "B"}], "stop_on_error": True},
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        receipt = json.loads(result.stdout)
+        self.assertEqual([job["state"] for job in receipt["jobs"]],
+                         ["cancelled", "failed"])
+        self.assertEqual(marker.read_text(), "A")
+
+    @unittest.skipIf(os.name == "nt", "POSIX process-group signal test")
+    def test_interrupt_cancels_token_and_command_process_group(self) -> None:
+        command_started = self.root / "command-started"
+        command_finished = self.root / "command-finished"
+        adapter_cancelled = self.root / "adapter-cancelled"
+        command_code = (
+            "from pathlib import Path; import time; "
+            f"Path({str(command_started)!r}).touch(); time.sleep(2); "
+            f"Path({str(command_finished)!r}).touch()"
+        )
+        stub = self.make_stub("interrupt-cooperative.py", f"""
+import json, sys
+from pathlib import Path
+value = json.load(sys.stdin)
+if value["operation"] == "start":
+    print(json.dumps({{"state": "ready", "token": "A:ready"}}))
+elif value["operation"] == "cancel":
+    Path({str(adapter_cancelled)!r}).write_text(value["token"])
+    print(json.dumps({{"state": "complete"}}))
+else:
+    print(json.dumps({{
+        "state": "permission_required", "token": "A:command",
+        "request": {{"request_id": "request-A", "tool_name": "Bash",
+                    "mux_execution": {{"argv": [{sys.executable!r}, "-c",
+                        {command_code!r}], "cwd": {str(self.root)!r}}}}},
+    }}))
+""")
+        self.write_agent(metadata("cooperative", [sys.executable, str(stub)],
+                                  cooperative=True))
+        self.write_routes(["cooperative"])
+        task_file = self.root / "interrupt-task.json"
+        task_file.write_text(json.dumps({"id": "A"}))
+        command = [
+            sys.executable, str(MUX), "--catalog", str(self.catalog),
+            "--routes", str(self.routes), "run", "--route", "bulk",
+            "--runtime", "codex", "--task-file", str(task_file),
+        ]
+        env = os.environ.copy()
+        env["AGENT_MUX_SCHEDULER_STATE_DIR"] = str(self.state)
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=env,
+        )
+        deadline = time.monotonic() + 3
+        while not command_started.exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertTrue(command_started.exists())
+        process.terminate()
+        stdout, stderr = process.communicate(timeout=5)
+        self.assertEqual(process.returncode, 130, (stdout, stderr))
+        self.assertEqual(adapter_cancelled.read_text(), "A:command")
+        time.sleep(.25)
+        self.assertFalse(command_finished.exists())
 
 
 class AdapterTemplateTests(unittest.TestCase):
