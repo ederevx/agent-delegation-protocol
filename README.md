@@ -17,7 +17,7 @@ Frontier parent / coordinator
         ↓ bounded task or ordered batch
 lifecycle-visible bulk worker
         ↓ required capabilities
-ordered agent multiplexer route
+agent multiplexer route
         ↓
 external command/API adapter or native host binding
         ↓ JSON receipt
@@ -30,7 +30,7 @@ Use non-overlapping ownership where practical, explicit interfaces/acceptance cr
 
 Every backend is described by one JSON metadata document under [`agents/catalog`](agents/catalog). The common interface declares named functions, compatibility capabilities, execution limits, and a binding; command availability is derived from that binding. A top-level `native` boolean selects between a host-native agent binding and a custom command/API adapter. The required `delegation_queue` boolean opts a custom, single-concurrency backend with the `batch` function into whole-manifest queue dispatch. An optional provider-neutral `inference` profile can declare thinking mode, effort, and a per-response output-token ceiling. The multiplexer validates that profile and supplies it to custom adapters as bounded JSON in `AGENT_INFERENCE_CONFIG`; each adapter translates the common settings into its provider's controls. Provider-specific behavior stays in the adapter rather than leaking into Codex, Claude, or the route selector.
 
-[`agents/multiplexer.json`](agents/multiplexer.json) is intentionally small: each route is an ordered list of backend IDs. The multiplexer filters that list by the task's required capabilities and runtime, then selects the first available entry. Reorder the IDs to change priority; no policy or adapter rewrite is needed.
+[`agents/multiplexer.json`](agents/multiplexer.json) is intentionally small: each route is a membership list of backend IDs. The multiplexer first filters members by required capabilities, runtime, and availability, then selects the highest numeric `priority` from 0 through 100. Route order has no scheduling meaning. Equal values form an equivalent tier in which either backend is valid after caller judgment and capability filtering; backend ID supplies only a reproducible default. Change metadata priority or route membership without rewriting policy or adapter code.
 
 External workers receive one bounded common task or batch on stdin and return a machine-readable JSON receipt. A backend that has already launched is never silently retried on another provider. Native selection happens before launch and is represented by a `native_required` receipt and exit status 69, which the lifecycle-visible host worker validates before doing the task itself.
 
@@ -78,14 +78,14 @@ operation may pause the same task again.
 
 1. Copy [`agents/templates/custom-agent.json`](agents/templates/custom-agent.json) into `agents/catalog/` and fill in the backend identity, `native` and `delegation_queue` values, capabilities, availability, limits, and adapter binding.
 2. Copy [`scripts/agents/custom-adapter-template.py`](scripts/agents/custom-adapter-template.py), implement the bounded stdin-to-receipt API call, and reference it from the metadata. Keep credentials in environment or a credential manager, never in metadata.
-3. Add the metadata ID to the desired ordered route in [`agents/multiplexer.json`](agents/multiplexer.json).
+3. Set its integer `priority` from 0 through 100 and add the metadata ID to the desired route in [`agents/multiplexer.json`](agents/multiplexer.json).
 4. Run the multiplexer validation/tests, then rerun the applicable host installer so the installed links are present.
 
-That metadata document, one adapter, and one ordered route entry are the complete extension surface for a custom API.
+That metadata document, one adapter, and one route membership are the complete extension surface for a custom API.
 
 The bundled `bulk` route contains the matching `native-codex-bulk` and
 `native-claude-bulk` entries. Capability and runtime filtering make the same
-ordered route usable from both hosts. Optional API-backed bindings can be
+route usable from both hosts. Optional API-backed bindings can be
 maintained on separate branches without coupling provider details to `main`.
 
 ## Workers ask before conflicting

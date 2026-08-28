@@ -12,7 +12,7 @@ Preserve the strongest parent model for planning, ambiguity, architecture, diffi
 
 Prefer `bulk-worker` for low-risk mechanical work. It is a lifecycle-visible dispatcher that submits a bounded task to the installed agent multiplexer, then returns the external receipt or executes natively only when the selected native backend requests it. Escalate a delegated unit when the selected backend's declared capabilities are insufficient.
 
-The multiplexer is agent-agnostic. Each backend has one metadata document declaring a common capability interface, availability checks, limits, and either a native runtime binding or a custom command/API adapter. Its top-level `native` boolean distinguishes those bindings. Routes are ordered lists of backend IDs, so changing priority does not require provider logic in this rule or the worker definition. Selection filters by required capabilities and runtime before taking the first available route entry.
+The multiplexer is agent-agnostic. Each backend has one metadata document declaring a common capability interface, availability checks, limits, numeric priority, and either a native runtime binding or a custom command/API adapter. Its top-level `native` boolean distinguishes those bindings. Routes are backend membership lists with no scheduling order. Selection filters by required capabilities, runtime, and availability before taking the highest-priority tier; equal priorities are equivalent and may be resolved by caller judgment without changing route order.
 
 Never silently retry an external task on the native model after it launches. Native execution is valid only when the multiplexer selects the matching native backend before launch and returns its documented native-required receipt.
 

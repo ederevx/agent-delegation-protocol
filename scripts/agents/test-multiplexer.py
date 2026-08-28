@@ -21,7 +21,7 @@ ADAPTER = HERE / "custom-adapter-template.py"
 
 def metadata(agent_id: str, argv: list[str] | None = None, *, native: bool = False,
              runtime: str = "codex", concurrency: int = 1,
-             delegation_queue: bool = False,
+             delegation_queue: bool = False, priority: int = 0,
              cooperative: bool = False) -> dict[str, object]:
     binding: dict[str, object]
     if native:
@@ -36,7 +36,7 @@ def metadata(agent_id: str, argv: list[str] | None = None, *, native: bool = Fal
     result = {
         "schema_version": 1, "id": agent_id, "name": agent_id,
         "description": "test agent", "native": native, "provider": "test",
-        "delegation_queue": delegation_queue,
+        "delegation_queue": delegation_queue, "priority": priority,
         "model": "test-model", "binding": binding,
         "capabilities": {
             "functions": ["audit", "edit"],
@@ -57,7 +57,7 @@ def metadata(agent_id: str, argv: list[str] | None = None, *, native: bool = Fal
 
 
 class RepositoryConfigurationTests(unittest.TestCase):
-    def test_bulk_route_preserves_external_priority_and_native_fallbacks(self) -> None:
+    def test_bulk_route_declares_external_priority_and_native_fallbacks(self) -> None:
         catalog_dir = REPO_ROOT / "agents" / "catalog"
         catalog = {
             path.stem: json.loads(path.read_text(encoding="utf-8"))
@@ -67,19 +67,20 @@ class RepositoryConfigurationTests(unittest.TestCase):
             (REPO_ROOT / "agents" / "multiplexer.json").read_text(encoding="utf-8")
         )["routes"]["bulk"]
         native_ids = ["native-codex-bulk", "native-claude-bulk"]
-        expected = (["deepseek-ci"] if "deepseek-ci" in catalog else []) + native_ids
+        expected = set((["deepseek-ci"] if "deepseek-ci" in catalog else []) + native_ids)
 
-        self.assertEqual(route, expected)
+        self.assertEqual(set(route), expected)
         for agent_id, runtime in zip(native_ids, ("codex", "claude")):
             agent = catalog[agent_id]
             self.assertTrue(agent["native"])
             self.assertFalse(agent["delegation_queue"])
+            self.assertEqual(agent["priority"], 0)
             self.assertEqual(agent["binding"]["runtime"], runtime)
         if "deepseek-ci" in catalog:
             external = catalog["deepseek-ci"]
             self.assertFalse(external["native"])
             self.assertTrue(external["delegation_queue"])
-            self.assertEqual(route[0], "deepseek-ci")
+            self.assertGreater(external["priority"], 0)
 
 
 class MultiplexerTests(unittest.TestCase):
@@ -194,6 +195,35 @@ class MultiplexerTests(unittest.TestCase):
         result = self.run_mux("validate")
         self.assertEqual(result.returncode, 64)
         self.assertIn("missing fields: delegation_queue", result.stdout)
+
+    def test_priority_is_required_and_bounded(self) -> None:
+        invalid = metadata("invalid", [sys.executable, "unused.py"])
+        del invalid["priority"]
+        self.write_agent(invalid)
+        self.write_routes(["invalid"])
+        result = self.run_mux("validate")
+        self.assertEqual(result.returncode, 64)
+        self.assertIn("missing fields: priority", result.stdout)
+
+        for priority in (-1, 101, True, "high"):
+            invalid["priority"] = priority
+            self.write_agent(invalid)
+            result = self.run_mux("validate")
+            self.assertEqual(result.returncode, 64, priority)
+            self.assertIn("priority must be an integer from 0 to 100", result.stdout)
+
+    def test_higher_priority_wins_independently_of_route_order(self) -> None:
+        self.write_agent(metadata("first", native=True, priority=0))
+        self.write_agent(metadata("preferred", native=True, priority=100))
+        self.write_agent(metadata("tie", native=True, priority=100))
+        for route in (["first", "preferred", "tie"],
+                      ["tie", "first", "preferred"]):
+            self.write_routes(route)
+            result = self.run_mux(
+                "select", "--route", "bulk", "--runtime", "codex"
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["id"], "preferred")
 
     def test_priority_skips_unavailable_and_filters_capabilities(self) -> None:
         self.write_agent(metadata("missing", ["definitely-not-an-installed-worker"] ))
