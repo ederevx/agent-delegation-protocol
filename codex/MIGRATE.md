@@ -201,8 +201,6 @@ Then verify all of the following:
 
 Do not declare migration complete merely because files exist. The effective behavior and preservation requirements must also be satisfied.
 
-The dispatch contract expects a `permission_required` receipt when the multiplexer needs a pause for an explicit allow/deny decision. After migration, confirm the dispatcher reports the receipt to the parent and resumes correctly once the parent provides the matching resolution file.
-
 ## Legacy mixed-installer cleanup
 
 The old combined installer no longer exists and MUST NOT be recreated.
