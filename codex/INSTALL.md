@@ -111,6 +111,12 @@ Each catalog entry uses the same named-function and compatibility interface and 
 
 The dispatcher executes natively only for a valid `native_required` receipt with exit status 69 selecting the Codex-native backend. Once an external adapter launches, its receipt is returned without automatic native retry.
 
+The worker emits the adapter's exact task schema: `mode`, absolute `repo`, and
+non-empty `prompt` are required; `allowed_paths` are repository-relative;
+`validation` contains argv arrays only for edit tasks; and
+`preapproved_commands` contains bounded single-line command strings. It does
+not substitute similar-looking field names or representations.
+
 Codex's managed permission profile remains authoritative for a spawned custom
 agent; role-file fields cannot add the scheduler's shared state root or provider
 network access. The CI overlay therefore invokes only the trusted installed
