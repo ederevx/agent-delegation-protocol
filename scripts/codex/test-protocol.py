@@ -104,9 +104,12 @@ def test_generated_workers() -> None:
     ):
         require(contract in instructions,
                 f"Codex dispatcher lacks dual-mode contract: {contract}")
+    common_contract = (REPO_ROOT / "agents" / "bulk-worker-common.md.tmpl").read_text(
+        encoding="utf-8"
+    )
     for provider_specific in ("DeepSeek", "CheapestInference", "deepseek-ci", "7200"):
-        require(provider_specific not in instructions,
-                f"Codex dispatcher embeds provider-specific policy: {provider_specific}")
+        require(provider_specific not in common_contract,
+                f"common dispatcher contract embeds provider-specific policy: {provider_specific}")
 
 
 def call_hook(home: Path, mode: str, payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -187,7 +190,7 @@ def test_codex_worker_install(root: Path) -> None:
         "Do not redirect the receipt", "invoke a second multiplexer process",
     ):
         require(contract in instructions,
-                f"DeepSeek dispatcher lacks required contract: {contract}")
+                f"Codex dispatcher lacks required contract: {contract}")
     require("capture file" not in instructions,
             "Codex dispatcher incorrectly relies on a shell capture file")
     require("run_in_background" not in instructions,
