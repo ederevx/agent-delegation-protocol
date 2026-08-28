@@ -14,6 +14,7 @@ from pathlib import Path
 from multiplexer import select_queue_backend
 
 HERE = Path(__file__).resolve().parent
+REPO_ROOT = HERE.parents[1]
 MUX = HERE / "multiplexer.py"
 ADAPTER = HERE / "custom-adapter-template.py"
 
@@ -53,6 +54,32 @@ def metadata(agent_id: str, argv: list[str] | None = None, *, native: bool = Fal
             "quantum": {"unit": "agent_turn", "value": 4},
         }
     return result
+
+
+class RepositoryConfigurationTests(unittest.TestCase):
+    def test_bulk_route_preserves_external_priority_and_native_fallbacks(self) -> None:
+        catalog_dir = REPO_ROOT / "agents" / "catalog"
+        catalog = {
+            path.stem: json.loads(path.read_text(encoding="utf-8"))
+            for path in catalog_dir.glob("*.json")
+        }
+        route = json.loads(
+            (REPO_ROOT / "agents" / "multiplexer.json").read_text(encoding="utf-8")
+        )["routes"]["bulk"]
+        native_ids = ["native-codex-bulk", "native-claude-bulk"]
+        expected = (["deepseek-ci"] if "deepseek-ci" in catalog else []) + native_ids
+
+        self.assertEqual(route, expected)
+        for agent_id, runtime in zip(native_ids, ("codex", "claude")):
+            agent = catalog[agent_id]
+            self.assertTrue(agent["native"])
+            self.assertFalse(agent["delegation_queue"])
+            self.assertEqual(agent["binding"]["runtime"], runtime)
+        if "deepseek-ci" in catalog:
+            external = catalog["deepseek-ci"]
+            self.assertFalse(external["native"])
+            self.assertTrue(external["delegation_queue"])
+            self.assertEqual(route[0], "deepseek-ci")
 
 
 class MultiplexerTests(unittest.TestCase):
