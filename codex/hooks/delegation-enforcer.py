@@ -78,10 +78,10 @@ def codex_home() -> Path:
 def select_delegation_queue(runtime: str) -> dict[str, Any] | None:
     """Return safe host-facing queue details, failing closed to normal fan-out."""
     installed = codex_home() / ".delegation-protocol"
-    module_path = installed / "multiplexer.py"
+    module_path = installed / "mux-scheduler.py"
     try:
         spec = importlib.util.spec_from_file_location(
-            "_installed_delegation_multiplexer", module_path
+            "_installed_delegation_mux_scheduler", module_path
         )
         if spec is None or spec.loader is None:
             return None
@@ -89,7 +89,7 @@ def select_delegation_queue(runtime: str) -> dict[str, Any] | None:
         spec.loader.exec_module(module)
         selected = module.select_queue_backend(
             installed / "catalog",
-            installed / "multiplexer.json",
+            installed / "mux-scheduler.json",
             "bulk",
             runtime,
             platform=None,
@@ -349,7 +349,7 @@ def policy_context(c: dict[str, Any]) -> str:
                 "Before parent mutation, launch concurrent lifecycle-visible `bulk_worker` dispatchers: use one "
                 "dispatcher per independent workstream, up to the minimum of the independent workstream count, "
                 f"{slots} advertised slots, and the host's currently available child slots. Each dispatcher must "
-                "receive one bounded workstream and submit it independently through multiplexer `run`; the backend "
+                "receive one bounded workstream and submit it independently through mux-scheduler `run`; the backend "
                 "round-robins those calls on its single physical lane. When the backend advertises at least two "
                 "slots, dispatchers must actually overlap if at least two child slots are available. Do not wait "
                 "for one dispatcher before launching the next. A "
@@ -359,7 +359,7 @@ def policy_context(c: dict[str, Any]) -> str:
             f"\nHOOK CLASSIFICATION: this turn is delegation-eligible ({reasons}) and delegation queue selected "
             f"backend `{c['delegation_queue_backend']}`. Before parent mutation, start one lifecycle-visible "
             "`bulk_worker` dispatcher. Give it every independent unit as one ordered batch and explicitly instruct "
-            "it to submit the batch through multiplexer `queue`; host-level worker overlap is not required. A queue "
+            "it to submit the batch through mux-scheduler `queue`; host-level worker overlap is not required. A queue "
             "failure must be reported and must never be replayed on a native backend."
         )
     overlap = " The workers must overlap in time." if minimum > 1 else ""
@@ -481,7 +481,7 @@ def unmet(session: Any, state: dict[str, Any]) -> str | None:
         if state.get("delegation_queue"):
             return (
                 "Delegation queue requires one lifecycle-visible `bulk_worker` dispatcher before parent implementation. "
-                "Give it all independent units as one ordered batch for multiplexer `queue`."
+                "Give it all independent units as one ordered batch for mux-scheduler `queue`."
             )
         return (
             "Delegation protocol requires a bounded subagent for this bulk/high-volume turn. Start `bulk_worker` when suitable "
@@ -493,7 +493,7 @@ def unmet(session: Any, state: dict[str, Any]) -> str | None:
         return (
             "Round-robin delegation queue requires overlapping lifecycle-visible `bulk_worker` dispatchers when "
             "capacity permits. Launch separate dispatchers for separate bounded workstreams; each must submit its "
-            "own task through multiplexer `run`."
+            "own task through mux-scheduler `run`."
         )
     if fanout or (delegated and marker(session, "multi-unavailable").exists()):
         return None

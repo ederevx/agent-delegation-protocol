@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import contextlib
 import json
 import os
@@ -23,6 +24,9 @@ DEFAULT_MAX_OUTPUT = 2 * 1024 * 1024
 ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 INFERENCE_ENV = "AGENT_INFERENCE_CONFIG"
 MAX_PRIORITY = 100
+DEFAULT_COMMAND_CONCURRENCY = 4
+DEFAULT_COMMAND_TIMEOUT = 900
+MAX_COMMAND_OUTPUT = 24 * 1024
 
 
 class ConfigurationError(Exception):
@@ -218,7 +222,10 @@ def validate_agent(agent: Any, source: str) -> dict[str, Any]:
     if policy is not None:
         if not isinstance(policy, dict):
             raise ConfigurationError(f"{source}: queue_policy must be an object")
-        _reject_unknown(policy, {"strategy", "virtual_slots", "quantum"},
+        _reject_unknown(policy, {
+            "strategy", "virtual_slots", "quantum", "command_concurrency",
+            "command_timeout_seconds",
+        },
                         f"{source}: queue_policy")
         if policy.get("strategy") != "round_robin":
             raise ConfigurationError(
@@ -229,6 +236,28 @@ def validate_agent(agent: Any, source: str) -> dict[str, Any]:
         if slots > 32:
             raise ConfigurationError(
                 f"{source}: queue_policy.virtual_slots must not exceed 32"
+            )
+        command_concurrency = policy.get(
+            "command_concurrency", DEFAULT_COMMAND_CONCURRENCY
+        )
+        _positive_int(
+            command_concurrency, f"{source}: queue_policy.command_concurrency"
+        )
+        if command_concurrency > 32:
+            raise ConfigurationError(
+                f"{source}: queue_policy.command_concurrency must not exceed 32"
+            )
+        command_timeout = policy.get(
+            "command_timeout_seconds",
+            min(DEFAULT_COMMAND_TIMEOUT, agent["binding"]["timeout_seconds"]),
+        )
+        _positive_int(
+            command_timeout, f"{source}: queue_policy.command_timeout_seconds"
+        )
+        if command_timeout > agent["binding"]["timeout_seconds"]:
+            raise ConfigurationError(
+                f"{source}: queue_policy.command_timeout_seconds must not exceed "
+                "binding.timeout_seconds"
             )
         quantum = policy.get("quantum")
         if not isinstance(quantum, dict):
@@ -355,7 +384,10 @@ def select_queue_backend(catalog_dir: Path, routes_path: Path, route: str,
 
 
 def state_root() -> Path:
-    configured = os.environ.get("AGENT_MULTIPLEXER_STATE_DIR")
+    configured = (
+        os.environ.get("AGENT_MUX_SCHEDULER_STATE_DIR")
+        or os.environ.get("AGENT_MULTIPLEXER_STATE_DIR")
+    )
     if configured:
         return Path(configured).expanduser()
     xdg = os.environ.get("XDG_STATE_HOME")
@@ -599,6 +631,9 @@ def invoke(agent: dict[str, Any], raw_task: bytes,
                     "status": "timeout", "backend": agent["id"],
                     "stderr": stderr_file.read(65536).decode("utf-8", "replace"),
                 }, 124, True)
+            except BaseException:
+                _terminate_process_group(process)
+                raise
             stdout_size = stdout_file.tell()
             max_output = binding.get("max_output_bytes", DEFAULT_MAX_OUTPUT)
             if stdout_size > max_output:
@@ -635,6 +670,151 @@ def invoke(agent: dict[str, Any], raw_task: bytes,
             "error": "backend receipt must be a JSON object",
         }, 65, True)
     return receipt, process.returncode, True
+
+
+def _command_environment() -> dict[str, str]:
+    """Inherit build context without forwarding provider credentials."""
+    sensitive_suffixes = (
+        "_TOKEN", "_API_KEY", "_SECRET", "_PASSWORD", "_CREDENTIAL",
+    )
+    sensitive_prefixes = (
+        "ANTHROPIC_", "OPENAI_", "CI_CLAUDE_", "AWS_", "AZURE_",
+        "GOOGLE_APPLICATION_CREDENTIALS", "GITHUB_TOKEN", "GH_TOKEN",
+    )
+    return {
+        key: value for key, value in os.environ.items()
+        if not key.endswith(sensitive_suffixes)
+        and not key.startswith(sensitive_prefixes)
+        and key != INFERENCE_ENV
+    }
+
+
+def _validated_mux_execution(receipt: dict[str, Any]) -> tuple[str, list[str], Path] | None:
+    request = receipt.get("request")
+    if not isinstance(request, dict) or request.get("tool_name") != "Bash":
+        return None
+    request_id = request.get("request_id")
+    execution = request.get("mux_execution")
+    if execution is None:
+        return None
+    if (not isinstance(request_id, str) or not request_id
+            or len(request_id.encode("utf-8")) > 4096 or "\0" in request_id):
+        raise InputError("mux command request_id must be bounded")
+    if not isinstance(execution, dict) or set(execution) != {"argv", "cwd"}:
+        raise InputError("mux_execution must contain only argv and cwd")
+    argv = execution.get("argv")
+    if (not isinstance(argv, list) or not 1 <= len(argv) <= 64
+            or any(not isinstance(arg, str) or not arg or "\0" in arg
+                   or len(arg.encode("utf-8")) > 4096 for arg in argv)):
+        raise InputError("mux_execution argv must contain 1 to 64 bounded strings")
+    cwd_value = execution.get("cwd")
+    if not isinstance(cwd_value, str) or not Path(cwd_value).is_absolute():
+        raise InputError("mux_execution cwd must be absolute")
+    try:
+        cwd = Path(cwd_value).resolve(strict=True)
+    except OSError as error:
+        raise InputError(f"mux_execution cwd is invalid: {error}") from error
+    if not cwd.is_dir():
+        raise InputError("mux_execution cwd must be a directory")
+    return request_id, list(argv), cwd
+
+
+def _terminate_process_group(process: subprocess.Popen[Any]) -> None:
+    if os.name == "nt":
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        if process.poll() is None:
+            process.wait()
+        return
+    deadline = time.monotonic() + 0.2
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.01)
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    if process.poll() is None:
+        process.wait()
+
+
+def _start_mux_command(item: dict[str, Any], receipt: dict[str, Any],
+                       timeout_seconds: int
+                       ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Start one authorized argv command, returning (job, immediate result)."""
+    validated = _validated_mux_execution(receipt)
+    if validated is None:
+        return None, None
+    request_id, argv, cwd = validated
+    scratch = state_root() / "commands"
+    scratch.mkdir(parents=True, exist_ok=True)
+    stdout_file = tempfile.TemporaryFile(dir=scratch)
+    stderr_file = tempfile.TemporaryFile(dir=scratch)
+    started = time.monotonic()
+    try:
+        process = subprocess.Popen(
+            argv, cwd=cwd, stdin=subprocess.DEVNULL,
+            stdout=stdout_file, stderr=stderr_file,
+            env=_command_environment(), start_new_session=(os.name != "nt"),
+        )
+    except OSError as error:
+        stdout_file.close()
+        stderr_file.close()
+        return None, {
+            "request_id": request_id, "decision": "handled",
+            "result": {
+                "argv": argv, "returncode": None, "stdout": "", "stderr": "",
+                "duration_seconds": 0.0, "timed_out": False,
+                "spawn_error": str(error), "stdout_truncated": False,
+                "stderr_truncated": False,
+            },
+        }
+    return {
+        "item": item, "request_id": request_id, "argv": argv,
+        "process": process, "stdout_file": stdout_file, "stderr_file": stderr_file,
+        "started": started,
+        "deadline": min(item["deadline"], started + timeout_seconds),
+    }, None
+
+
+def _finish_mux_command(job: dict[str, Any], *, timed_out: bool = False) -> dict[str, Any]:
+    process = job["process"]
+    if timed_out:
+        _terminate_process_group(process)
+    else:
+        process.wait()
+        # A completed foreground command may have left descendants behind.
+        _terminate_process_group(process)
+    streams: list[tuple[str, bool]] = []
+    for handle in (job["stdout_file"], job["stderr_file"]):
+        size = handle.tell()
+        handle.seek(0)
+        raw = handle.read(MAX_COMMAND_OUTPUT)
+        streams.append((raw.decode("utf-8", "replace"), size > MAX_COMMAND_OUTPUT))
+        handle.close()
+    return {
+        "request_id": job["request_id"], "decision": "handled",
+        "result": {
+            "argv": job["argv"], "returncode": process.returncode,
+            "stdout": streams[0][0], "stderr": streams[1][0],
+            "duration_seconds": round(time.monotonic() - job["started"], 3),
+            "timed_out": timed_out, "spawn_error": None,
+            "stdout_truncated": streams[0][1], "stderr_truncated": streams[1][1],
+        },
+    }
 
 
 def _cooperative_envelope(operation: str, quantum: dict[str, Any], *,
@@ -724,7 +904,56 @@ def run_cooperative(agent: dict[str, Any], tasks: list[dict[str, Any]],
     requested = len(pending)
     jobs: list[dict[str, Any]] = []
     terminal_failure = False
-    while pending:
+    waiting_commands: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    running_commands: list[dict[str, Any]] = []
+    command_requests = 0
+    command_peak = 0
+    command_limit = policy.get(
+        "command_concurrency", DEFAULT_COMMAND_CONCURRENCY
+    )
+    command_timeout = policy.get(
+        "command_timeout_seconds",
+        min(DEFAULT_COMMAND_TIMEOUT, agent["binding"]["timeout_seconds"]),
+    )
+    def cleanup_commands() -> None:
+        for command_job in list(running_commands):
+            _terminate_process_group(command_job["process"])
+            for handle_name in ("stdout_file", "stderr_file"):
+                try:
+                    command_job[handle_name].close()
+                except OSError:
+                    pass
+
+    atexit.register(cleanup_commands)
+    while pending or waiting_commands or running_commands:
+        now = time.monotonic()
+        for command_job in list(running_commands):
+            process = command_job["process"]
+            timed_out = now >= command_job["deadline"] and process.poll() is None
+            if process.poll() is None and not timed_out:
+                continue
+            running_commands.remove(command_job)
+            item = command_job["item"]
+            item["permission_resolution"] = _finish_mux_command(
+                command_job, timed_out=timed_out
+            )
+            item["operation"] = "step"
+            pending.append(item)
+        while waiting_commands and len(running_commands) < command_limit:
+            item, command_receipt = waiting_commands.pop(0)
+            command_job, immediate = _start_mux_command(
+                item, command_receipt, command_timeout
+            )
+            if immediate is not None:
+                item["permission_resolution"] = immediate
+                item["operation"] = "step"
+                pending.append(item)
+            elif command_job is not None:
+                running_commands.append(command_job)
+                command_peak = max(command_peak, len(running_commands))
+        if not pending:
+            time.sleep(0.01)
+            continue
         item = pending.pop(0)
         if item["deadline"] is None:
             item["deadline"] = (
@@ -736,7 +965,7 @@ def run_cooperative(agent: dict[str, Any], tasks: list[dict[str, Any]],
             receipt = {
                 "schema_version": 1, "state": "failed",
                 "classification": "timeout", "status": "timeout",
-                "error": "cooperative task exceeded the multiplexer timeout",
+                "error": "cooperative task exceeded the mux-scheduler timeout",
             }
             launched = True
             status = 124
@@ -815,6 +1044,23 @@ def run_cooperative(agent: dict[str, Any], tasks: list[dict[str, Any]],
             pending.append(item)
             continue
         if state == "permission_required":
+            try:
+                mux_execution = _validated_mux_execution(receipt)
+            except InputError as error:
+                receipt = {
+                    "schema_version": 1, "state": "failed",
+                    "classification": "invalid_receipt", "status": "invalid_receipt",
+                    "error": str(error), "backend_receipt": receipt,
+                }
+                state, status = "failed", 65
+            else:
+                if mux_execution is not None:
+                    item["operation"] = "step"
+                    item["token"] = token
+                    waiting_commands.append((item, receipt))
+                    command_requests += 1
+                    continue
+        if state == "permission_required":
             job = dict(receipt)
             job["adapter_exit_code"] = status
             job["queue_index"] = item["index"]
@@ -841,7 +1087,20 @@ def run_cooperative(agent: dict[str, Any], tasks: list[dict[str, Any]],
         if state == "failed" or task_status != 0:
             terminal_failure = True
             if stop_on_error:
-                for waiting in pending:
+                stopping = (
+                    list(pending)
+                    + [waiting for waiting, _ in waiting_commands]
+                    + [command_job["item"] for command_job in running_commands]
+                )
+                for command_job in list(running_commands):
+                    _terminate_process_group(command_job["process"])
+                    command_job["stdout_file"].close()
+                    command_job["stderr_file"].close()
+                seen_indexes: set[int] = set()
+                for waiting in stopping:
+                    if waiting["index"] in seen_indexes:
+                        continue
+                    seen_indexes.add(waiting["index"])
                     cancelled: dict[str, Any] | None = None
                     if waiting["token"] is not None:
                         cancelled = _cancel_cooperative(
@@ -863,6 +1122,8 @@ def run_cooperative(agent: dict[str, Any], tasks: list[dict[str, Any]],
                         **({"cancel_receipt": cancelled} if cancelled is not None else {}),
                     })
                 pending.clear()
+                waiting_commands.clear()
+                running_commands.clear()
     jobs.sort(key=lambda job: job["queue_index"])
     completed = sum(job["state"] in ("complete", "failed") for job in jobs)
     succeeded = sum(job["state"] == "complete" and job.get("exit_code", 0) == 0
@@ -885,9 +1146,15 @@ def run_cooperative(agent: dict[str, Any], tasks: list[dict[str, Any]],
         "status": classification, "backend": agent["id"],
         "protocol": "cooperative-v1", "queue_policy": policy,
         "stop_on_error": stop_on_error,
+        "command_execution": {
+            "requested": command_requests,
+            "peak_concurrency": command_peak,
+            "limit": command_limit,
+        },
         "counts": counts,
         "jobs": jobs,
     }
+    atexit.unregister(cleanup_commands)
     return result, 1 if terminal_failure else 9 if permissions else 0
 
 
@@ -895,7 +1162,7 @@ def parser() -> argparse.ArgumentParser:
     base = Path(__file__).resolve().parents[2]
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--catalog", type=Path, default=base / "agents" / "catalog")
-    result.add_argument("--routes", type=Path, default=base / "agents" / "multiplexer.json")
+    result.add_argument("--routes", type=Path, default=base / "agents" / "mux-scheduler.json")
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("validate")
     listing = commands.add_parser("list")
@@ -1049,7 +1316,18 @@ def main() -> int:
             "error": str(error),
         })
         return 64
+    except KeyboardInterrupt:
+        emit({
+            "schema_version": 1, "classification": "cancelled",
+            "status": "cancelled",
+        })
+        return 130
+
+
+def _interrupt_scheduler(_signum: int, _frame: Any) -> None:
+    raise KeyboardInterrupt
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _interrupt_scheduler)
     raise SystemExit(main())

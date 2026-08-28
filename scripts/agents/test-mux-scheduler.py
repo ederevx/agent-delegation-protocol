@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Focused self-tests for the agent catalog, multiplexer, and adapter template."""
+"""Focused self-tests for the agent catalog, mux-scheduler, and adapter template."""
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import subprocess
 import sys
@@ -11,12 +12,15 @@ import time
 import unittest
 from pathlib import Path
 
-from multiplexer import select_queue_backend
-
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
-MUX = HERE / "multiplexer.py"
+MUX = HERE / "mux-scheduler.py"
 ADAPTER = HERE / "custom-adapter-template.py"
+SPEC = importlib.util.spec_from_file_location("mux_scheduler", MUX)
+assert SPEC and SPEC.loader
+MUX_MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MUX_MODULE)
+select_queue_backend = MUX_MODULE.select_queue_backend
 
 
 def metadata(agent_id: str, argv: list[str] | None = None, *, native: bool = False,
@@ -51,6 +55,7 @@ def metadata(agent_id: str, argv: list[str] | None = None, *, native: bool = Fal
         result["capabilities"]["functions"].extend(["batch", "resumable-batch"])
         result["queue_policy"] = {
             "strategy": "round_robin", "virtual_slots": 4,
+            "command_concurrency": 4, "command_timeout_seconds": 2,
             "quantum": {"unit": "agent_turn", "value": 4},
         }
     return result
@@ -64,7 +69,7 @@ class RepositoryConfigurationTests(unittest.TestCase):
             for path in catalog_dir.glob("*.json")
         }
         route = json.loads(
-            (REPO_ROOT / "agents" / "multiplexer.json").read_text(encoding="utf-8")
+            (REPO_ROOT / "agents" / "mux-scheduler.json").read_text(encoding="utf-8")
         )["routes"]["bulk"]
         native_ids = ["native-codex-bulk", "native-claude-bulk"]
         expected = set((["deepseek-ci"] if "deepseek-ci" in catalog else []) + native_ids)
@@ -83,9 +88,9 @@ class RepositoryConfigurationTests(unittest.TestCase):
             self.assertGreater(external["priority"], 0)
 
 
-class MultiplexerTests(unittest.TestCase):
+class MuxSchedulerTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory(prefix="multiplexer-test-")
+        self.temp = tempfile.TemporaryDirectory(prefix="mux-scheduler-test-")
         self.root = Path(self.temp.name)
         self.catalog = self.root / "catalog"
         self.catalog.mkdir()
@@ -107,7 +112,7 @@ class MultiplexerTests(unittest.TestCase):
         command = [sys.executable, str(MUX), "--catalog", str(self.catalog),
                    "--routes", str(self.routes), *args]
         env = os.environ.copy()
-        env["AGENT_MULTIPLEXER_STATE_DIR"] = str(self.state)
+        env["AGENT_MUX_SCHEDULER_STATE_DIR"] = str(self.state)
         return subprocess.run(
             command, input=None if task is None else json.dumps(task), text=True,
             capture_output=True, env=env, check=False,
@@ -369,7 +374,7 @@ print(json.dumps({{"schema_version": 1, "classification": "success"}}))
                    "--routes", str(self.routes), "run", "--route", "bulk",
                    "--runtime", "codex"]
         env = os.environ.copy()
-        env["AGENT_MULTIPLEXER_STATE_DIR"] = str(self.state)
+        env["AGENT_MUX_SCHEDULER_STATE_DIR"] = str(self.state)
         processes = [subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=subprocess.PIPE, text=True, env=env) for _ in range(2)]
         for process in processes:
@@ -467,7 +472,7 @@ print(json.dumps({{"classification": "success"}}))
                    "--routes", str(self.routes), "queue", "--route", "bulk",
                    "--runtime", "codex"]
         env = os.environ.copy()
-        env["AGENT_MULTIPLEXER_STATE_DIR"] = str(self.state)
+        env["AGENT_MUX_SCHEDULER_STATE_DIR"] = str(self.state)
         processes = [subprocess.Popen(
             command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, env=env
@@ -563,6 +568,108 @@ else:
                          ["A1", "B1", "A2", "B2"])
         self.assertEqual([job["slices"] for job in receipt["jobs"]], [2, 2])
 
+    def command_cooperative_stub(self, command_kind: str = "overlap") -> Path:
+        events = self.root / "command-events"
+        results = self.root / "command-results.jsonl"
+        command_code = (
+            "import pathlib,time; "
+            f"p=pathlib.Path({str(events)!r}); "
+            "p.open('a').write('start:'+__import__('sys').argv[1]+'\\n'); "
+            "time.sleep(.25); "
+            "p.open('a').write('end:'+__import__('sys').argv[1]+'\\n'); "
+            "print(__import__('sys').argv[1])"
+        )
+        return self.make_stub("command-cooperative.py", f"""
+import json, sys
+from pathlib import Path
+value = json.load(sys.stdin)
+if value["operation"] == "start":
+    print(json.dumps({{"state": "ready", "token": value["task"]["id"] + ":ready"}}))
+    raise SystemExit(0)
+name = value["token"].split(":", 1)[0]
+resolution = value.get("permission_resolution")
+if resolution is None:
+    kind = {command_kind!r}
+    if kind == "spawn":
+        argv = [{str(self.root / 'missing-command')!r}]
+    elif kind == "timeout":
+        argv = [{sys.executable!r}, "-c", "import time; time.sleep(5)"]
+    elif kind == "output":
+        argv = [{sys.executable!r}, "-c",
+                "import sys; print('x'*50000); print('y'*50000,file=sys.stderr)"]
+    else:
+        argv = [{sys.executable!r}, "-c", {command_code!r}, name]
+    print(json.dumps({{
+        "state": "permission_required", "token": name + ":command",
+        "request": {{
+            "request_id": "request-" + name, "tool_name": "Bash",
+            "tool_input": {{"command": "fixture " + name}},
+            "mux_execution": {{"argv": argv, "cwd": {str(self.root)!r}}},
+        }},
+    }}))
+    raise SystemExit(0)
+assert resolution["request_id"] == "request-" + name
+assert resolution["decision"] == "handled"
+with Path({str(results)!r}).open("a") as handle:
+    handle.write(json.dumps({{"name": name, "result": resolution["result"]}}) + "\\n")
+print(json.dumps({{"state": "complete", "classification": "success",
+                  "exit_code": 0, "task_id": name}}))
+""")
+
+    def test_mux_owns_overlapping_commands_and_requeues_exact_agent(self) -> None:
+        stub = self.command_cooperative_stub()
+        self.write_agent(metadata("cooperative", [sys.executable, str(stub)],
+                                  cooperative=True))
+        self.write_routes(["cooperative"])
+        started = time.monotonic()
+        result = self.run_mux(
+            "queue", "--route", "bulk", "--runtime", "codex",
+            task={"tasks": [{"id": "A"}, {"id": "B"}]},
+        )
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        receipt = json.loads(result.stdout)
+        self.assertEqual(receipt["command_execution"], {
+            "requested": 2, "peak_concurrency": 2, "limit": 4,
+        })
+        self.assertLess(elapsed, 0.65)
+        events = (self.root / "command-events").read_text().splitlines()
+        self.assertEqual(set(events[:2]), {"start:A", "start:B"})
+        self.assertEqual(set(events[2:]), {"end:A", "end:B"})
+        delivered = [
+            json.loads(line) for line in
+            (self.root / "command-results.jsonl").read_text().splitlines()
+        ]
+        self.assertEqual({item["name"] for item in delivered}, {"A", "B"})
+        self.assertEqual(
+            {item["result"]["stdout"].strip() for item in delivered}, {"A", "B"}
+        )
+
+    def test_mux_command_results_cover_spawn_timeout_and_output_bounds(self) -> None:
+        cases = (("spawn", "spawn_error"), ("timeout", "timed_out"),
+                 ("output", "stdout_truncated"))
+        for kind, expected in cases:
+            with self.subTest(kind=kind):
+                results = self.root / "command-results.jsonl"
+                results.unlink(missing_ok=True)
+                stub = self.command_cooperative_stub(kind)
+                agent = metadata("cooperative", [sys.executable, str(stub)],
+                                 cooperative=True)
+                agent["queue_policy"]["command_timeout_seconds"] = 1
+                self.write_agent(agent)
+                self.write_routes(["cooperative"])
+                result = self.run_mux(
+                    "run", "--route", "bulk", "--runtime", "codex",
+                    task={"id": kind},
+                )
+                self.assertEqual(result.returncode, 0, result.stdout)
+                delivered = json.loads(results.read_text().splitlines()[-1])["result"]
+                self.assertTrue(delivered[expected], delivered)
+                if kind == "output":
+                    self.assertLessEqual(len(delivered["stdout"].encode()), 24 * 1024)
+                    self.assertTrue(delivered["stderr_truncated"])
+
     def test_cooperative_run_interleaves_across_processes(self) -> None:
         stub = self.cooperative_stub(delay=0.15)
         self.write_agent(metadata("cooperative", [sys.executable, str(stub)],
@@ -572,7 +679,7 @@ else:
                    "--routes", str(self.routes), "run", "--route", "bulk",
                    "--runtime", "codex"]
         env = os.environ.copy()
-        env["AGENT_MULTIPLEXER_STATE_DIR"] = str(self.state)
+        env["AGENT_MUX_SCHEDULER_STATE_DIR"] = str(self.state)
         task_a = self.root / "task-a.json"
         task_b = self.root / "task-b.json"
         task_a.write_text(json.dumps({"id": "A"}))

@@ -35,16 +35,25 @@ safe_link() {
   ln -s "$src" "$dst"
 }
 
+remove_legacy_link_if_ours() {
+  local dst="$1" expected="$2"
+  if [[ -L "$dst" && "$(readlink "$dst")" == "$expected" ]]; then
+    rm "$dst"
+  fi
+}
+
 safe_link "$repo_root/claude/rules/delegation-protocol.md" "$claude_home/rules/delegation-protocol.md"
 safe_link "$repo_root/claude/agents/bulk-worker.md" "$claude_home/agents/bulk-worker.md"
 safe_link "$repo_root/claude/hooks/delegation-enforcer.py" "$claude_home/hooks/delegation-enforcer.py"
-safe_link "$repo_root/scripts/agents/multiplexer.py" "$claude_home/.delegation-protocol/multiplexer.py"
+remove_legacy_link_if_ours "$claude_home/.delegation-protocol/multiplexer.py" "$repo_root/scripts/agents/multiplexer.py"
+remove_legacy_link_if_ours "$claude_home/.delegation-protocol/multiplexer.json" "$repo_root/agents/multiplexer.json"
+safe_link "$repo_root/scripts/agents/mux-scheduler.py" "$claude_home/.delegation-protocol/mux-scheduler.py"
 safe_link "$repo_root/agents/catalog" "$claude_home/.delegation-protocol/catalog"
-safe_link "$repo_root/agents/multiplexer.json" "$claude_home/.delegation-protocol/multiplexer.json"
+safe_link "$repo_root/agents/mux-scheduler.json" "$claude_home/.delegation-protocol/mux-scheduler.json"
 
 "$python_exe" "$repo_root/scripts/claude/manage-settings.py" install \
   --claude-home "$claude_home" \
   --hook-path "$claude_home/hooks/delegation-enforcer.py" \
   --python "$python_exe"
 
-echo "Installed Claude delegation protocol only: hooks, settings, rule, bulk-worker, and agent multiplexer. Restart Claude Code sessions."
+echo "Installed Claude delegation protocol only: hooks, settings, rule, bulk-worker, and agent mux-scheduler. Restart Claude Code sessions."
