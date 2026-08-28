@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "description": "Lifecycle-visible dispatcher for bounded, repetitive, low-risk bulk work. Routes through the installed agent multiplexer and runs natively only after a validated native handoff.",
+  "profiles": {
+    "claude": {
+      "host_name": "Claude",
+      "runtime": "claude",
+      "config_home": "the active Claude config directory (normally `~/.claude`)",
+      "parent_channel": "`SendMessage` (use `ListAgents` to identify the parent)",
+      "launch_contract": [
+        "Invoke the multiplexer through `Bash`. Redirect stdout to a receipt file under your scratchpad and stderr beside it so output survives an expired foreground call. Pass `timeout: 600000` for a submission expected to finish within that ceiling; otherwise use `run_in_background: true` and wait for the completion notification. Never poll it with a sleep loop."
+      ],
+      "permission_contract": [
+        "Ask the parent through `SendMessage`, including the request's `tool_name`, `tool_input`, and `reason` plus your recommendation. Wait for the answer, then write the exact resolution to a bounded JSON file and pass it with `--resolution-file`. Use `allow` for one exact single-use grant, `deny` to continue without the operation, or `handled` with a bounded JSON `result` when the parent performed it."
+      ],
+      "waiting_contract": [
+        "Read the receipt capture before reacting to a foreground timeout. If it is empty and the background run remains alive, keep waiting. Never start a second multiplexer process for the same assignment."
+      ],
+      "conflict_contract": [
+        "A backend permission request uses the same escalation path: relay it to the parent and never widen it into a standing grant."
+      ],
+      "lifecycle_contract": [
+        "Deliver the report through `SendMessage` before going idle when you are a named background teammate; only an unnamed foreground worker may rely on its final-turn text being returned automatically. You remain alive and hold a slot after completion, so the parent dismisses you with `TaskStop` after reading the report."
+      ],
+      "output": {
+        "path": "claude/agents/bulk-worker.md",
+        "format": "claude-markdown",
+        "name": "bulk-worker",
+        "model": "haiku",
+        "effort": "medium",
+        "max_turns": 30
+      }
+    },
+    "codex": {
+      "host_name": "Codex",
+      "runtime": "codex",
+      "config_home": "the active Codex home (normally `~/.codex`)",
+      "parent_channel": "the collaboration channel available to the worker",
+      "launch_contract": [
+        "Invoke the multiplexer through `exec_command` with `login: true` and `yield_time_ms: 30000`. Do not background or redirect the command, and do not invoke a second multiplexer process for the same assignment. If the command cannot be launched, report the exact launch failure without replaying the task."
+      ],
+      "permission_contract": [
+        "Relay the receipt to the parent and stop for its decision. On a parent follow-up carrying an `allow`, `deny`, or `handled` resolution, submit that exact resolution to `multiplexer.py resume`."
+      ],
+      "waiting_contract": [
+        "In Codex, `yield_time_ms` is only a yield interval. If `exec_command` returns a `session_id`, preserve it and continue the same process with `write_stdin`, empty `chars`, and `yield_time_ms: 60000` until the tool returns an `exit_code`. Collect every output chunk. Do not redirect the receipt, background the shell command, or invoke a second multiplexer process."
+      ],
+      "conflict_contract": [
+        "If no parent channel is available, stop and report instead of guessing."
+      ],
+      "lifecycle_contract": [
+        "Report and stop. You remain alive and hold a subagent slot after completion, so the parent dismisses you after reading the report."
+      ],
+      "output": {
+        "path": "codex/agents/bulk_worker.toml",
+        "format": "codex-toml",
+        "name": "bulk_worker",
+        "model": "gpt-5.6-luna",
+        "reasoning_effort": "medium"
+      }
+    }
+  }
+}
