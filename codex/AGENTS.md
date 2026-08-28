@@ -26,8 +26,6 @@ For cooperative backends, the mux-scheduler also owns authorized command executi
 
 When work contains at least four substantially independent/repetitive units, is otherwise clearly high-volume, or can be cleanly sharded into bounded independently verifiable units, delegate rather than spending the parent context on all mechanical execution when subagents are available and delegation does not create disproportionate risk.
 
-DeepSeek is unmetered: the `deepseek-ci` route carries no usage quota and no per-task cost. Cost is therefore never a reason to keep eligible work on the parent, and an eligible task should go to DeepSeek by default rather than being absorbed for convenience because it looked small enough to do inline. Prefer delegating every bounded audit, sweep, enumeration, or mechanical edit that meets the threshold above, and prefer a wider fan-out over a narrower one when the workstreams are genuinely independent. What still limits delegation is judgment and coordination, not spend.
-
 Do not manufacture delegation for tiny, inseparable, or tightly coupled work.
 
 ## Mandatory concurrent fan-out
