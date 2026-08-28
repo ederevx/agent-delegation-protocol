@@ -113,6 +113,8 @@ def test_generated_workers() -> None:
         "report an execution failure only when no receipt was produced",
         "task JSON file under your scratchpad", "`Write`", "--task-file",
         "validate that it is non-empty JSON", "Do not interpolate the task through the shell",
+        "queue envelope with exactly `tasks`", "even one task remains wrapped in `tasks`",
+        "task fields never appear at the envelope's top level",
     ):
         require(contract in instructions,
                 f"Claude dispatcher lacks required waiting contract: {contract}")
