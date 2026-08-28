@@ -10,7 +10,7 @@ The protocol is supplementary: existing applicable instructions, hooks, and sett
 
 For eligible bulk/high-volume work, preserve frontier-model effort for planning, ambiguity, difficult reasoning, architecture, integration, conflict resolution, and final validation. Delegate bounded work to the cheapest suitable worker.
 
-When a task contains multiple independent workstreams, use concurrent lifecycle-visible agents when runtime capacity permits it. The multiplexer serializes calls to a one-lane API, so native fan-out evidence does not create overlapping provider requests.
+When a task contains multiple independent workstreams, use concurrent lifecycle-visible agents when runtime capacity permits it. A one-lane backend does not push that work back onto the parent: when it advertises a round-robin `queue_policy`, its `virtual_slots` set how many dispatchers may run at once and the multiplexer interleaves them on the single physical lane. Only a backend without that policy serializes its dispatchers.
 
 ```text
 Frontier parent / coordinator
@@ -169,7 +169,7 @@ Codex now uses a four-layer implementation:
 3. **Agent multiplexer** — capability-filtered, priority-ordered routing across native bindings and custom command/API adapters.
 4. **Lifecycle hooks** — `UserPromptSubmit`, `SubagentStart`, `SubagentStop`, `PreToolUse`, `PostToolUse(Agent)`, and `Stop` mechanically gate clear bulk/sharded work.
 
-For multi-subsystem tasks the Codex hook requires evidence of **actual overlapping workers**, not merely two sequential agent runs. If the selected backend is one-lane, the multiplexer queues those workers' provider calls.
+For multi-subsystem tasks the Codex hook requires evidence of **actual overlapping workers**, not merely two sequential agent runs. A one-lane backend still satisfies that requirement when it advertises round-robin virtual slots: the workers overlap up to that slot count while the multiplexer interleaves their provider calls on the one lane.
 
 **Important:** current Codex requires non-managed hooks to be reviewed/trusted. After installation, restart Codex, run `/hooks`, review the protocol definition, and trust/enable it. Until then, the AGENTS policy/custom workers are installed but mechanical hook enforcement may be skipped.
 
@@ -201,7 +201,7 @@ Claude installation manages only the configured Claude home (normally `~/.claude
 - explicit subagent concurrency/depth defaults when absent;
 - experimental agent teams when absent, as an optional additional coordination capability.
 
-Claude enforcement is not text-only. The hook classifies clear bulk/sharded requests, records actual worker starts/stops, denies parent mutation before required delegation, and blocks turn completion until delegation requirements are satisfied. Independent-subsystem work uses overlapping lifecycle-visible workers; the multiplexer serializes a backend that declares one lane.
+Claude enforcement is not text-only. The hook classifies clear bulk/sharded requests, records actual worker starts/stops, denies parent mutation before required delegation, and blocks turn completion until delegation requirements are satisfied. Independent-subsystem work uses overlapping lifecycle-visible workers; a one-lane backend advertising round-robin virtual slots supports that overlap up to its slot count, with the multiplexer interleaving the calls on its single lane.
 
 See [`claude/INSTALL.md`](claude/INSTALL.md).
 

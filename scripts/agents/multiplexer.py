@@ -900,6 +900,12 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("validate")
     listing = commands.add_parser("list")
     listing.add_argument("--route")
+    listing.add_argument("--runtime")
+    listing.add_argument("--platform")
+    listing.add_argument("--mode")
+    listing.add_argument("--workspace")
+    listing.add_argument("--delivery")
+    listing.add_argument("--require", action="append", default=[])
     for name in ("select", "run", "queue", "resume"):
         command = commands.add_parser(name)
         command.add_argument("--route", required=True)
@@ -934,12 +940,21 @@ def main() -> int:
             })
             return 0
         if args.command == "list":
+            filters = {name: getattr(args, name) for name in (
+                "runtime", "platform", "mode", "workspace", "delivery",
+            )}
+            required = list(args.require)
             if args.route is None:
                 selected = [agents[key] for key in sorted(agents)]
             else:
                 if args.route not in routes:
                     raise InputError(f"unknown route: {args.route}")
                 selected = [agents[key] for key in routes[args.route]]
+            if any(filters.values()) or required:
+                selected = [agent for agent in selected
+                            if matches(agent, filters, required)
+                            and is_available(agent)]
+                selected.sort(key=lambda agent: (-agent["priority"], agent["id"]))
             emit(selected)
             return 0
         filters = {name: getattr(args, name) for name in (

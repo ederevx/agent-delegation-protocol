@@ -118,6 +118,26 @@ class MultiplexerTests(unittest.TestCase):
         path.write_text(body, encoding="utf-8")
         return path
 
+    def test_list_accepts_the_same_capability_filters_as_select(self) -> None:
+        self.write_agent(metadata("codex-only", [sys.executable, "unused.py"],
+                                  runtime="codex", priority=10))
+        self.write_agent(metadata("claude-only", [sys.executable, "unused.py"],
+                                  runtime="claude", priority=50))
+        self.write_routes(["codex-only", "claude-only"])
+
+        unfiltered = self.run_mux("list", "--route", "bulk")
+        self.assertEqual(unfiltered.returncode, 0)
+        self.assertEqual([a["id"] for a in json.loads(unfiltered.stdout)],
+                         ["codex-only", "claude-only"])
+
+        filtered = self.run_mux("list", "--route", "bulk", "--runtime", "claude")
+        self.assertEqual(filtered.returncode, 0)
+        self.assertEqual([a["id"] for a in json.loads(filtered.stdout)], ["claude-only"])
+
+        required = self.run_mux("list", "--route", "bulk", "--require", "batch")
+        self.assertEqual(required.returncode, 0)
+        self.assertEqual(json.loads(required.stdout), [])
+
     def test_validation_and_missing_route_id_are_deterministic(self) -> None:
         self.write_agent(metadata("valid", [sys.executable, "unused.py"]))
         self.write_routes(["missing"])
