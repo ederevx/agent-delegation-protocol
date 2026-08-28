@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "id": "native-claude-bulk",
+  "name": "Native Claude bulk worker",
+  "description": "Claude-native bounded bulk worker fallback.",
+  "native": true,
+  "delegation_queue": false,
+  "priority": 0,
+  "provider": "anthropic",
+  "model": "haiku",
+  "binding": {
+    "runtime": "claude",
+    "agent_type": "bulk-worker",
+    "reasoning_effort": "medium"
+  },
+  "capabilities": {
+    "functions": ["audit", "edit", "batch", "live-worktree"],
+    "runtimes": ["claude"],
+    "platforms": ["linux", "darwin", "windows"],
+    "modes": ["read", "edit"],
+    "workspaces": ["shared", "isolated"],
+    "deliveries": ["native-agent"]
+  },
+  "limits": {
+    "max_concurrency": 4
+  }
+}
