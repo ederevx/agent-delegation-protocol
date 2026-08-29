@@ -39,6 +39,9 @@ The installer refuses to overwrite an unrelated file or symlink at any destinati
 ~/.claude/.delegation-protocol/mux-scheduler.py
   -> <clone>/scripts/agents/mux-scheduler.py
 
+~/.claude/.delegation-protocol/delegation-classifier.py
+  -> <clone>/scripts/agents/delegation-classifier.py
+
 ~/.claude/.delegation-protocol/catalog
   -> <clone>/agents/catalog
 
@@ -163,4 +166,4 @@ Windows PowerShell:
 .\scripts\claude\uninstall.ps1
 ```
 
-Uninstall removes only protocol-owned links and known state files; unrelated files inside `.delegation-protocol` are preserved. It does not uninstall or modify Codex.
+Uninstall removes only protocol-owned links and known state files, including the whole `.delegation-protocol/sessions/` directory of accumulated per-turn state; unrelated files inside `.delegation-protocol` are preserved. It does not uninstall or modify Codex.
