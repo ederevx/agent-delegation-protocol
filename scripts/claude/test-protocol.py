@@ -345,17 +345,6 @@ def test_multi_agent_overlap_gate(home: Path) -> None:
 
     call_hook(home, "subagent-stop", {"session_id": session, "agent_id": "frontend-worker"})
     call_hook(home, "subagent-stop", {"session_id": session, "agent_id": "backend-worker"})
-    # Dismiss both workers before stop is allowed (PROTOCOL_VERSION 5 dismissal enforcement)
-    call_hook(home, "pretool", {
-        "session_id": session,
-        "tool_name": "TaskStop",
-        "tool_input": {"task_id": "frontend-worker"},
-    })
-    call_hook(home, "pretool", {
-        "session_id": session,
-        "tool_name": "TaskStop",
-        "tool_input": {"task_id": "backend-worker"},
-    })
     stopped = call_hook(home, "stop", {"session_id": session})
     require(stopped is None, "completed fan-out task was blocked from stopping")
 
@@ -485,8 +474,8 @@ def test_explicit_opt_out(home: Path) -> None:
     require(result is None, "explicit no-delegation instruction was not respected")
 
 
-def test_pretool_matcher_covers_dismissal(home: Path) -> None:
-    """The gate is unreachable unless the installed matcher routes Agent and TaskStop."""
+def test_pretool_matcher_covers_agent(home: Path) -> None:
+    """The delegation gate must route Agent without claiming TaskStop."""
     home.mkdir(parents=True, exist_ok=True)
     result = run([sys.executable, str(SETTINGS_MANAGER), "install", "--claude-home", str(home),
                   "--hook-path", str(HOOK), "--python", sys.executable])
@@ -499,14 +488,15 @@ def test_pretool_matcher_covers_dismissal(home: Path) -> None:
     ]
     require(bool(matchers), "no protocol-owned PreToolUse hook was installed")
     joined = "|".join(matchers).split("|")
-    for tool in ("Edit", "Write", "Bash", "Agent", "TaskStop"):
+    for tool in ("Edit", "Write", "Bash", "Agent"):
         require(tool in joined, f"PreToolUse matcher does not route {tool}")
+    require("TaskStop" not in joined, "protocol still intercepts runtime-owned TaskStop")
 
 
-def test_dismissal_lifecycle(home: Path) -> None:
-    """Test worker dismissal enforcement across all lifecycle cases."""
+def test_foreground_lifecycle(home: Path) -> None:
+    """Completed foreground agents create no synthetic dismissal debt."""
 
-    # Case 1: Worker finishes -> `stop` blocks
+    # A foreground worker is released by Claude Code when its Agent result returns.
     session1 = "dismissal-case1"
     call_hook(home, "prompt", {
         "session_id": session1,
@@ -521,13 +511,13 @@ def test_dismissal_lifecycle(home: Path) -> None:
         "agent_id": "w1",
     })
     blocked = call_hook(home, "stop", {"session_id": session1})
-    require(blocked is not None and blocked.get("decision") == "block", "stop did not block for outstanding worker")
+    require(blocked is None, "completed foreground worker created stop debt")
 
-    # Case 1a: it blocks at most once, so an undismissable worker cannot loop the hook
+    # Repeated Stop events remain allowed.
     again = call_hook(home, "stop", {"session_id": session1})
     require(again is None or again.get("decision") != "block", "stop blocked a second time on the same debt")
 
-    # Case 1b: a runtime id (`a<name>-<hex>`) is cleared by TaskStop on the bare name
+    # A stray TaskStop hook event is irrelevant to a completed foreground Agent.
     session1b = "dismissal-case1b"
     call_hook(home, "prompt", {"session_id": session1b, "prompt": "Do some work"})
     call_hook(home, "subagent-start", {"session_id": session1b, "agent_id": "aworker-one-353c3b7231845f11"})
@@ -537,9 +527,9 @@ def test_dismissal_lifecycle(home: Path) -> None:
         "tool_name": "TaskStop",
         "tool_input": {"task_id": "worker-one"},
     })
-    require(call_hook(home, "stop", {"session_id": session1b}) is None, "bare-name TaskStop did not clear a runtime-id worker")
+    require(call_hook(home, "stop", {"session_id": session1b}) is None, "foreground runtime id created debt")
 
-    # Case 2: With outstanding worker, `pretool` Agent spawn is denied
+    # A completed foreground worker must not prevent another wave of agents.
     session2 = "dismissal-case2"
     call_hook(home, "prompt", {
         "session_id": session2,
@@ -558,9 +548,9 @@ def test_dismissal_lifecycle(home: Path) -> None:
         "tool_name": "Agent",
         "tool_input": {},
     })
-    require(denied is not None and denied["hookSpecificOutput"]["permissionDecision"] == "deny", "Agent spawn was not denied with outstanding worker")
+    require(denied is None, "completed foreground worker blocked a later Agent spawn")
 
-    # Case 3: `pretool` TaskStop with bare name clears it -> `stop` then passes
+    # TaskStop is not required for either bare or runtime-shaped Agent ids.
     session3 = "dismissal-case3"
     call_hook(home, "prompt", {
         "session_id": session3,
@@ -580,9 +570,9 @@ def test_dismissal_lifecycle(home: Path) -> None:
         "tool_input": {"task_id": "w3"},
     })
     allowed = call_hook(home, "stop", {"session_id": session3})
-    require(allowed is None, "stop was blocked after dismissing worker with bare name")
+    require(allowed is None, "bare Agent id created lifecycle debt")
 
-    # Case 4: `pretool` TaskStop with full "name@session" id also clears it
+    # A session-shaped Agent id is equally released at foreground completion.
     session4 = "dismissal-case4"
     call_hook(home, "prompt", {
         "session_id": session4,
@@ -602,7 +592,7 @@ def test_dismissal_lifecycle(home: Path) -> None:
         "tool_input": {"task_id": "w4@session-xyz"},
     })
     allowed = call_hook(home, "stop", {"session_id": session4})
-    require(allowed is None, "stop was blocked after dismissing worker with full id")
+    require(allowed is None, "session-shaped Agent id created lifecycle debt")
 
     # Case 5: Worker that started but NOT stopped is not outstanding -> `stop` passes
     session5 = "dismissal-case5"
@@ -665,12 +655,7 @@ def test_dismissal_lifecycle(home: Path) -> None:
 
 
 def test_unlaunched_agent_creates_no_debt(home: Path) -> None:
-    """A SubagentStop for an agent the protocol never started must not accrue a debt.
-
-    The runtime stops agents of its own under nameless ids that no TaskStop can
-    target. Charging the parent for those escalated a fresh, unpayable worker
-    every turn and nagged the Stop hook forever.
-    """
+    """All SubagentStop events only update overlap; none accrue lifecycle debt."""
     session = "phantom-debt"
     call_hook(home, "prompt", {"session_id": session, "prompt": "Do some work"})
     for index in range(4):
@@ -678,37 +663,31 @@ def test_unlaunched_agent_creates_no_debt(home: Path) -> None:
         out = call_hook(home, "stop", {"session_id": session})
         require(out is None, f"unlaunched agent #{index} created a dismissal debt: {out}")
 
-    # A worker the protocol did launch is still tracked normally.
+    # A worker the protocol did launch is equally runtime-owned after completion.
     call_hook(home, "subagent-start", {"session_id": session, "agent_id": "real-worker"})
     call_hook(home, "subagent-stop", {"session_id": session, "agent_id": "real-worker"})
     blocked = call_hook(home, "stop", {"session_id": session})
-    require(
-        blocked is not None and blocked.get("decision") == "block",
-        "a genuinely launched worker no longer creates a dismissal debt",
-    )
+    require(blocked is None, "a launched foreground worker created dismissal debt")
 
 
-def test_outstanding_debt_reported_once(home: Path) -> None:
-    """An undismissable debt is surfaced once, not re-reported on every Stop."""
+def test_completed_worker_allows_later_wave(home: Path) -> None:
+    """A completed worker neither blocks stop nor later agent waves."""
     session = "debt-reported-once"
     call_hook(home, "prompt", {"session_id": session, "prompt": "Do some work"})
     call_hook(home, "subagent-start", {"session_id": session, "agent_id": "w1"})
     call_hook(home, "subagent-stop", {"session_id": session, "agent_id": "w1"})
 
     first = call_hook(home, "stop", {"session_id": session})
-    require(first is not None and first.get("decision") == "block", "first stop did not block")
+    require(first is None, "completed worker blocked stop")
     for attempt in range(3):
         extra = call_hook(home, "stop", {"session_id": session})
         require(extra is None, f"stop re-reported an already-reported debt (attempt {attempt}): {extra}")
 
-    # The debt itself still stands: a new spawn is denied until it is dismissed.
+    # A later foreground wave remains available.
     denied = call_hook(
         home, "pretool", {"session_id": session, "tool_name": "Agent", "tool_input": {}}
     )
-    require(
-        denied is not None and denied["hookSpecificOutput"]["permissionDecision"] == "deny",
-        "reporting a debt once must not release the spawn gate",
-    )
+    require(denied is None, "completed worker blocked a later Agent wave")
 
 
 def test_relayed_message_continues_turn(home: Path) -> None:
@@ -844,10 +823,10 @@ def main() -> int:
         test_queue_fallbacks(root / "queue-fallbacks")
         test_size_and_step_thresholds(root / "thresholds-home")
         test_explicit_opt_out(root / "opt-out-home")
-        test_pretool_matcher_covers_dismissal(root / "matcher-home")
-        test_dismissal_lifecycle(root / "dismissal-home")
+        test_pretool_matcher_covers_agent(root / "matcher-home")
+        test_foreground_lifecycle(root / "foreground-home")
         test_unlaunched_agent_creates_no_debt(root / "phantom-home")
-        test_outstanding_debt_reported_once(root / "once-home")
+        test_completed_worker_allows_later_wave(root / "later-wave-home")
         test_relayed_message_continues_turn(root / "relayed-home")
         test_classifier_loader_falls_back_to_clone(root / "loader-fallback-home")
         test_state_version_mismatch_is_discarded(root / "stale-version-home")

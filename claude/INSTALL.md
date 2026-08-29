@@ -85,10 +85,10 @@ The hook participates in these lifecycle events:
 
 - `UserPromptSubmit` — conservatively classifies the turn and injects the mandatory delegation/fan-out policy into Claude's context. A relayed worker or peer message arrives on this event too, but continues the turn already in flight instead of reopening it: its text is a worker's words rather than the user's, so classifying it would judge a report as if the user had typed it, and clearing evidence would revoke fan-out the parent has already performed and demand more of it for the integration work that reading the report begins.
 - `SubagentStart` — records delegation, tracks active workers, and injects bounded-worker requirements into each spawned subagent.
-- `SubagentStop` — removes the worker from the active set and records it as finished but still held.
+- `SubagentStop` — removes the worker from the active overlap set.
 - `PostToolUseFailure` for `Agent` — detects runtime/model/concurrency failures so enforcement can fail open only when delegation is actually unavailable.
-- `PreToolUse` for core mutation tools, `Agent`, and `TaskStop` — denies parent mutation on an eligible bulk task until required delegation has occurred, denies new worker spawns while finished workers are still held, and records each `TaskStop` as a dismissal.
-- `Stop` — blocks the parent from ending an eligible turn until required delegation has occurred and every finished worker has been dismissed.
+- `PreToolUse` for core mutation tools and `Agent` — denies parent mutation on an eligible bulk task until required delegation has occurred while allowing Agent launches to supply that evidence.
+- `Stop` — blocks the parent from ending an eligible turn until required delegation evidence exists.
 
 For multi-subsystem work, enforcement ordinarily requires overlapping lifecycle-visible subagents. A selected delegation queue is the exception: one lifecycle dispatcher submits one batch, and a round-robin one-lane backend interleaves its virtual agents up to the advertised slot limit. Atomic per-agent marker files avoid races between simultaneous lifecycle hook processes.
 
@@ -130,7 +130,7 @@ The hook uses a conservative deterministic classifier. It mechanically gates cle
 
 The `PreToolUse` gate covers Claude Code's core file mutation tools and common mutating shell/PowerShell operations. The `Stop` gate is the backstop: an eligible turn cannot normally finish without the required delegation evidence even if a mutation path was not recognized by the pre-tool heuristic.
 
-The hook also enforces worker dismissal. `SubagentStop` records the worker as finished but still held, since a worker stays alive and idle until it is dismissed. While any such worker is outstanding, `PreToolUse` denies new `Agent` spawns and `Stop` blocks turn completion, so finished workers are released with `TaskStop` before more are created. Dismissal is recorded when the `TaskStop` call is made rather than when it succeeds, so stopping an already-gone worker still clears the obligation. The record is per-turn and a new prompt clears it, and the `Stop` gate blocks at most once per turn, so a worker the runtime already tore down — which can never be dismissed — cannot loop the hook or wedge the session.
+Claude Code releases a foreground `Agent` when its result returns. Its returned Agent ID can be resumed with `SendMessage`, but it is not a live background-task ID accepted by `TaskStop`. The hook therefore removes the worker from overlap tracking at `SubagentStop` and creates no dismissal debt; completed workers cannot block later Agent waves or turn completion. `TaskStop` remains available to Claude Code for cancelling an actually running background task and is not intercepted by this protocol.
 
 A direct higher-priority user/system restriction against delegation, unavailable Agent tooling, managed policy, or runtime/model failure can supersede or prevent the protocol. The hook is an execution guardrail, not a security sandbox.
 
