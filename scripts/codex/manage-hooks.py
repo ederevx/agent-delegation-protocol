@@ -65,7 +65,7 @@ def groups(hook_path: Path, python_exe: str) -> dict[str, list[dict[str, Any]]]:
         "SubagentStart": [{"hooks": [handler(base + " subagent-start", "track worker start")]}],
         "SubagentStop": [{"hooks": [handler(base + " subagent-stop", "track worker stop")]}],
         "PreToolUse": [{"matcher": "*", "hooks": [handler(base + " pretool", "enforce delegation before mutation")]}],
-        "PostToolUse": [{"matcher": "^Agent$", "hooks": [handler(base + " agent-result", "observe Agent result")]}],
+        "PostToolUse": [{"matcher": "^Agent$", "hooks": [handler(base + " agent-result", "complete Agent attempt")]}],
         "Stop": [{"hooks": [handler(base + " stop", "verify delegation before stop")]}],
     }
 
