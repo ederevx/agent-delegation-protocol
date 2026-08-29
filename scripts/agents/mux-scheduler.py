@@ -426,6 +426,17 @@ def _file_lock(path: Path) -> Iterator[None]:
 
 @contextlib.contextmanager
 def concurrency_lock(agent: dict[str, Any]) -> Iterator[None]:
+    """Serialize whole oneshot invocations of a single-slot backend.
+
+    This and fair_step_lock() below both guard the same one provider slot, and
+    that duplication is deliberate rather than a merge candidate. A oneshot
+    invocation holds the slot for its entire run, so a plain mutual-exclusion
+    lock is the right shape and order between waiters does not matter. A
+    cooperative round-robin run instead releases the slot between steps, so it
+    needs ticket ordering to keep one virtual agent from starving the rest.
+    Collapsing them would either serialize round-robin batches at invocation
+    granularity or make every oneshot pay for ticket bookkeeping it cannot use.
+    """
     if agent["limits"]["max_concurrency"] != 1:
         yield
         return
@@ -468,7 +479,11 @@ def _store_tickets(path: Path, tickets: list[dict[str, Any]]) -> None:
 
 @contextlib.contextmanager
 def fair_step_lock(agent: dict[str, Any], deadline: float) -> Iterator[None]:
-    """Acquire the single provider lane in cross-process FIFO ticket order."""
+    """Acquire the single provider lane in cross-process FIFO ticket order.
+
+    Step-granular counterpart to concurrency_lock(); see the note there for why
+    both exist.
+    """
     root = state_root() / "round-robin" / agent["id"]
     guard = root / "tickets.lock"
     tickets_path = root / "tickets.json"
