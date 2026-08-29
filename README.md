@@ -10,7 +10,7 @@ The protocol is supplementary: existing applicable instructions, hooks, and sett
 
 For eligible bulk/high-volume work, preserve frontier-model effort for planning, ambiguity, difficult reasoning, architecture, integration, conflict resolution, and final validation. Delegate bounded work to the cheapest suitable worker.
 
-Eligibility is measured by size and shape, not only by wording. Delegation is mandatory for any task estimated at **25% or more of one compaction window** in reading, output, and tool traffic — about 50k tokens at a 200k window, and the hooks scale that number with the window the session actually reports (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`, `CODEX_MAX_CONTEXT_TOKENS`) — and for any task that runs to **three or more distinct steps**. Both halves inject those thresholds into every turn so the parent applies them even when the classifier does not fire, and both re-estimate as work grows. Genuinely small, single-step, or tightly coupled work stays in the parent.
+Eligibility is measured by size and shape, not only by wording. Delegation is mandatory for any task estimated at **25% or more of one compaction window** in reading, output, and tool traffic — about 50k tokens at a 200k window, and the hooks scale that number with the window the session actually reports (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`, `CODEX_MAX_CONTEXT_TOKENS`) — and for any task that runs to **three or more distinct steps**. Both halves inject those thresholds into every turn so the parent applies them even when the classifier does not fire, and both re-estimate as work grows. Both halves import one classifier (`scripts/agents/delegation-classifier.py`, installed beside the scheduler under `.delegation-protocol/`), so a policy change lands in both agents at once instead of being hand-copied into each. Genuinely small, single-step, or tightly coupled work stays in the parent.
 
 When a task contains multiple independent workstreams, use concurrent lifecycle-visible agents when runtime capacity permits it. A selected delegation queue is the exception: one lifecycle-visible dispatcher submits all workstreams to one mux-scheduler process. On a one-lane backend advertising a round-robin `queue_policy`, `virtual_slots` controls how many in-process virtual agents the scheduler interleaves on the physical lane.
 
@@ -307,6 +307,7 @@ scripts/
   agents/
     render-bulk-workers.py
     mux-scheduler.py
+    delegation-classifier.py
     custom-adapter-template.py
   codex/
     install.sh

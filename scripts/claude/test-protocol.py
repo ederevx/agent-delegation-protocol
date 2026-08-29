@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -248,11 +249,15 @@ def test_installer_migrates_mux_scheduler_links(home: Path) -> None:
             "Claude mux-scheduler executable link was not installed")
     require((protocol / "mux-scheduler.json").is_symlink(),
             "Claude mux-scheduler route link was not installed")
+    require((protocol / "delegation-classifier.py").is_symlink(),
+            "Claude shared classifier link was not installed")
 
     result = run(["bash", str(REPO_ROOT / "scripts" / "claude" / "uninstall.sh")], env=env)
     require(result.returncode == 0, f"Claude uninstaller failed: {result.stderr}")
     require(not (protocol / "mux-scheduler.py").is_symlink(),
             "Claude uninstaller retained mux-scheduler executable")
+    require(not (protocol / "delegation-classifier.py").is_symlink(),
+            "Claude uninstaller retained shared classifier link")
 
 
 def test_single_agent_gate(home: Path) -> None:
@@ -735,6 +740,70 @@ def test_relayed_message_continues_turn(home: Path) -> None:
     )
 
 
+def test_classifier_loader_falls_back_to_clone(home: Path) -> None:
+    """With no installed classifier, the hook must fall back to the repo clone.
+
+    Nothing in this fixture ever creates
+    `.delegation-protocol/delegation-classifier.py`, so a working classification
+    here can only have come from load_classifier()'s second candidate: the clone
+    path resolved from the hook's own (symlink-followed) location.
+    """
+    session = "loader-fallback-test"
+    context = context_of(call_hook(home, "prompt", {
+        "session_id": session,
+        "prompt": "Update 10 files to apply this mechanical rename across the repository.",
+    }))
+    require("HOOK CLASSIFICATION" in context, "classifier fallback to the repo clone did not work")
+
+
+def test_state_version_mismatch_is_discarded(home: Path) -> None:
+    """State stamped with a stale protocol_version must be treated as absent.
+
+    This is the fix for the audit finding that PROTOCOL_VERSION was write-only:
+    a state file whose version disagrees with the running classifier can no
+    longer keep an old requires_delegation gate in force.
+    """
+    session = "stale-version-test"
+    sessions_dir = home / ".delegation-protocol" / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    (sessions_dir / f"{session}.json").write_text(json.dumps({
+        "protocol_version": -1,
+        "requires_delegation": True,
+        "min_agents": 1,
+        "completed": False,
+    }), encoding="utf-8")
+    allowed = call_hook(home, "pretool", {
+        "session_id": session,
+        "tool_name": "Edit",
+        "tool_input": {"file_path": "example.py"},
+    })
+    require(allowed is None, "stale-versioned state was honored instead of discarded")
+
+
+def test_reap_removes_stale_sessions(home: Path) -> None:
+    """An old session's state is swept while the session in progress is kept."""
+    stale_session = "reap-stale-session"
+    current_session = "reap-current-session"
+    call_hook(home, "prompt", {"session_id": stale_session, "prompt": "Do some work"})
+    call_hook(home, "prompt", {"session_id": current_session, "prompt": "Do some other work"})
+
+    sessions_dir = home / ".delegation-protocol" / "sessions"
+    stale_path = sessions_dir / f"{stale_session}.json"
+    current_path = sessions_dir / f"{current_session}.json"
+    require(stale_path.exists() and current_path.exists(), "fixture state was not written")
+
+    old_time = time.time() - (8 * 24 * 3600)
+    os.utime(stale_path, (old_time, old_time))
+
+    # The prompt handler sweeps on every turn; the current session is exempted by
+    # name regardless of its own mtime, since a long session is old by mtime while
+    # still being the state in force.
+    call_hook(home, "prompt", {"session_id": current_session, "prompt": "Continue the other work"})
+
+    require(not stale_path.exists(), "reap did not remove an old session's state")
+    require(current_path.exists(), "reap removed the state of the session in progress")
+
+
 def main() -> int:
     require(HOOK.exists(), f"missing hook: {HOOK}")
     require(SETTINGS_MANAGER.exists(), f"missing settings manager: {SETTINGS_MANAGER}")
@@ -756,6 +825,9 @@ def main() -> int:
         test_unlaunched_agent_creates_no_debt(root / "phantom-home")
         test_outstanding_debt_reported_once(root / "once-home")
         test_relayed_message_continues_turn(root / "relayed-home")
+        test_classifier_loader_falls_back_to_clone(root / "loader-fallback-home")
+        test_state_version_mismatch_is_discarded(root / "stale-version-home")
+        test_reap_removes_stale_sessions(root / "reap-home")
     print("Claude delegation protocol self-test: PASS")
     return 0
 
