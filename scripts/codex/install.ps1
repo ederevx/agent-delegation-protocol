@@ -175,6 +175,7 @@ $LegacyBulkSource = Join-Path $RepoRoot 'codex\agents\bulk-worker.toml'
 $BalancedSource = Join-Path $RepoRoot 'codex\agents\balanced-worker.toml'
 $HookSource = Join-Path $RepoRoot 'codex\hooks\delegation-enforcer.py'
 $MuxSource = Join-Path $RepoRoot 'scripts\agents\mux-scheduler.py'
+$ClassifierSource = Join-Path $RepoRoot 'scripts\agents\delegation-classifier.py'
 $CatalogSource = Join-Path $RepoRoot 'agents\catalog'
 $RoutesSource = Join-Path $RepoRoot 'agents\mux-scheduler.json'
 $BulkDest = Join-Path $CodexHome 'agents\bulk_worker.toml'
@@ -182,6 +183,7 @@ $LegacyBulkDest = Join-Path $CodexHome 'agents\bulk-worker.toml'
 $BalancedDest = Join-Path $CodexHome 'agents\balanced-worker.toml'
 $HookDest = Join-Path $CodexHome 'hooks\delegation-enforcer.py'
 $MuxDest = Join-Path $StateDir 'mux-scheduler.py'
+$ClassifierDest = Join-Path $StateDir 'delegation-classifier.py'
 $CatalogDest = Join-Path $StateDir 'catalog'
 $RoutesDest = Join-Path $StateDir 'mux-scheduler.json'
 $BulkHashPath = Join-Path $StateDir 'bulk-worker.sha256'
@@ -193,6 +195,7 @@ Assert-ManagedCopyDestination $BulkSource $BulkDest $BulkHashPath
 Assert-SafeSymlinkDestination $BalancedSource $BalancedDest
 Assert-SafeSymlinkDestination $HookSource $HookDest
 Assert-SafeSymlinkDestination $MuxSource $MuxDest
+Assert-SafeSymlinkDestination $ClassifierSource $ClassifierDest
 Assert-SafeSymlinkDestination $CatalogSource $CatalogDest
 Assert-SafeSymlinkDestination $RoutesSource $RoutesDest
 Assert-DirectoryIfPresent (Join-Path $CodexHome 'agents') 'agents directory'
@@ -431,6 +434,7 @@ New-SafeSymlink $HookSource $HookDest
 Remove-LegacyLinkIfOurs (Join-Path $StateDir 'multiplexer.py') (Join-Path $RepoRoot 'scripts\agents\multiplexer.py')
 Remove-LegacyLinkIfOurs (Join-Path $StateDir 'multiplexer.json') (Join-Path $RepoRoot 'agents\multiplexer.json')
 New-SafeSymlink $MuxSource $MuxDest
+New-SafeSymlink $ClassifierSource $ClassifierDest
 New-SafeSymlink $CatalogSource $CatalogDest
 New-SafeSymlink $RoutesSource $RoutesDest
 

@@ -53,6 +53,7 @@ safe_link "$repo_root/claude/hooks/delegation-enforcer.py" "$claude_home/hooks/d
 remove_legacy_link_if_ours "$claude_home/.delegation-protocol/multiplexer.py" "$repo_root/scripts/agents/multiplexer.py"
 remove_legacy_link_if_ours "$claude_home/.delegation-protocol/multiplexer.json" "$repo_root/agents/multiplexer.json"
 safe_link "$repo_root/scripts/agents/mux-scheduler.py" "$claude_home/.delegation-protocol/mux-scheduler.py"
+safe_link "$repo_root/scripts/agents/delegation-classifier.py" "$claude_home/.delegation-protocol/delegation-classifier.py"
 safe_link "$repo_root/agents/catalog" "$claude_home/.delegation-protocol/catalog"
 safe_link "$repo_root/agents/mux-scheduler.json" "$claude_home/.delegation-protocol/mux-scheduler.json"
 

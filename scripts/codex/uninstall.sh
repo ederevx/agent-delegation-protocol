@@ -115,6 +115,7 @@ remove_legacy_bulk_if_ours "$codex_home/agents/bulk-worker.toml" "$repo_root/cod
 remove_if_ours "$codex_home/agents/balanced-worker.toml" "$repo_root/codex/agents/balanced-worker.toml"
 remove_if_ours "$codex_home/hooks/delegation-enforcer.py" "$repo_root/codex/hooks/delegation-enforcer.py"
 remove_if_ours "$state_dir/mux-scheduler.py" "$repo_root/scripts/agents/mux-scheduler.py"
+remove_if_ours "$state_dir/delegation-classifier.py" "$repo_root/scripts/agents/delegation-classifier.py"
 remove_if_ours "$state_dir/multiplexer.py" "$repo_root/scripts/agents/multiplexer.py"
 remove_if_ours "$state_dir/catalog" "$repo_root/agents/catalog"
 remove_if_ours "$state_dir/mux-scheduler.json" "$repo_root/agents/mux-scheduler.json"
@@ -165,5 +166,9 @@ if [[ "$instructions_cleaned" == true ]]; then
 fi
 rm -f "$state_dir/hooks.before-first-install.json" \
   "$state_dir/hooks-manifest.json"
+# Per-session turn state was never reaped before this hook gained a sweep, so a
+# long-lived home can carry state for every session it ever ran; it is entirely
+# protocol-owned, so uninstall removes it outright rather than leaving it.
+rm -rf "$state_dir/hook-state"
 rmdir "$state_dir" 2>/dev/null || true
 echo "Uninstalled Codex delegation protocol only; unrelated hooks/configuration were preserved and the prior Codex override was restored when applicable."

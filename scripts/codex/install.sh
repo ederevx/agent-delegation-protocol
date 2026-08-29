@@ -249,6 +249,7 @@ preflight_install() {
   assert_safe_link_destination "$repo_root/codex/agents/balanced-worker.toml" "$codex_home/agents/balanced-worker.toml"
   assert_safe_link_destination "$repo_root/codex/hooks/delegation-enforcer.py" "$codex_home/hooks/delegation-enforcer.py"
   assert_safe_link_destination "$repo_root/scripts/agents/mux-scheduler.py" "$state_dir/mux-scheduler.py"
+  assert_safe_link_destination "$repo_root/scripts/agents/delegation-classifier.py" "$state_dir/delegation-classifier.py"
   assert_safe_link_destination "$repo_root/agents/catalog" "$state_dir/catalog"
   assert_safe_link_destination "$repo_root/agents/mux-scheduler.json" "$state_dir/mux-scheduler.json"
 }
@@ -473,6 +474,7 @@ safe_link "$repo_root/codex/hooks/delegation-enforcer.py" "$codex_home/hooks/del
 remove_legacy_link_if_ours "$state_dir/multiplexer.py" "$repo_root/scripts/agents/multiplexer.py"
 remove_legacy_link_if_ours "$state_dir/multiplexer.json" "$repo_root/agents/multiplexer.json"
 safe_link "$repo_root/scripts/agents/mux-scheduler.py" "$state_dir/mux-scheduler.py"
+safe_link "$repo_root/scripts/agents/delegation-classifier.py" "$state_dir/delegation-classifier.py"
 safe_link "$repo_root/agents/catalog" "$state_dir/catalog"
 safe_link "$repo_root/agents/mux-scheduler.json" "$state_dir/mux-scheduler.json"
 

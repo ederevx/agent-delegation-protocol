@@ -24,6 +24,29 @@ UNINSTALLER = REPO_ROOT / "scripts" / "codex" / (
     "uninstall.ps1" if os.name == "nt" else "uninstall.sh"
 )
 WORKER_RENDERER = REPO_ROOT / "scripts" / "agents" / "render-bulk-workers.py"
+CLASSIFIER = REPO_ROOT / "scripts" / "agents" / "delegation-classifier.py"
+
+
+def load_hook_module(codex_home: Path) -> Any:
+    """Import the hook fresh, with CODEX_HOME set for its module-level `shared` load.
+
+    A separate module object per call keeps these direct-import tests isolated
+    from each other and from the subprocess-driven tests above.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("codex_delegation_enforcer_direct", HOOK)
+    module = importlib.util.module_from_spec(spec)
+    previous = os.environ.get("CODEX_HOME")
+    os.environ["CODEX_HOME"] = str(codex_home)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if previous is None:
+            os.environ.pop("CODEX_HOME", None)
+        else:
+            os.environ["CODEX_HOME"] = previous
+    return module
 
 
 def install_queue_fixture(home: Path, runtime: str, condition: str) -> None:
@@ -862,12 +885,89 @@ def test_worker_dismissal(home: Path) -> None:
     require(result is None, "stop blocked after prompt reset")
 
 
+def test_classifier_loader_fallback(home: Path) -> None:
+    """With nothing installed under CODEX_HOME, the loader must fall back to
+    this clone's own copy rather than return None."""
+    module = load_hook_module(home)
+    require(module.shared is not None,
+            "hook resolved neither the installed nor the clone's own classifier")
+    require(module.shared.__file__ == str(CLASSIFIER.resolve()) or
+            Path(module.shared.__file__).resolve() == CLASSIFIER.resolve(),
+            "loader fallback did not resolve this clone's classifier copy")
+    require(hasattr(module.shared, "classify") and hasattr(module.shared, "PROTOCOL_VERSION"),
+            "clone-path classifier fallback did not expose the expected module contract")
+
+
+def test_state_version_discarded(home: Path) -> None:
+    """State stamped with a different protocol_version must be discarded, not
+    interpreted -- the write-only PROTOCOL_VERSION audit finding."""
+    module = load_hook_module(home)
+    session = "version-mismatch"
+    module.save_state(session, {
+        "protocol_version": module.shared.PROTOCOL_VERSION - 1,
+        "requires_delegation": True, "completed": False,
+    })
+    require(module.load_state(session) == {},
+            "load_state kept state stamped with a stale protocol_version")
+    module.save_state(session, {
+        "protocol_version": module.shared.PROTOCOL_VERSION,
+        "requires_delegation": True, "completed": False,
+    })
+    require(module.load_state(session) != {},
+            "load_state discarded state stamped with the current protocol_version")
+
+
+def test_reap_removes_stale_sessions(home: Path) -> None:
+    """A sweep must remove an untouched session's state while keeping the one
+    currently running, regardless of age."""
+    module = load_hook_module(home)
+    stale, current = "stale-session", "current-session"
+    for session in (stale, current):
+        module.save_state(session, {
+            "protocol_version": module.shared.PROTOCOL_VERSION,
+            "requires_delegation": False, "completed": True,
+        })
+        module.touch(module.active_dir(session) / "marker")
+    stale_path, current_path = module.state_path(stale), module.state_path(current)
+    require(stale_path.exists() and current_path.exists(), "reap fixture states were not written")
+
+    # ttl=0 makes every untouched entry eligible immediately, since a write
+    # always precedes the reap call that follows it.
+    removed = module.shared.reap_state(module.state_root(), keep=module.safe(current), ttl=0)
+    require(removed >= 1, "reap_state did not report removing the stale session")
+    require(not stale_path.exists() and not module.active_dir(stale).exists(),
+            "reap_state left a stale session's state behind")
+    require(current_path.exists() and module.active_dir(current).exists(),
+            "reap_state removed the currently running session's state")
+
+
+def test_agent_result_failure_signal(home: Path) -> None:
+    """Codex fires PostToolUse for Agent on success and failure alike, unlike
+    Claude's dedicated failure-only event, so the hook must read the event's
+    own outcome fields rather than scan every response body for error text."""
+    session = "agent-result-signal"
+    call_hook(home, "agent-result", {
+        "session_id": session,
+        "tool_response": "Fixed by editing sudoers; the first attempt hit permission denied.",
+    })
+    marker_path = home / ".delegation-protocol" / "hook-state" / f"{session}.unavailable"
+    require(not marker_path.exists(),
+            "a successful result quoting an error string marked spawning unavailable")
+
+    call_hook(home, "agent-result", {
+        "session_id": session, "is_error": True, "tool_response": "permission denied",
+    })
+    require(marker_path.exists(),
+            "a genuinely failed result with a recognized signal was not marked unavailable")
+
+
 def main() -> int:
     require(HOOK.exists(), f"missing {HOOK}")
     require(MANAGER.exists(), f"missing {MANAGER}")
     require(INSTALLER.exists(), f"missing {INSTALLER}")
     require(UNINSTALLER.exists(), f"missing {UNINSTALLER}")
     require(WORKER_RENDERER.exists(), f"missing {WORKER_RENDERER}")
+    require(CLASSIFIER.exists(), f"missing {CLASSIFIER}")
     test_installer_platform_contract(Path(tempfile.gettempdir()) / "codex-installer-contract")
     test_generated_workers()
     with tempfile.TemporaryDirectory(prefix="codex-delegation-test-") as tmp:
@@ -884,6 +984,10 @@ def main() -> int:
         test_size_and_step_thresholds(root / "thresholds")
         test_opt_out(root / "optout")
         test_worker_dismissal(root / "dismissal")
+        test_classifier_loader_fallback(root / "loader-fallback")
+        test_state_version_discarded(root / "state-version")
+        test_reap_removes_stale_sessions(root / "reap")
+        test_agent_result_failure_signal(root / "agent-result-signal")
     print("Codex delegation protocol self-test: PASS")
     return 0
 
