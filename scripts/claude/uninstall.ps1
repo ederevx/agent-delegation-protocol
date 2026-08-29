@@ -21,12 +21,14 @@ $RuleSource = Join-Path $RepoRoot 'claude\rules\delegation-protocol.md'
 $AgentSource = Join-Path $RepoRoot 'claude\agents\bulk-worker.md'
 $HookSource = Join-Path $RepoRoot 'claude\hooks\delegation-enforcer.py'
 $MuxSource = Join-Path $RepoRoot 'scripts\agents\mux-scheduler.py'
+$ClassifierSource = Join-Path $RepoRoot 'scripts\agents\delegation-classifier.py'
 $CatalogSource = Join-Path $RepoRoot 'agents\catalog'
 $RoutesSource = Join-Path $RepoRoot 'agents\mux-scheduler.json'
 $RuleDest = Join-Path $ClaudeHome 'rules\delegation-protocol.md'
 $AgentDest = Join-Path $ClaudeHome 'agents\bulk-worker.md'
 $HookDest = Join-Path $ClaudeHome 'hooks\delegation-enforcer.py'
 $MuxDest = Join-Path $ClaudeHome '.delegation-protocol\mux-scheduler.py'
+$ClassifierDest = Join-Path $ClaudeHome '.delegation-protocol\delegation-classifier.py'
 $CatalogDest = Join-Path $ClaudeHome '.delegation-protocol\catalog'
 $RoutesDest = Join-Path $ClaudeHome '.delegation-protocol\mux-scheduler.json'
 
@@ -37,6 +39,7 @@ Remove-IfOurs $RuleDest $RuleSource
 Remove-IfOurs $AgentDest $AgentSource
 Remove-IfOurs $HookDest $HookSource
 Remove-IfOurs $MuxDest $MuxSource
+Remove-IfOurs $ClassifierDest $ClassifierSource
 Remove-IfOurs (Join-Path $ClaudeHome '.delegation-protocol\multiplexer.py') (Join-Path $RepoRoot 'scripts\agents\multiplexer.py')
 Remove-IfOurs $CatalogDest $CatalogSource
 Remove-IfOurs $RoutesDest $RoutesSource
@@ -47,6 +50,11 @@ foreach ($owned in @('settings.before-first-install.json', 'settings-manifest.js
     $path = Join-Path $ProtocolState $owned
     if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
 }
+# Session state is protocol-owned turn evidence; nothing else ever wrote to it,
+# and nothing else reads it back, so uninstall removes the whole tree rather
+# than leaving accumulated per-session files behind.
+$SessionsPath = Join-Path $ProtocolState 'sessions'
+if (Test-Path -LiteralPath $SessionsPath) { Remove-Item -LiteralPath $SessionsPath -Recurse -Force }
 if ((Test-Path $ProtocolState) -and @(Get-ChildItem -LiteralPath $ProtocolState -Force).Count -eq 0) {
     Remove-Item -LiteralPath $ProtocolState -Force
 }

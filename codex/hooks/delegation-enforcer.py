@@ -12,102 +12,46 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-PROTOCOL_VERSION = 5
-CONTINUATION_PREFIX = "DELEGATION_PROTOCOL_CONTINUE:"
-
-BULK_WORDS = (
-    "bulk", "batch", "high-volume", "high volume", "many files", "many modules",
-    "many packages", "many services", "many components", "many tasks", "all files",
-    "all modules", "all packages", "all services", "all components", "every file",
-    "every module", "every package", "every service", "across the repo",
-    "across the repository", "repo-wide", "repository-wide", "codebase-wide",
-    "large-scale", "large scale",
-)
-# Size and shape thresholds. A turn is delegation-eligible on how much work it is,
-# not only on how the user worded it: a job that will burn a large share of one
-# compaction window, or that runs through several distinct steps, is cheaper and
-# safer to plan in the parent and execute in workers. The size threshold is a
-# share of the window rather than a fixed count, so a session configured for a
-# larger or smaller window keeps the same meaning.
-DELEGATION_WINDOW_SHARE = 0.25
-DEFAULT_CONTEXT_WINDOW = 200_000
-STEP_DELEGATION_THRESHOLD = 3
-LONG_BRIEF_WORDS = 150
-
-TOKEN_BUDGET = re.compile(
-    r"\b(\d+(?:[.,]\d+)*)\s*([km])?\b[\s-]*(?:tokens?|token budget)\b", re.IGNORECASE
-)
-SIZE_WORDS = (
-    "large task", "big task", "huge", "massive", "extensive", "comprehensive",
-    "exhaustive", "end-to-end", "end to end", "entire repo", "entire repository",
-    "entire codebase", "whole repo", "whole repository", "whole codebase",
-    "from scratch", "overhaul", "rearchitect", "re-architect", "long-running",
-    "long running", "sweep",
-)
-MULTI_STEP_WORDS = (
-    "multi-step", "multi step", "many steps", "several steps", "multiple steps",
-    "step by step", "step-by-step", "each step", "series of steps", "sequence of steps",
-    "multiple phases", "several phases", "in stages", "one step at a time",
-    "multi-stage", "multi stage",
-)
-STEP_MARKERS = (
-    r"\bfirst(?:ly)?\b", r"\bsecond(?:ly)?\b", r"\bthird(?:ly)?\b", r"\bfourth\b",
-    r"\bfifth\b", r"\bthen\b", r"\bnext\b", r"\bafter (?:that|which|this)\b",
-    r"\bafterwards?\b", r"\bonce (?:that|it|this)\b", r"\bfollowed by\b",
-    r"\bfinally\b", r"\blastly\b",
-)
-ENUMERATION = re.compile(r"(?m)^\s*(?:\d+[.)]|step\s+\d+\b|[-*\u2022]\s+\S)")
-
-ACTION_WORDS = (
-    "implement", "build", "create", "add", "change", "update", "edit", "modify",
-    "fix", "refactor", "migrate", "convert", "rewrite", "rename", "process",
-    "analyze", "analyse", "review", "audit", "test", "document", "generate",
-    "apply", "replace", "remove", "delete", "format", "lint",
-)
-SHARD_WORDS = (
-    "subsystem", "subsystems", "service", "services", "module", "modules", "package",
-    "packages", "component", "components", "directory", "directories", "workstream",
-    "workstreams", "shard", "shards", "partition", "partitions", "test suite",
-    "test suites", "frontend", "front-end", "backend", "back-end", "api", "database",
-    "docs", "documentation",
-)
-NO_DELEGATION_PATTERNS = (
-    r"\bdo not (?:delegate|spawn|use (?:sub)?agents?)\b",
-    r"\bdon['’]t (?:delegate|spawn|use (?:sub)?agents?)\b",
-    r"\bwithout (?:delegation|subagents?|agents?)\b",
-    r"\bno (?:delegation|subagents?|agents?)\b",
-)
-FOLLOWUP_PATTERNS = (
-    r"^\s*(?:yes|ok(?:ay)?|sure|continue|proceed|go ahead|do it|keep going|finish it|same|also)\b",
-)
-
-MUTATING_BASH = re.compile(
-    r"(^|[;&|]\s*)(rm\b|mv\b|cp\b|mkdir\b|rmdir\b|touch\b|sed\s+-i\b|perl\s+-pi\b|"
-    r"git\s+(?:apply|checkout|switch|reset|clean|commit|merge|rebase|cherry-pick)\b|patch\b|tee\b|"
-    r"npm\s+(?:install|uninstall|update|ci)\b|pnpm\s+(?:install|add|remove|update)\b|"
-    r"yarn\s+(?:install|add|remove|upgrade)\b|pip(?:3)?\s+(?:install|uninstall)\b|"
-    r"cargo\s+(?:add|remove|fix|fmt)\b|go\s+fmt\b)", re.IGNORECASE,
-)
-MUTATING_TOOL_NAME = re.compile(
-    r"(?:write|edit|create|update|delete|remove|rename|move|patch|apply|replace|commit|merge|rebase)",
-    re.IGNORECASE,
-)
-SPAWN_UNAVAILABLE = re.compile(
-    r"(?:concurrent.*limit|agent.*(?:unavailable|disabled|not available)|subagent.*(?:unavailable|disabled|not available)|"
-    r"model not found|no available model|unsupported model|not permitted|permission denied|unknown agent)",
-    re.IGNORECASE,
-)
-
-
-DISMISSAL_TOOL = re.compile(
-    r"(?:stop|kill|end|dismiss|terminate|cancel).*(?:task|agent|worker)"
-    r"|(?:task|agent|worker).*(?:stop|kill|end|dismiss|terminate|cancel)",
-    re.IGNORECASE,
-)
-
 
 def codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
+
+
+def load_classifier() -> Any:
+    """Import the shared classifier: installed copy first, then this clone."""
+    candidates = (
+        codex_home() / ".delegation-protocol" / "delegation-classifier.py",
+        Path(__file__).resolve().parents[2] / "scripts" / "agents" / "delegation-classifier.py",
+    )
+    for path in candidates:
+        try:
+            spec = importlib.util.spec_from_file_location("_delegation_classifier", path)
+            if spec is None or spec.loader is None:
+                continue
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            return module
+        except Exception:
+            continue
+    return None
+
+
+# The second candidate above matters because the hook is installed as a symlink
+# into $CODEX_HOME/hooks, and Path(__file__).resolve() follows it back into the
+# clone -- so a session running straight out of the repository, before install,
+# still resolves the module. Resolved once at import time: every mode below is a
+# fail-open guardrail, never a gate that can wedge a turn, so a missing or broken
+# shared module must make the whole hook a no-op rather than raise (see main())
+# instead of crashing or silently enforcing half a policy.
+shared = load_classifier()
+
+CONTINUATION_PREFIX = "DELEGATION_PROTOCOL_CONTINUE:"
+
+# Env vars the shared classifier reads to size the parent's context window. Kept
+# here because which vars matter is Codex-specific configuration, not shared
+# policy.
+CONTEXT_ENV = ("CODEX_MAX_CONTEXT_TOKENS", "CODEX_CONTEXT_WINDOW")
 
 
 def select_delegation_queue(runtime: str) -> dict[str, Any] | None:
@@ -218,7 +162,7 @@ def is_dismissal_tool(name: str) -> bool:
     counts. ``interrupt_agent`` deliberately does not count: that call leaves
     the agent available and therefore does not release its lifecycle slot.
     """
-    return bool(DISMISSAL_TOOL.search(name))
+    return bool(shared.DISMISSAL_TOOL.search(name))
 
 
 def keys_match(finished: str, target: str) -> bool:
@@ -264,9 +208,14 @@ def load_state(session_id: Any) -> dict[str, Any]:
         return {}
     try:
         value = json.loads(p.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else {}
     except Exception:
         return {}
+    # State written by a different protocol version describes a turn's evidence
+    # under a meaning this build may not share, so it is discarded outright
+    # rather than interpreted -- see shared.state_is_current.
+    if not isinstance(value, dict) or not shared.state_is_current(value):
+        return {}
+    return value
 
 
 def save_state(session_id: Any, value: dict[str, Any]) -> None:
@@ -315,122 +264,8 @@ def emit(value: dict[str, Any]) -> None:
     sys.stdout.write(json.dumps(value, separators=(",", ":")))
 
 
-def explicit_count(text: str) -> int:
-    pattern = r"\b(\d{1,4})\s+(?:files?|modules?|packages?|services?|components?|tasks?|items?|tests?|directories|folders?)\b"
-    values = [int(m.group(1)) for m in re.finditer(pattern, text, re.IGNORECASE)]
-    return max(values, default=0)
-
-
-def context_window() -> int:
-    """Tokens the parent can hold before compaction, as configured."""
-    for name in ("CODEX_MAX_CONTEXT_TOKENS", "CODEX_CONTEXT_WINDOW"):
-        raw = os.environ.get(name)
-        if not raw:
-            continue
-        try:
-            value = int(raw)
-        except ValueError:
-            continue
-        if value > 0:
-            return value
-    return DEFAULT_CONTEXT_WINDOW
-
-
-def token_threshold() -> int:
-    """Work at or above this many tokens must be delegated."""
-    return max(1, int(context_window() * DELEGATION_WINDOW_SHARE))
-
-
-def explicit_tokens(text: str) -> int:
-    """Largest token budget the turn itself names, in tokens."""
-    scale = {"k": 1_000, "m": 1_000_000}
-    values: list[int] = []
-    for match in TOKEN_BUDGET.finditer(text):
-        try:
-            amount = float(match.group(1).replace(",", ""))
-        except ValueError:
-            continue
-        values.append(int(amount * scale.get((match.group(2) or "").lower(), 1)))
-    return max(values, default=0)
-
-
-def step_count(text: str) -> int:
-    """How many distinct steps the turn enumerates, by ordering words or by list."""
-    ordered = sum(len(re.findall(pattern, text)) for pattern in STEP_MARKERS)
-    if ordered and not re.search(r"\bfirst(?:ly)?\b", text):
-        # "X, then Y, then Z" names two connectors but describes three steps.
-        # A brief that opens with "first" already labels its own first step.
-        ordered += 1
-    listed = len(ENUMERATION.findall(text))
-    return max(ordered, listed)
-
-
-def classify(prompt: str, previous: dict[str, Any]) -> dict[str, Any]:
-    text = (prompt or "").strip()
-    lower = text.lower()
-    words = re.findall(r"\b[\w'-]+\b", lower)
-    explicit_no = any(re.search(p, lower) for p in NO_DELEGATION_PATTERNS)
-    action = any(w in lower for w in ACTION_WORDS)
-    count = explicit_count(lower)
-    bulk = any(w in lower for w in BULK_WORDS) or count >= 3
-    tokens = explicit_tokens(lower)
-    steps = step_count(lower)
-    threshold = token_threshold()
-    token_signal = tokens >= threshold
-    size = token_signal or any(w in lower for w in SIZE_WORDS) or len(words) >= LONG_BRIEF_WORDS
-    step = any(w in lower for w in MULTI_STEP_WORDS) or steps >= STEP_DELEGATION_THRESHOLD
-    independent = "independent" in lower and any(w in lower for w in SHARD_WORDS)
-    multiple = "multiple" in lower and any(w in lower for w in SHARD_WORDS)
-    domains = sum(1 for family in (
-        ("frontend", "front-end"), ("backend", "back-end"), ("database",),
-        ("api",), ("docs", "documentation"), ("tests", "test suite", "test suites"),
-    ) if any(x in lower for x in family))
-    cross_domain = domains >= 2 and (" and " in lower or "," in lower or "/" in lower or "across" in lower)
-    shard = independent or multiple or cross_domain or any(x in lower for x in (
-        "independent subsystems", "independent services", "independent modules", "independent packages",
-        "separate subsystems", "separate services", "parallel workstreams", "independent workstreams",
-    ))
-    followup = len(words) <= 14 and any(re.search(p, lower) for p in FOLLOWUP_PATTERNS)
-    protocol_continuation = text.startswith(CONTINUATION_PREFIX)
-    carry = bool(previous.get("requires_delegation")) and not bool(previous.get("completed")) and (followup or protocol_continuation)
-    requires = False if explicit_no else (
-        (action and (bulk or shard or size or step)) or token_signal or carry
-    )
-    multi = False if explicit_no else (requires and (shard or bool(previous.get("requires_multi") and carry)))
-    reasons: list[str] = []
-    if count >= 3:
-        reasons.append(f"explicit unit count {count}")
-    if bulk and count < 3:
-        reasons.append("bulk/high-volume wording")
-    if token_signal:
-        reasons.append(
-            f"stated budget of {tokens} tokens, at or above the {threshold}-token threshold "
-            f"({int(DELEGATION_WINDOW_SHARE * 100)}% of a {context_window()}-token window)"
-        )
-    elif size:
-        reasons.append("large-task wording or a long, detailed brief")
-    if step:
-        reasons.append(
-            f"multi-step work ({steps} steps enumerated)"
-            if steps >= STEP_DELEGATION_THRESHOLD else "multi-step wording"
-        )
-    if shard:
-        reasons.append("independent/separable subsystem wording")
-    if carry:
-        reasons.append("continuation of unfinished delegated work")
-    return {
-        "requires_delegation": requires,
-        "requires_multi": multi,
-        "min_agents": 2 if multi else (1 if requires else 0),
-        "classification_reasons": reasons,
-        "explicit_no_delegation": explicit_no,
-        "carry_forward": carry,
-        "token_threshold": threshold,
-    }
-
-
 def policy_context(c: dict[str, Any]) -> str:
-    threshold = int(c.get("token_threshold") or token_threshold())
+    threshold = int(c.get("token_threshold") or shared.token_threshold(CONTEXT_ENV))
     base_text = (
         "DELEGATION PROTOCOL (hook-enforced): preserve the frontier parent for planning, ambiguity, difficult reasoning, "
         "integration, conflict resolution, and final validation. Prefer the installed `bulk_worker` custom agent "
@@ -443,8 +278,8 @@ def policy_context(c: dict[str, Any]) -> str:
         "dismissal when its contract says the agent remains available.\n"
         "SIZE AND SHAPE THRESHOLDS (apply these yourself, whether or not this hook flagged the turn): estimate the "
         f"work before starting it. Delegate any task you estimate at {threshold}+ tokens of reading, output, and "
-        f"tool traffic ({int(DELEGATION_WINDOW_SHARE * 100)}% of one compaction window), and any task that runs to "
-        f"{STEP_DELEGATION_THRESHOLD} or more distinct steps. Plan and integrate in the parent; hand the execution "
+        f"tool traffic ({int(shared.DELEGATION_WINDOW_SHARE * 100)}% of one compaction window), and any task that runs to "
+        f"{shared.STEP_DELEGATION_THRESHOLD} or more distinct steps. Plan and integrate in the parent; hand the execution "
         "to workers, one bounded unit each, and re-estimate when the work turns out larger than it looked. Keep "
         "only genuinely small, single-step, or tightly coupled work in the parent."
     )
@@ -493,14 +328,24 @@ def mutating_tool(event: dict[str, Any]) -> bool:
         return True
     if name == "Bash":
         command = str(data.get("command") or "") if isinstance(data, dict) else str(data)
-        return bool(MUTATING_BASH.search(command) or re.search(r"(^|[^<])>{1,2}\s*\S", command))
-    return bool(MUTATING_TOOL_NAME.search(name))
+        return bool(shared.MUTATING_BASH.search(command) or re.search(r"(^|[^<])>{1,2}\s*\S", command))
+    return bool(shared.MUTATING_TOOL_NAME.search(name))
 
 
 def handle_prompt(event: dict[str, Any]) -> None:
     session = event.get("session_id")
+    # Nothing else in this protocol ever swept old session state, so it grows
+    # without bound. Reap once per turn, best effort: a sweep failure must never
+    # affect the turn itself.
+    try:
+        shared.reap_state(state_root(), keep=safe(session))
+    except Exception:
+        pass
     previous = load_state(session)
-    c = classify(str(event.get("prompt") or ""), previous)
+    c = shared.classify(
+        str(event.get("prompt") or ""), previous,
+        continuation_prefix=CONTINUATION_PREFIX, context_env=CONTEXT_ENV,
+    )
     c["delegation_queue"] = False
     c["delegation_queue_backend"] = None
     c["delegation_queue_strategy"] = None
@@ -516,7 +361,7 @@ def handle_prompt(event: dict[str, Any]) -> None:
     if not c.get("carry_forward"):
         reset_evidence(session)
     save_state(session, {
-        "version": PROTOCOL_VERSION,
+        "protocol_version": shared.PROTOCOL_VERSION,
         "prompt": str(event.get("prompt") or ""),
         "turn_id": str(event.get("turn_id") or ""),
         **c,
@@ -565,11 +410,37 @@ def handle_subagent_stop(event: dict[str, Any]) -> None:
         touch(finished_dir(session) / key)
 
 
+def result_failed(event: dict[str, Any]) -> bool:
+    """Whether this PostToolUse delivery reports the Agent call itself failing.
+
+    Codex, unlike Claude's dedicated PostToolUseFailure event, fires this hook on
+    every completed Agent call -- success included. A successful worker's own
+    report can legitimately quote an error string it diagnosed or fixed (e.g.
+    "permission denied"), so scanning `tool_response` unconditionally would read
+    that success as spawn-unavailability and silently disable enforcement for
+    the rest of the turn. Only look inside the response once the event's own
+    outcome fields say the call itself failed.
+    """
+    if event.get("is_error") is True or event.get("success") is False:
+        return True
+    if str(event.get("status") or "").lower() in ("error", "failed", "failure"):
+        return True
+    exit_code = event.get("exit_code")
+    if isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0:
+        return True
+    response = event.get("tool_response")
+    if isinstance(response, dict) and (response.get("is_error") is True or response.get("error")):
+        return True
+    return False
+
+
 def handle_agent_result(event: dict[str, Any]) -> None:
+    if not result_failed(event):
+        return
     session = event.get("session_id")
     response = event.get("tool_response")
     text = json.dumps(response, ensure_ascii=False) if not isinstance(response, str) else response
-    if not SPAWN_UNAVAILABLE.search(text):
+    if not shared.SPAWN_UNAVAILABLE.search(text):
         return
     if marker(session, "delegated").exists():
         touch(marker(session, "multi-unavailable"))
@@ -674,6 +545,12 @@ def handle_stop(event: dict[str, Any]) -> None:
 
 
 def main() -> int:
+    if shared is None:
+        # Neither the installed copy nor this clone's own module could be
+        # loaded. Emitting nothing and returning success degrades the hook to
+        # a no-op for every mode rather than crash or block a turn on a
+        # missing dependency.
+        return 0
     if len(sys.argv) != 2:
         print("usage: delegation-enforcer.py <prompt|subagent-start|subagent-stop|agent-result|pretool|stop>", file=sys.stderr)
         return 2
