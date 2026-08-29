@@ -10,6 +10,8 @@ The protocol is supplementary: existing applicable instructions, hooks, and sett
 
 For eligible bulk/high-volume work, preserve frontier-model effort for planning, ambiguity, difficult reasoning, architecture, integration, conflict resolution, and final validation. Delegate bounded work to the cheapest suitable worker.
 
+Eligibility is measured by size and shape, not only by wording. Delegation is mandatory for any task estimated at **25% or more of one compaction window** in reading, output, and tool traffic — about 50k tokens at a 200k window, and the hooks scale that number with the window the session actually reports (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`, `CODEX_MAX_CONTEXT_TOKENS`) — and for any task that runs to **three or more distinct steps**. Both halves inject those thresholds into every turn so the parent applies them even when the classifier does not fire, and both re-estimate as work grows. Genuinely small, single-step, or tightly coupled work stays in the parent.
+
 When a task contains multiple independent workstreams, use concurrent lifecycle-visible agents when runtime capacity permits it. A selected delegation queue is the exception: one lifecycle-visible dispatcher submits all workstreams to one mux-scheduler process. On a one-lane backend advertising a round-robin `queue_policy`, `virtual_slots` controls how many in-process virtual agents the scheduler interleaves on the physical lane.
 
 ```text
@@ -178,7 +180,7 @@ Codex now uses a four-layer implementation:
 1. **AGENTS authorization/semantic policy** — standing authorization for subagents and parallel delegation while preserving pre-existing global instructions.
 2. **Custom worker agents** — `bulk_worker` is the lifecycle-visible mux-scheduler dispatcher; `balanced_worker` remains pinned to GPT-5.6 Terra for work that needs more judgment.
 3. **Agent mux-scheduler** — capability-filtered, priority-ordered routing across native bindings and custom command/API adapters.
-4. **Lifecycle hooks** — `UserPromptSubmit`, `SubagentStart`, `SubagentStop`, `PreToolUse`, `PostToolUse(Agent)`, and `Stop` mechanically gate clear bulk/sharded work.
+4. **Lifecycle hooks** — `UserPromptSubmit`, `SubagentStart`, `SubagentStop`, `PreToolUse`, `PostToolUse(Agent)`, and `Stop` mechanically gate clear bulk/sharded, oversized, and multi-step work.
 
 For ordinary multi-subsystem tasks the Codex hook requires evidence of **actual overlapping workers**, not merely two sequential agent runs. When it selects a delegation queue, it instead requires one lifecycle-visible dispatcher and one queue batch; a round-robin mux-scheduler interleaves the batch's virtual agents on the provider lane and runs authorized command jobs concurrently.
 
@@ -212,7 +214,7 @@ Claude installation manages only the configured Claude home (normally `~/.claude
 - explicit subagent concurrency/depth defaults when absent;
 - experimental agent teams when absent, as an optional additional coordination capability.
 
-Claude enforcement is not text-only. The hook classifies clear bulk/sharded requests, records actual worker starts/stops, denies parent mutation before required delegation, and blocks turn completion until delegation requirements are satisfied. Independent-subsystem work ordinarily uses overlapping lifecycle-visible workers. A selected delegation queue instead uses one dispatcher and one queue batch; a round-robin mux-scheduler interleaves its virtual agents on the single lane.
+Claude enforcement is not text-only. The hook classifies clear bulk/sharded requests, stated token budgets at or above the size threshold, and multi-step requests, records actual worker starts/stops, denies parent mutation before required delegation, and blocks turn completion until delegation requirements are satisfied. Independent-subsystem work ordinarily uses overlapping lifecycle-visible workers. A selected delegation queue instead uses one dispatcher and one queue batch; a round-robin mux-scheduler interleaves its virtual agents on the single lane.
 
 See [`claude/INSTALL.md`](claude/INSTALL.md).
 
