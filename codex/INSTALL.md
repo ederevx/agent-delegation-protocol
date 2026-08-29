@@ -145,8 +145,8 @@ Installed events:
 - `UserPromptSubmit` — conservatively classifies the turn and injects delegation/routing policy as developer context.
 - `SubagentStart` — records actual delegation, tracks active workers with race-safe per-agent marker files, and injects bounded-worker requirements.
 - `SubagentStop` — removes the worker from the active set.
-- `PreToolUse` — denies parent mutation on a classified bulk/sharded turn until required delegation evidence exists. Codex can apply this to shell commands, `apply_patch`, MCP calls, and other local function tools.
-- `PostToolUse` matching `Agent` — observes failed Agent/spawn results so enforcement can fail open when the requested worker/runtime is genuinely unavailable.
+- `PreToolUse` — records Agent/spawn attempts and denies parent mutation on a classified bulk/sharded turn until required delegation evidence exists. Codex can apply this to shell commands, `apply_patch`, MCP calls, and other local function tools.
+- `PostToolUse` matching `Agent` — clears the matching attempt after a successful spawn. Codex does not emit this event for failed spawns, so an uncleared attempt lets enforcement fail open without parsing worker output.
 - `Stop` — prevents the parent turn from completing until required delegation requirements are met. For multi-subsystem work, the hook requires overlapping workers; backend calls may still be serialized by the mux-scheduler.
 
 The hook is a guardrail, not a sandbox. Specialized tool paths may opt out of normal tool hooks; the `Stop` gate provides a second enforcement point.

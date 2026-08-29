@@ -46,6 +46,10 @@ def load_hook_module(codex_home: Path) -> Any:
             os.environ.pop("CODEX_HOME", None)
         else:
             os.environ["CODEX_HOME"] = previous
+    # codex_home() reads the environment at call time, after the temporary
+    # override above has been restored. Bind direct module calls to their own
+    # fixture so these tests never read or write the live Codex installation.
+    module.codex_home = lambda: codex_home
     return module
 
 
@@ -941,24 +945,75 @@ def test_reap_removes_stale_sessions(home: Path) -> None:
             "reap_state removed the currently running session's state")
 
 
-def test_agent_result_failure_signal(home: Path) -> None:
-    """Codex fires PostToolUse for Agent on success and failure alike, unlike
-    Claude's dedicated failure-only event, so the hook must read the event's
-    own outcome fields rather than scan every response body for error text."""
-    session = "agent-result-signal"
-    call_hook(home, "agent-result", {
-        "session_id": session,
-        "tool_response": "Fixed by editing sudoers; the first attempt hit permission denied.",
-    })
-    marker_path = home / ".delegation-protocol" / "hook-state" / f"{session}.unavailable"
-    require(not marker_path.exists(),
-            "a successful result quoting an error string marked spawning unavailable")
+def test_agent_attempt_lifecycle(home: Path) -> None:
+    """Codex emits PostToolUse only for successful spawns.
 
-    call_hook(home, "agent-result", {
-        "session_id": session, "is_error": True, "tool_response": "permission denied",
+    PreToolUse records an attempt and success clears it by call id. A failed
+    spawn has no PostToolUse, so the uncleared attempt is the fail-open signal.
+    """
+    module = load_hook_module(home)
+
+    failed = "agent-attempt-failed"
+    call_hook(home, "prompt", {
+        "session_id": failed, "turn_id": "t1", "prompt": "Update 20 files.",
     })
-    require(marker_path.exists(),
-            "a genuinely failed result with a recognized signal was not marked unavailable")
+    call_hook(home, "pretool", {
+        "session_id": failed, "turn_id": "t1", "tool_name": "spawn_agent",
+        "tool_use_id": "failed-call", "tool_input": {},
+    })
+    require(module.has_pending_attempt(failed, after_delegation=False),
+            "PreToolUse did not record the first spawn attempt")
+    require(module.unmet(failed, module.load_state(failed)) is None,
+            "a spawn with no success PostToolUse did not fail open")
+
+    succeeded = "agent-attempt-succeeded"
+    call_hook(home, "prompt", {
+        "session_id": succeeded, "turn_id": "t1", "prompt": "Update 20 files.",
+    })
+    call_hook(home, "pretool", {
+        "session_id": succeeded, "turn_id": "t1", "tool_name": "spawn_agent",
+        "tool_use_id": "successful-call", "tool_input": {},
+    })
+    call_hook(home, "subagent-start", {
+        "session_id": succeeded, "turn_id": "t1", "agent_id": "worker-1",
+        "agent_type": "explorer",
+    })
+    call_hook(home, "agent-result", {
+        "session_id": succeeded, "turn_id": "t1", "tool_use_id": "successful-call",
+        "tool_response": "Worker diagnosed and fixed permission denied.",
+    })
+    require(not module.has_pending_attempt(succeeded, after_delegation=False),
+            "successful PostToolUse did not clear its spawn attempt")
+    require(not module.marker(succeeded, "unavailable").exists(),
+            "successful worker prose was misclassified as spawn unavailability")
+
+    fanout = "agent-attempt-fanout"
+    call_hook(home, "prompt", {
+        "session_id": fanout, "turn_id": "t1",
+        "prompt": "Update independent frontend and backend subsystems.",
+    })
+    call_hook(home, "pretool", {
+        "session_id": fanout, "turn_id": "t1", "tool_name": "spawn_agent",
+        "tool_use_id": "first-call", "tool_input": {},
+    })
+    call_hook(home, "subagent-start", {
+        "session_id": fanout, "turn_id": "t1", "agent_id": "worker-1",
+        "agent_type": "explorer",
+    })
+    call_hook(home, "agent-result", {
+        "session_id": fanout, "turn_id": "t1", "tool_use_id": "first-call",
+        "tool_response": '{"task_name":"/root/worker-1"}',
+    })
+    call_hook(home, "pretool", {
+        "session_id": fanout, "turn_id": "t1", "tool_name": "collaboration.spawn_agent",
+        "tool_use_id": "failed-second-call", "tool_input": {},
+    })
+    require(module.has_pending_attempt(fanout, after_delegation=True),
+            "a later fan-out attempt was not distinguished from the first spawn")
+    require(not module.marker(fanout, "fanout").exists(),
+            "the fixture unexpectedly recorded overlapping workers")
+    require(module.unmet(fanout, module.load_state(fanout)) is None,
+            "a failed later fan-out attempt did not fail open")
 
 
 def main() -> int:
@@ -987,7 +1042,7 @@ def main() -> int:
         test_classifier_loader_fallback(root / "loader-fallback")
         test_state_version_discarded(root / "state-version")
         test_reap_removes_stale_sessions(root / "reap")
-        test_agent_result_failure_signal(root / "agent-result-signal")
+        test_agent_attempt_lifecycle(root / "agent-attempt-lifecycle")
     print("Codex delegation protocol self-test: PASS")
     return 0
 
