@@ -4,10 +4,9 @@
 Modes:
   prompt           Classify the user turn and inject the delegation policy.
   subagent-start   Record actual worker overlap and inject worker constraints.
-  subagent-stop    Remove the worker from the active set and record it as finished-but-not-dismissed.
+  subagent-stop    Remove the worker from the active overlap set.
   agent-failure    Record spawn/runtime unavailability for fail-open handling.
-  pretool          Block parent mutation before required delegation occurs, observe worker
-                   dismissals, and block new spawns while finished workers are still held.
+  pretool          Block parent mutation before required delegation occurs.
   stop             Prevent completion before required delegation occurs.
 
 Classification is intentionally conservative and deterministic. It is delegated to the
@@ -143,85 +142,6 @@ def marker(session_id: Any, name: str) -> Path:
     return Path(str(turn_base(session_id)) + f".{name}")
 
 
-def finished_dir(session_id: Any) -> Path:
-    return Path(str(turn_base(session_id)) + ".finished")
-
-
-def dismissed_dir(session_id: Any) -> Path:
-    return Path(str(turn_base(session_id)) + ".dismissed")
-
-
-def known_dir(session_id: Any) -> Path:
-    """Workers this protocol actually launched, for the life of the session.
-
-    SubagentStop fires for agents the protocol never started -- runtime internals
-    that carry a nameless id no dismissal call can target. Only an agent recorded
-    here at SubagentStart may create a dismissal obligation.
-    """
-    return Path(str(turn_base(session_id)) + ".known")
-
-
-def nagged_dir(session_id: Any) -> Path:
-    """Workers whose outstanding debt has already been reported this turn."""
-    return Path(str(turn_base(session_id)) + ".nagged")
-
-
-def worker_key(value: Any) -> str:
-    """Normalize an agent identity so a spawn id and a dismissal target compare equal.
-
-    Runtimes report a worker under an internal id that is not what a dismissal call
-    accepts: Claude Code reports `a<name>-<hex>` on SubagentStop while TaskStop takes
-    the bare name, and other builds use `name@session`. Only the name is common to
-    both, so strip the session suffix here and let matches() handle the rest.
-    """
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    return safe_session_id(raw.split("@", 1)[0].lower())
-
-
-def keys_match(finished: str, target: str) -> bool:
-    """Whether a dismissal target names a finished worker.
-
-    The two never have to be identical: a runtime id wraps the worker name in a
-    prefix and a random suffix, so containment either way is the reliable test.
-    Short targets are required to match exactly so a stray id cannot clear
-    everything.
-    """
-    if finished == target:
-        return True
-    if len(target) < 4 or len(finished) < 4:
-        return False
-    return target in finished or finished in target
-
-
-def outstanding_workers(session_id: Any) -> list[str]:
-    """Workers whose task finished but which were never dismissed, oldest first."""
-    finished = finished_dir(session_id)
-    if not finished.exists():
-        return []
-    dismissed = dismissed_dir(session_id)
-    targets = [p.name for p in dismissed.iterdir() if p.is_file()] if dismissed.exists() else []
-    names = []
-    for path in finished.iterdir():
-        if not path.is_file():
-            continue
-        if any(keys_match(path.name, target) for target in targets):
-            continue
-        names.append((path.stat().st_mtime, path.name))
-    return [name for _, name in sorted(names)]
-
-
-def dismissal_reason(names: list[str], action: str) -> str:
-    listed = ", ".join(names)
-    return (
-        f"Delegation protocol: {len(names)} finished worker(s) are still held and occupying "
-        f"subagent capacity ({listed}). A worker stays alive and idle after its task completes; "
-        f"it is only released by TaskStop. Dismiss each one with TaskStop (pass the worker name "
-        f"as task_id) {action}."
-    )
-
-
 def load_state(session_id: Any) -> dict[str, Any]:
     path = state_path(session_id)
     if not path.exists():
@@ -253,15 +173,25 @@ def save_state(session_id: Any, data: dict[str, Any]) -> None:
 
 
 def reset_evidence(session_id: Any) -> None:
+    # Remove legacy dismissal-debt directories during upgrades as well. Current
+    # Claude tracking only uses `.active`, but stale debt must not accumulate.
+    base = str(turn_base(session_id))
     for directory in (
         active_dir(session_id),
-        finished_dir(session_id),
-        dismissed_dir(session_id),
-        nagged_dir(session_id),
+        Path(base + ".finished"),
+        Path(base + ".dismissed"),
+        Path(base + ".known"),
+        Path(base + ".nagged"),
     ):
         if directory.exists():
             shutil.rmtree(directory, ignore_errors=True)
-    for name in ("delegated", "fanout", "unavailable", "multi-unavailable", "dismissal-nagged"):
+    for name in (
+        "delegated",
+        "fanout",
+        "unavailable",
+        "multi-unavailable",
+        "dismissal-nagged",  # legacy
+    ):
         try:
             marker(session_id, name).unlink()
         except FileNotFoundError:
@@ -444,9 +374,6 @@ def handle_subagent_start(event: dict[str, Any]) -> None:
     directory = active_dir(session_id)
     directory.mkdir(parents=True, exist_ok=True)
     touch(directory / agent_id)
-    key = worker_key(event.get("agent_id"))
-    if key:
-        touch(known_dir(session_id) / key)
     touch(marker(session_id, "delegated"))
     try:
         if sum(1 for p in directory.iterdir() if p.is_file()) >= 2:
@@ -478,15 +405,6 @@ def handle_subagent_stop(event: dict[str, Any]) -> None:
         path.unlink()
     except FileNotFoundError:
         pass
-
-    # The task ended, but the worker itself is still alive and idle until it is dismissed.
-    # Only for a worker this protocol launched: the runtime also stops agents of its own,
-    # under nameless ids that no dismissal call can name, and charging the parent for those
-    # accrues a debt that can never be paid.
-    key = worker_key(agent_id)
-    if key and (known_dir(session_id) / key).exists():
-        touch(finished_dir(session_id) / key)
-
 
 def handle_agent_failure(event: dict[str, Any]) -> None:
     session_id = event.get("session_id")
@@ -538,31 +456,10 @@ def handle_pretool(event: dict[str, Any]) -> None:
         return
     session_id = event.get("session_id")
     tool = str(event.get("tool_name") or "")
-    tool_input = event.get("tool_input") or {}
-
-    # Observe dismissals at intent rather than at outcome. TaskStop against a worker that is
-    # already gone still clears the obligation, so a failed call can never wedge the session.
-    if tool == "TaskStop":
-        key = worker_key(tool_input.get("task_id") or tool_input.get("shell_id"))
-        if key:
-            touch(dismissed_dir(session_id) / key)
-        return
-
-    # Reclaim finished workers before creating new ones.
+    # Agent is delegation evidence, not parent mutation. Claude Code releases a
+    # foreground Agent when its result returns; TaskStop addresses live background
+    # task ids, not that completed Agent id, so no dismissal debt is tracked here.
     if tool == "Agent":
-        outstanding = outstanding_workers(session_id)
-        if outstanding:
-            emit(
-                {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": dismissal_reason(
-                            outstanding, "before spawning another worker"
-                        ),
-                    }
-                }
-            )
         return
 
     if not tool_is_mutating(event):
@@ -586,45 +483,6 @@ def handle_stop(event: dict[str, Any]) -> None:
     reason = unmet_reason(session_id, state)
     if reason:
         emit({"decision": "block", "reason": reason + " Do not stop yet; satisfy delegation first."})
-        return
-
-    outstanding = outstanding_workers(session_id)
-    if outstanding:
-        # Block once, then let the turn end. A worker that the runtime has already
-        # torn down can never be dismissed, so an unconditional block would loop the
-        # Stop hook forever on a debt nothing can pay.
-        nagged = marker(session_id, "dismissal-nagged")
-        if not nagged.exists():
-            touch(nagged)
-            for name in outstanding:
-                touch(nagged_dir(session_id) / name)
-            emit(
-                {
-                    "decision": "block",
-                    "reason": dismissal_reason(outstanding, "before ending the turn"),
-                }
-            )
-            return
-
-        # Past the one block, surface only debts not yet reported. Repeating a debt
-        # the parent can no longer pay just nags it on every Stop; the spawn gate
-        # still holds the obligation either way.
-        unreported = [w for w in outstanding if not (nagged_dir(session_id) / w).exists()]
-        if not unreported:
-            return
-        for name in unreported:
-            touch(nagged_dir(session_id) / name)
-        emit(
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "Stop",
-                    "additionalContext": dismissal_reason(
-                        unreported,
-                        "if they are still alive; they are released at session end otherwise",
-                    ),
-                }
-            }
-        )
         return
 
     if state:

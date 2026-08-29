@@ -83,4 +83,4 @@ Do not spawn another bulk dispatcher. For a validated native handoff, perform th
 
 For native execution, return a concise report containing the work completed, files changed or inspected, validation and outcomes, assumptions, blockers or interface concerns, and remaining uncertainty. For external execution, return the terminal receipt and any `evidence.patch` in full. The parent owns integration and final acceptance.
 
-Return the report through the foreground Agent result. You remain alive and hold a slot after completion, so the parent dismisses you after reading the report.
+Return the report through the foreground Agent result. Claude Code releases the foreground Agent after that result; no parent dismissal is required.

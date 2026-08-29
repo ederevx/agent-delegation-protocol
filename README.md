@@ -107,19 +107,19 @@ Workers run in the parent's working tree and cannot see its uncommitted state, s
 
 ## Worker lifecycle
 
-A worker does not disappear when its task ends. It goes idle and keeps holding a concurrency slot, so the parent must dismiss it once its report has been read:
+Worker lifetime is host-specific. Codex workers go idle and keep holding a concurrency slot, so the Codex parent must dismiss one after reading its report:
 
 ```
 parent spawns worker → worker works → worker reports
         ↓                                    ↓
    slot occupied ←──── still idle ←──── task finished
         ↓
-parent dismisses worker (TaskStop / build's true dismiss call)
+Codex parent dismisses worker (the build's true dismiss call)
         ↓
    slot released → available for the next worker
 ```
 
-Both hooks record each finished-but-undismissed worker and gate on it: new spawns are denied and turn completion is blocked until the outstanding workers are dismissed. The record is per-turn and cleared by the next prompt, and the stop gate blocks at most once per turn, so a worker that never reports — or one the runtime already tore down — cannot wedge the session.
+The Codex hook records each finished-but-undismissed worker and gates on it. Claude Code instead releases a foreground `Agent` when its result returns; `TaskStop` addresses live background-task IDs, not completed foreground Agent IDs. The Claude hook therefore tracks overlap only and never invents dismissal debt after `SubagentStop`.
 
 ## Changes belong in this repository
 
