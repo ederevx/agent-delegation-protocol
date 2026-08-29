@@ -89,10 +89,13 @@ The protocol deliberately does not require per-call `model` overrides for the no
 The installer also adds symlinks under `$CODEX_HOME/.delegation-protocol/`:
 
 ```text
-mux-scheduler.py   -> <clone>/scripts/agents/mux-scheduler.py
-catalog          -> <clone>/agents/catalog
-mux-scheduler.json -> <clone>/agents/mux-scheduler.json
+mux-scheduler.py          -> <clone>/scripts/agents/mux-scheduler.py
+delegation-classifier.py  -> <clone>/scripts/agents/delegation-classifier.py
+catalog                   -> <clone>/agents/catalog
+mux-scheduler.json        -> <clone>/agents/mux-scheduler.json
 ```
+
+`delegation-classifier.py` is the word lists, thresholds, and `classify()` implementation shared with the Claude half's hook, so both agents enforce the same policy from one source. The hook resolves it from this installed location first and falls back to the clone's own copy when it is not yet installed.
 
 The bulk worker submits one bounded common JSON task or ordered batch with:
 
@@ -187,6 +190,9 @@ Windows PowerShell:
 ```
 
 Uninstall removes only protocol-owned hook handlers, symlinks, an unmodified managed worker copy,
-and known state files, and restores a preserved prior `AGENTS.override.md` where applicable. A
-modified worker copy and unrelated files inside `.delegation-protocol` are preserved. It does not
+and known state files, and restores a preserved prior `AGENTS.override.md` where applicable. It
+also removes the `hook-state/` directory under `.delegation-protocol/` -- the per-session turn
+state the hooks write and, since this version, periodically reap -- since it is entirely
+protocol-owned. A modified worker copy and unrelated files inside `.delegation-protocol` are
+preserved. It does not
 modify Claude.

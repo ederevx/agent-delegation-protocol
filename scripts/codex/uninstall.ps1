@@ -56,6 +56,7 @@ $LegacyBulkSource = Join-Path $RepoRoot 'codex\agents\bulk-worker.toml'
 $BalancedSource = Join-Path $RepoRoot 'codex\agents\balanced-worker.toml'
 $HookSource = Join-Path $RepoRoot 'codex\hooks\delegation-enforcer.py'
 $MuxSource = Join-Path $RepoRoot 'scripts\agents\mux-scheduler.py'
+$ClassifierSource = Join-Path $RepoRoot 'scripts\agents\delegation-classifier.py'
 $CatalogSource = Join-Path $RepoRoot 'agents\catalog'
 $RoutesSource = Join-Path $RepoRoot 'agents\mux-scheduler.json'
 $BulkDest = Join-Path $CodexHome 'agents\bulk_worker.toml'
@@ -63,6 +64,7 @@ $LegacyBulkDest = Join-Path $CodexHome 'agents\bulk-worker.toml'
 $BalancedDest = Join-Path $CodexHome 'agents\balanced-worker.toml'
 $HookDest = Join-Path $CodexHome 'hooks\delegation-enforcer.py'
 $MuxDest = Join-Path $StateDir 'mux-scheduler.py'
+$ClassifierDest = Join-Path $StateDir 'delegation-classifier.py'
 $CatalogDest = Join-Path $StateDir 'catalog'
 $RoutesDest = Join-Path $StateDir 'mux-scheduler.json'
 
@@ -74,6 +76,7 @@ Remove-LegacyWorkerIfOurs $LegacyBulkDest $LegacyBulkSource $LegacyBulkHash
 Remove-IfOurs $BalancedDest $BalancedSource
 Remove-IfOurs $HookDest $HookSource
 Remove-IfOurs $MuxDest $MuxSource
+Remove-IfOurs $ClassifierDest $ClassifierSource
 Remove-IfOurs (Join-Path $StateDir 'multiplexer.py') (Join-Path $RepoRoot 'scripts\agents\multiplexer.py')
 Remove-IfOurs $CatalogDest $CatalogSource
 Remove-IfOurs $RoutesDest $RoutesSource
@@ -102,6 +105,10 @@ foreach ($owned in @(
 )) {
     $path = Join-Path $StateDir $owned
     if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+}
+$HookStateDir = Join-Path $StateDir 'hook-state'
+if (Test-Path -LiteralPath $HookStateDir) {
+    Remove-Item -LiteralPath $HookStateDir -Recurse -Force
 }
 if ((Test-Path $StateDir) -and @(Get-ChildItem -LiteralPath $StateDir -Force).Count -eq 0) {
     Remove-Item -LiteralPath $StateDir -Force
