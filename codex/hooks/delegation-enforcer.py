@@ -12,7 +12,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-PROTOCOL_VERSION = 4
+PROTOCOL_VERSION = 5
 CONTINUATION_PREFIX = "DELEGATION_PROTOCOL_CONTINUE:"
 
 BULK_WORDS = (
@@ -23,6 +23,41 @@ BULK_WORDS = (
     "across the repository", "repo-wide", "repository-wide", "codebase-wide",
     "large-scale", "large scale",
 )
+# Size and shape thresholds. A turn is delegation-eligible on how much work it is,
+# not only on how the user worded it: a job that will burn a large share of one
+# compaction window, or that runs through several distinct steps, is cheaper and
+# safer to plan in the parent and execute in workers. The size threshold is a
+# share of the window rather than a fixed count, so a session configured for a
+# larger or smaller window keeps the same meaning.
+DELEGATION_WINDOW_SHARE = 0.25
+DEFAULT_CONTEXT_WINDOW = 200_000
+STEP_DELEGATION_THRESHOLD = 3
+LONG_BRIEF_WORDS = 150
+
+TOKEN_BUDGET = re.compile(
+    r"\b(\d+(?:[.,]\d+)*)\s*([km])?\b[\s-]*(?:tokens?|token budget)\b", re.IGNORECASE
+)
+SIZE_WORDS = (
+    "large task", "big task", "huge", "massive", "extensive", "comprehensive",
+    "exhaustive", "end-to-end", "end to end", "entire repo", "entire repository",
+    "entire codebase", "whole repo", "whole repository", "whole codebase",
+    "from scratch", "overhaul", "rearchitect", "re-architect", "long-running",
+    "long running", "sweep",
+)
+MULTI_STEP_WORDS = (
+    "multi-step", "multi step", "many steps", "several steps", "multiple steps",
+    "step by step", "step-by-step", "each step", "series of steps", "sequence of steps",
+    "multiple phases", "several phases", "in stages", "one step at a time",
+    "multi-stage", "multi stage",
+)
+STEP_MARKERS = (
+    r"\bfirst(?:ly)?\b", r"\bsecond(?:ly)?\b", r"\bthird(?:ly)?\b", r"\bfourth\b",
+    r"\bfifth\b", r"\bthen\b", r"\bnext\b", r"\bafter (?:that|which|this)\b",
+    r"\bafterwards?\b", r"\bonce (?:that|it|this)\b", r"\bfollowed by\b",
+    r"\bfinally\b", r"\blastly\b",
+)
+ENUMERATION = re.compile(r"(?m)^\s*(?:\d+[.)]|step\s+\d+\b|[-*\u2022]\s+\S)")
+
 ACTION_WORDS = (
     "implement", "build", "create", "add", "change", "update", "edit", "modify",
     "fix", "refactor", "migrate", "convert", "rewrite", "rename", "process",
@@ -286,6 +321,50 @@ def explicit_count(text: str) -> int:
     return max(values, default=0)
 
 
+def context_window() -> int:
+    """Tokens the parent can hold before compaction, as configured."""
+    for name in ("CODEX_MAX_CONTEXT_TOKENS", "CODEX_CONTEXT_WINDOW"):
+        raw = os.environ.get(name)
+        if not raw:
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            continue
+        if value > 0:
+            return value
+    return DEFAULT_CONTEXT_WINDOW
+
+
+def token_threshold() -> int:
+    """Work at or above this many tokens must be delegated."""
+    return max(1, int(context_window() * DELEGATION_WINDOW_SHARE))
+
+
+def explicit_tokens(text: str) -> int:
+    """Largest token budget the turn itself names, in tokens."""
+    scale = {"k": 1_000, "m": 1_000_000}
+    values: list[int] = []
+    for match in TOKEN_BUDGET.finditer(text):
+        try:
+            amount = float(match.group(1).replace(",", ""))
+        except ValueError:
+            continue
+        values.append(int(amount * scale.get((match.group(2) or "").lower(), 1)))
+    return max(values, default=0)
+
+
+def step_count(text: str) -> int:
+    """How many distinct steps the turn enumerates, by ordering words or by list."""
+    ordered = sum(len(re.findall(pattern, text)) for pattern in STEP_MARKERS)
+    if ordered and not re.search(r"\bfirst(?:ly)?\b", text):
+        # "X, then Y, then Z" names two connectors but describes three steps.
+        # A brief that opens with "first" already labels its own first step.
+        ordered += 1
+    listed = len(ENUMERATION.findall(text))
+    return max(ordered, listed)
+
+
 def classify(prompt: str, previous: dict[str, Any]) -> dict[str, Any]:
     text = (prompt or "").strip()
     lower = text.lower()
@@ -293,7 +372,13 @@ def classify(prompt: str, previous: dict[str, Any]) -> dict[str, Any]:
     explicit_no = any(re.search(p, lower) for p in NO_DELEGATION_PATTERNS)
     action = any(w in lower for w in ACTION_WORDS)
     count = explicit_count(lower)
-    bulk = any(w in lower for w in BULK_WORDS) or count >= 4
+    bulk = any(w in lower for w in BULK_WORDS) or count >= 3
+    tokens = explicit_tokens(lower)
+    steps = step_count(lower)
+    threshold = token_threshold()
+    token_signal = tokens >= threshold
+    size = token_signal or any(w in lower for w in SIZE_WORDS) or len(words) >= LONG_BRIEF_WORDS
+    step = any(w in lower for w in MULTI_STEP_WORDS) or steps >= STEP_DELEGATION_THRESHOLD
     independent = "independent" in lower and any(w in lower for w in SHARD_WORDS)
     multiple = "multiple" in lower and any(w in lower for w in SHARD_WORDS)
     domains = sum(1 for family in (
@@ -308,13 +393,27 @@ def classify(prompt: str, previous: dict[str, Any]) -> dict[str, Any]:
     followup = len(words) <= 14 and any(re.search(p, lower) for p in FOLLOWUP_PATTERNS)
     protocol_continuation = text.startswith(CONTINUATION_PREFIX)
     carry = bool(previous.get("requires_delegation")) and not bool(previous.get("completed")) and (followup or protocol_continuation)
-    requires = False if explicit_no else ((action and (bulk or shard)) or carry)
+    requires = False if explicit_no else (
+        (action and (bulk or shard or size or step)) or token_signal or carry
+    )
     multi = False if explicit_no else (requires and (shard or bool(previous.get("requires_multi") and carry)))
     reasons: list[str] = []
-    if count >= 4:
+    if count >= 3:
         reasons.append(f"explicit unit count {count}")
-    if bulk and count < 4:
+    if bulk and count < 3:
         reasons.append("bulk/high-volume wording")
+    if token_signal:
+        reasons.append(
+            f"stated budget of {tokens} tokens, at or above the {threshold}-token threshold "
+            f"({int(DELEGATION_WINDOW_SHARE * 100)}% of a {context_window()}-token window)"
+        )
+    elif size:
+        reasons.append("large-task wording or a long, detailed brief")
+    if step:
+        reasons.append(
+            f"multi-step work ({steps} steps enumerated)"
+            if steps >= STEP_DELEGATION_THRESHOLD else "multi-step wording"
+        )
     if shard:
         reasons.append("independent/separable subsystem wording")
     if carry:
@@ -326,10 +425,12 @@ def classify(prompt: str, previous: dict[str, Any]) -> dict[str, Any]:
         "classification_reasons": reasons,
         "explicit_no_delegation": explicit_no,
         "carry_forward": carry,
+        "token_threshold": threshold,
     }
 
 
 def policy_context(c: dict[str, Any]) -> str:
+    threshold = int(c.get("token_threshold") or token_threshold())
     base_text = (
         "DELEGATION PROTOCOL (hook-enforced): preserve the frontier parent for planning, ambiguity, difficult reasoning, "
         "integration, conflict resolution, and final validation. Prefer the installed `bulk_worker` custom agent "
@@ -339,7 +440,13 @@ def policy_context(c: dict[str, Any]) -> str:
         "and require concise evidence reports. The parent is the single integration authority. "
         "A delivered FINAL_ANSWER or final-status notification counts as collecting a worker's result; immediately after "
         "reading it, call the build's true stop/dismiss primitive before doing more work. `interrupt_agent` is not a "
-        "dismissal when its contract says the agent remains available."
+        "dismissal when its contract says the agent remains available.\n"
+        "SIZE AND SHAPE THRESHOLDS (apply these yourself, whether or not this hook flagged the turn): estimate the "
+        f"work before starting it. Delegate any task you estimate at {threshold}+ tokens of reading, output, and "
+        f"tool traffic ({int(DELEGATION_WINDOW_SHARE * 100)}% of one compaction window), and any task that runs to "
+        f"{STEP_DELEGATION_THRESHOLD} or more distinct steps. Plan and integrate in the parent; hand the execution "
+        "to workers, one bounded unit each, and re-estimate when the work turns out larger than it looked. Keep "
+        "only genuinely small, single-step, or tightly coupled work in the parent."
     )
     if not c.get("requires_delegation"):
         return base_text
