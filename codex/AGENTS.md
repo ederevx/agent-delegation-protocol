@@ -24,7 +24,14 @@ For cooperative backends, the mux-scheduler also owns authorized command executi
 
 ## Mandatory delegation
 
-When work contains at least four substantially independent/repetitive units, is otherwise clearly high-volume, or can be cleanly sharded into bounded independently verifiable units, delegate rather than spending the parent context on all mechanical execution when subagents are available and delegation does not create disproportionate risk.
+When work contains at least three substantially independent/repetitive units, is otherwise clearly high-volume, or can be cleanly sharded into bounded independently verifiable units, delegate rather than spending the parent context on all mechanical execution when subagents are available and delegation does not create disproportionate risk.
+
+Two further thresholds are mandatory on their own, and the hook classifier is a floor rather than the whole test. Estimate size and shape before starting:
+
+- **Size.** Delegate any task estimated at **25% or more of one compaction window** in reading, output, and tool traffic — about 50k tokens at a 200k window; the hook scales the number with the configured window.
+- **Steps.** Delegate any task that runs to **three or more distinct steps**, whether the user enumerated them or the plan did. Sequential steps still delegate: one worker per step where they are independent, one dispatcher batch where order must hold.
+
+Re-estimate mid-task. Work that turns out larger or longer than it looked crosses the threshold when you notice, not on the next turn: stop, partition the remainder, and delegate it. The parent still owns planning, estimation, integration, and final validation at any size; what is delegated is execution.
 
 Do not manufacture delegation for tiny, inseparable, or tightly coupled work.
 
@@ -68,7 +75,7 @@ Ad-hoc local edits are lost on reinstall, diverge silently between machines, and
 
 ## Hook interaction
 
-The installed Codex hook may classify a clear bulk/sharded turn as delegation-required, inject this policy as developer context, deny parent mutation until required delegation evidence exists, select delegation queue only through the installed mux-scheduler for a validated available single-stream backend, require one lifecycle dispatcher for any selected queue and actual overlapping workers for ordinary native multi-subsystem fan-out, block turn completion until delegation requirements are satisfied, and record each worker whose task finished so that new spawns and turn completion are gated until those workers are dismissed.
+The installed Codex hook may classify a clear bulk/sharded turn, a turn whose stated token budget reaches the size threshold, or a multi-step turn as delegation-required, inject this policy as developer context, deny parent mutation until required delegation evidence exists, select delegation queue only through the installed mux-scheduler for a validated available single-stream backend, require one lifecycle dispatcher for any selected queue and actual overlapping workers for ordinary native multi-subsystem fan-out, block turn completion until delegation requirements are satisfied, and record each worker whose task finished so that new spawns and turn completion are gated until those workers are dismissed.
 
 If the hook does not classify a task mechanically but this policy clearly applies, follow this policy proactively anyway.
 
