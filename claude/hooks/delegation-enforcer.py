@@ -25,7 +25,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-PROTOCOL_VERSION = 8
+PROTOCOL_VERSION = 9
 
 BULK_WORDS = (
     "bulk", "batch", "high-volume", "high volume", "many files", "many modules",
@@ -35,6 +35,47 @@ BULK_WORDS = (
     "across the repository", "repo-wide", "repository-wide", "codebase-wide",
     "large-scale", "large scale",
 )
+
+# Size and shape thresholds. A task is delegation-eligible on how much work it is,
+# not only on how the user worded it: a job that will burn a large share of one
+# auto-compact window, or that runs through several distinct steps, is cheaper
+# and safer to plan here and execute in workers.
+#
+# The size threshold is a share of the window rather than a fixed count, so a
+# session configured for a larger or smaller window keeps the same meaning:
+# a quarter of everything the parent can hold before it compacts.
+DELEGATION_WINDOW_SHARE = 0.25
+DEFAULT_CONTEXT_WINDOW = 200_000
+STEP_DELEGATION_THRESHOLD = 3
+LONG_BRIEF_WORDS = 150
+
+TOKEN_BUDGET = re.compile(
+    r"\b(\d+(?:[.,]\d+)*)\s*([km])?\b[\s-]*(?:tokens?|token budget)\b", re.IGNORECASE
+)
+
+SIZE_WORDS = (
+    "large task", "big task", "huge", "massive", "extensive", "comprehensive",
+    "exhaustive", "end-to-end", "end to end", "entire repo", "entire repository",
+    "entire codebase", "whole repo", "whole repository", "whole codebase",
+    "from scratch", "overhaul", "rearchitect", "re-architect", "long-running",
+    "long running", "sweep",
+)
+
+MULTI_STEP_WORDS = (
+    "multi-step", "multi step", "many steps", "several steps", "multiple steps",
+    "step by step", "step-by-step", "each step", "series of steps", "sequence of steps",
+    "multiple phases", "several phases", "in stages", "one step at a time",
+    "multi-stage", "multi stage",
+)
+
+STEP_MARKERS = (
+    r"\bfirst(?:ly)?\b", r"\bsecond(?:ly)?\b", r"\bthird(?:ly)?\b", r"\bfourth\b",
+    r"\bfifth\b", r"\bthen\b", r"\bnext\b", r"\bafter (?:that|which|this)\b",
+    r"\bafterwards?\b", r"\bonce (?:that|it|this)\b", r"\bfollowed by\b",
+    r"\bfinally\b", r"\blastly\b",
+)
+
+ENUMERATION = re.compile(r"(?m)^\s*(?:\d+[.)]|step\s+\d+\b|[-*\u2022]\s+\S)")
 
 ACTION_WORDS = (
     "implement", "build", "create", "add", "change", "update", "edit", "modify",
@@ -335,6 +376,54 @@ def explicit_count(text: str) -> int:
     return max(values, default=0)
 
 
+def context_window() -> int:
+    """Tokens the parent can hold before auto-compaction, as configured."""
+    for name in ("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CI_CLAUDE_CONTEXT_WINDOW"):
+        raw = os.environ.get(name)
+        if not raw:
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            continue
+        if value > 0:
+            return value
+    return DEFAULT_CONTEXT_WINDOW
+
+
+def token_threshold() -> int:
+    """Work at or above this many tokens must be delegated."""
+    return max(1, int(context_window() * DELEGATION_WINDOW_SHARE))
+
+
+def explicit_tokens(text: str) -> int:
+    """Largest token budget the prompt itself names, in tokens."""
+    scale = {"k": 1_000, "m": 1_000_000}
+    values: list[int] = []
+    for match in TOKEN_BUDGET.finditer(text):
+        try:
+            amount = float(match.group(1).replace(",", ""))
+        except ValueError:
+            continue
+        values.append(int(amount * scale.get((match.group(2) or "").lower(), 1)))
+    return max(values, default=0)
+
+
+def step_count(text: str) -> int:
+    """How many distinct steps the prompt enumerates, by ordering words or by list.
+
+    Both readings are counted and the larger wins: a numbered brief and a prose
+    "first ... then ... finally" describe the same multi-step shape.
+    """
+    ordered = sum(len(re.findall(pattern, text)) for pattern in STEP_MARKERS)
+    if ordered and not re.search(r"\bfirst(?:ly)?\b", text):
+        # "X, then Y, then Z" names two connectors but describes three steps.
+        # A brief that opens with "first" already labels its own first step.
+        ordered += 1
+    listed = len(ENUMERATION.findall(text))
+    return max(ordered, listed)
+
+
 def concurrency_capacity() -> int:
     raw = os.environ.get("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS")
     if not raw:
@@ -354,7 +443,19 @@ def classify(prompt: str, previous: dict[str, Any]) -> dict[str, Any]:
     explicit_no = any(re.search(pattern, lower) for pattern in NO_DELEGATION_PATTERNS)
     action = contains_any(lower, ACTION_WORDS)
     count = explicit_count(lower)
-    bulk_signal = contains_any(lower, BULK_WORDS) or count >= 4
+    bulk_signal = contains_any(lower, BULK_WORDS) or count >= 3
+    tokens = explicit_tokens(lower)
+    steps = step_count(lower)
+    threshold = token_threshold()
+    token_signal = tokens >= threshold
+    size_signal = (
+        token_signal
+        or contains_any(lower, SIZE_WORDS)
+        or len(words) >= LONG_BRIEF_WORDS
+    )
+    step_signal = (
+        contains_any(lower, MULTI_STEP_WORDS) or steps >= STEP_DELEGATION_THRESHOLD
+    )
     multiple_signal = "multiple" in lower and contains_any(lower, SHARD_WORDS)
     independent_signal = "independent" in lower and contains_any(lower, SHARD_WORDS)
 
@@ -384,16 +485,32 @@ def classify(prompt: str, previous: dict[str, Any]) -> dict[str, Any]:
 
     followup = len(words) <= 12 and any(re.search(p, lower) for p in FOLLOWUP_PATTERNS)
     carry = bool(previous.get("requires_delegation")) and not bool(previous.get("completed")) and followup
-    requires = False if explicit_no else ((action and (bulk_signal or shard_signal)) or carry)
+    requires = False if explicit_no else (
+        (action and (bulk_signal or shard_signal or size_signal or step_signal))
+        or token_signal
+        or carry
+    )
     multi = False if explicit_no else (
         requires and (shard_signal or bool(previous.get("requires_multi") and carry))
     )
 
     reasons: list[str] = []
-    if count >= 4:
+    if count >= 3:
         reasons.append(f"explicit unit count {count}")
-    if bulk_signal and count < 4:
+    if bulk_signal and count < 3:
         reasons.append("bulk/high-volume wording")
+    if token_signal:
+        reasons.append(
+            f"stated budget of {tokens} tokens, at or above the {threshold}-token "
+            f"threshold ({int(DELEGATION_WINDOW_SHARE * 100)}% of a {context_window()}-token window)"
+        )
+    elif size_signal:
+        reasons.append("large-task wording or a long, detailed brief")
+    if step_signal:
+        reasons.append(
+            f"multi-step work ({steps} steps enumerated)" if steps >= STEP_DELEGATION_THRESHOLD
+            else "multi-step wording"
+        )
     if shard_signal:
         reasons.append("independent/separable subsystem wording")
     if carry:
@@ -406,12 +523,14 @@ def classify(prompt: str, previous: dict[str, Any]) -> dict[str, Any]:
         "requires_multi": multi,
         "min_agents": min_agents,
         "concurrency_capacity": capacity,
+        "token_threshold": threshold,
         "classification_reasons": reasons,
         "explicit_no_delegation": explicit_no,
     }
 
 
 def policy_context(classification: dict[str, Any]) -> str:
+    threshold = int(classification.get("token_threshold") or token_threshold())
     base = (
         "DELEGATION PROTOCOL (hook-enforced): preserve the parent frontier model for planning, ambiguity, "
         "integration, conflict resolution, and final validation. For bounded repetitive or high-volume work, "
@@ -421,7 +540,13 @@ def policy_context(classification: dict[str, Any]) -> str:
         "queue. Do not serialize naturally parallel "
         "work. Give workers non-overlapping scope, acceptance criteria, validation commands, and require "
         "concise result reports. The parent remains the single integration authority. Agent teams may be used "
-        "when enabled and beneficial, but ordinary subagents remain the required baseline."
+        "when enabled and beneficial, but ordinary subagents remain the required baseline.\n"
+        "SIZE AND SHAPE THRESHOLDS (apply these yourself, whether or not this hook flagged the turn): estimate "
+        f"the work before starting it. Delegate any task you estimate at {threshold}+ tokens of reading, output, "
+        f"and tool traffic ({int(DELEGATION_WINDOW_SHARE * 100)}% of one auto-compact window), and any task that "
+        f"runs to {STEP_DELEGATION_THRESHOLD} or more distinct steps. Plan and integrate here; hand the execution "
+        "to workers, one bounded unit each, and re-estimate when the work turns out larger than it looked. Keep "
+        "only genuinely small, single-step, or tightly coupled work in this conversation."
     )
     if classification.get("requires_delegation"):
         minimum = int(classification.get("min_agents", 1))

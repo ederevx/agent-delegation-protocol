@@ -120,9 +120,11 @@ def test_generated_workers() -> None:
             "common dispatcher contract requires an unavailable stdin transport")
 
 
-def call_hook(home: Path, mode: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+def call_hook(home: Path, mode: str, payload: dict[str, Any],
+              *, extra_env: dict[str, str] | None = None) -> dict[str, Any] | None:
     env = dict(os.environ)
     env["CODEX_HOME"] = str(home)
+    env.update(extra_env or {})
     result = run([sys.executable, str(HOOK), mode], env=env, stdin=payload)
     require(result.returncode == 0, f"hook {mode} failed: {result.stderr}")
     text = result.stdout.strip()
@@ -381,6 +383,60 @@ def test_stop_continuation(home: Path) -> None:
     require(denied is not None, "continuation lost delegation requirement")
 
 
+def context_of(result: dict[str, Any] | None) -> str:
+    require(result is not None, "hook returned no turn context")
+    return str(result["hookSpecificOutput"]["additionalContext"])
+
+
+def test_size_and_step_thresholds(home: Path) -> None:
+    # Size alone is enough: no bulk or shard wording, only how much work this is.
+    context = context_of(call_hook(home, "prompt", {
+        "session_id": "size", "turn_id": "t1",
+        "prompt": "Port this parser to the new interface; expect about 80k tokens of work.",
+    }))
+    require("HOOK CLASSIFICATION" in context, "a turn above the size threshold was not classified")
+    require("80000 tokens" in context, f"the stated budget was not reported: {context}")
+    denied = call_hook(home, "pretool", {
+        "session_id": "size", "turn_id": "t1", "tool_name": "apply_patch",
+        "tool_input": {"command": "*** Begin Patch"},
+    })
+    require(denied is not None and denied["hookSpecificOutput"]["permissionDecision"] == "deny",
+            "parent patch was not blocked for a turn above the size threshold")
+
+    # Shape alone is enough: three distinct steps, none of them bulk.
+    context = context_of(call_hook(home, "prompt", {
+        "session_id": "steps", "turn_id": "t1",
+        "prompt": "First update the schema, then regenerate the client, then run the migration.",
+    }))
+    require("HOOK CLASSIFICATION" in context, "a multi-step turn was not classified")
+    require("multi-step work" in context, f"multi-step reason was not reported: {context}")
+
+    # Two steps and one file remain ordinary parent work.
+    context = context_of(call_hook(home, "prompt", {
+        "session_id": "small", "turn_id": "t1",
+        "prompt": "Rename this helper and then update its one caller.",
+    }))
+    require("HOOK CLASSIFICATION" not in context, "a small two-step turn was forced into delegation")
+
+    # The size threshold is a share of the window, so a wider window raises it.
+    context = context_of(call_hook(home, "prompt", {
+        "session_id": "wide", "turn_id": "t1",
+        "prompt": "Port this parser to the new interface; expect about 80k tokens of work.",
+    }, extra_env={"CODEX_MAX_CONTEXT_TOKENS": "1000000"}))
+    require("HOOK CLASSIFICATION" not in context,
+            "the size threshold did not scale with the configured window")
+    require("SIZE AND SHAPE THRESHOLDS" in context, "standing thresholds were not injected")
+    require("250000+ tokens" in context, f"the injected threshold did not scale: {context}")
+
+    # An explicit opt-out still wins over both new thresholds.
+    context = context_of(call_hook(home, "prompt", {
+        "session_id": "size-optout", "turn_id": "t1",
+        "prompt": ("First update the schema, then regenerate the client, then run the "
+                   "migration. This is about 90k tokens of work. Do not delegate or spawn agents."),
+    }))
+    require("HOOK CLASSIFICATION" not in context, "explicit opt-out lost to the new thresholds")
+
+
 def test_opt_out(home: Path) -> None:
     session = "optout"
     call_hook(home, "prompt", {"session_id": session, "turn_id": "t1", "prompt": "Update 20 files but do not delegate or spawn agents."})
@@ -468,6 +524,7 @@ def main() -> int:
         test_round_robin_delegation_queue(root / "round-robin-queue")
         test_queue_fallbacks(root / "queue-fallbacks")
         test_stop_continuation(root / "continuation")
+        test_size_and_step_thresholds(root / "thresholds")
         test_opt_out(root / "optout")
         test_worker_dismissal(root / "dismissal")
     print("Codex delegation protocol self-test: PASS")

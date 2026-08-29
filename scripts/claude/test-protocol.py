@@ -131,9 +131,11 @@ def test_generated_workers() -> None:
             "common dispatcher contract requires an unavailable stdin transport")
 
 
-def call_hook(home: Path, mode: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+def call_hook(home: Path, mode: str, payload: dict[str, Any],
+              *, extra_env: dict[str, str] | None = None) -> dict[str, Any] | None:
     env = dict(os.environ)
     env["CLAUDE_CONFIG_DIR"] = str(home)
+    env.update(extra_env or {})
     result = run([sys.executable, str(HOOK), mode], env=env, stdin=payload)
     require(result.returncode == 0, f"hook {mode} failed: {result.stderr}")
     text = result.stdout.strip()
@@ -382,6 +384,62 @@ def test_queue_fallbacks(root: Path) -> None:
         call_hook(home, "subagent-start", {"session_id": session, "agent_id": "only-worker"})
         denied = call_hook(home, "pretool", {"session_id": session, "tool_name": "Write", "tool_input": {"file_path": "integration.txt"}})
         require(denied is not None, f"{condition} queue bypassed overlap enforcement")
+
+
+def context_of(result: dict[str, Any] | None) -> str:
+    require(result is not None, "hook returned no prompt context")
+    return str(result["hookSpecificOutput"]["additionalContext"])
+
+
+def test_size_and_step_thresholds(home: Path) -> None:
+    # Size alone is enough. The prompt names no bulk or shard wording; it only
+    # says how much work this is, which is a quarter of the default window.
+    context = context_of(call_hook(home, "prompt", {
+        "session_id": "size-test",
+        "prompt": "Port this parser to the new interface; expect about 80k tokens of work.",
+    }))
+    require("HOOK CLASSIFICATION" in context, "a task above the size threshold was not classified")
+    require("80000 tokens" in context, f"the stated budget was not reported: {context}")
+    denied = call_hook(home, "pretool", {
+        "session_id": "size-test", "tool_name": "Edit", "tool_input": {"file_path": "a.py"},
+    })
+    require(denied is not None and denied["hookSpecificOutput"]["permissionDecision"] == "deny",
+            "parent mutation was not blocked for a task above the size threshold")
+
+    # Shape alone is enough: three distinct steps, none of them bulk.
+    context = context_of(call_hook(home, "prompt", {
+        "session_id": "step-test",
+        "prompt": "First update the schema, then regenerate the client, then run the migration.",
+    }))
+    require("HOOK CLASSIFICATION" in context, "a multi-step task was not classified")
+    require("multi-step work" in context, f"multi-step reason was not reported: {context}")
+
+    # Two steps and one file remain ordinary parent work.
+    context = context_of(call_hook(home, "prompt", {
+        "session_id": "small-test",
+        "prompt": "Rename this helper and then update its one caller.",
+    }))
+    require("HOOK CLASSIFICATION" not in context, "a small two-step task was forced into delegation")
+
+    # The size threshold is a share of the window, so a wider window raises it.
+    context = context_of(call_hook(home, "prompt", {
+        "session_id": "wide-window-test",
+        "prompt": "Port this parser to the new interface; expect about 80k tokens of work.",
+    }, extra_env={"CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"}))
+    require("HOOK CLASSIFICATION" not in context,
+            "the size threshold did not scale with the configured window")
+
+    # The thresholds are stated to the parent on every turn, flagged or not.
+    require("SIZE AND SHAPE THRESHOLDS" in context, "standing thresholds were not injected")
+    require("250000+ tokens" in context, f"the injected threshold did not scale: {context}")
+
+    # An explicit opt-out still wins over both new thresholds.
+    context = context_of(call_hook(home, "prompt", {
+        "session_id": "size-opt-out-test",
+        "prompt": ("First update the schema, then regenerate the client, then run the "
+                   "migration. This is about 90k tokens of work. Do not delegate or spawn agents."),
+    }))
+    require("HOOK CLASSIFICATION" not in context, "explicit opt-out lost to the new thresholds")
 
 
 def test_explicit_opt_out(home: Path) -> None:
@@ -691,6 +749,7 @@ def main() -> int:
         test_delegation_queue(root / "queue-home")
         test_round_robin_delegation_queue(root / "round-robin-queue-home")
         test_queue_fallbacks(root / "queue-fallbacks")
+        test_size_and_step_thresholds(root / "thresholds-home")
         test_explicit_opt_out(root / "opt-out-home")
         test_pretool_matcher_covers_dismissal(root / "matcher-home")
         test_dismissal_lifecycle(root / "dismissal-home")
