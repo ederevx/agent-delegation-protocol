@@ -10,6 +10,30 @@ Existing `CLAUDE.md`, `CLAUDE.local.md`, project rules, managed policy, permissi
 
 Preserve the strongest parent model for planning, ambiguity, architecture, difficult debugging, integration, conflict resolution, and final validation. Delegate bounded repetitive or high-volume work to the cheapest suitable supported subagent.
 
+## Mandatory delegation thresholds
+
+Estimate the size and shape of a task before starting it, and delegate whenever
+either threshold is met — the hook classifier is a floor, not the whole test:
+
+- **Size.** Any task estimated at **25% or more of one auto-compact window** in
+  reading, output, and tool traffic (about 50k tokens at a 200k window; the
+  hook scales the number with the configured window). Estimate honestly: file
+  count times file size, plus the output and command traffic the work implies.
+- **Steps.** Any task that runs to **three or more distinct steps**, whether the
+  user enumerated them or the plan did. Sequential steps still delegate — as one
+  worker per step where they are independent, or one dispatcher batch where they
+  must stay in order.
+
+Re-estimate mid-task. Work that turns out larger or longer than it looked
+crosses the threshold at the moment you notice, not at the next turn: stop,
+partition what remains, and delegate it.
+
+The parent keeps planning, estimation, ambiguity, architecture, difficult
+debugging, integration, conflict resolution, and final validation regardless of
+size. What is delegated is execution. Genuinely small, single-step, or tightly
+coupled work stays in the parent; do not split something whose parts cannot be
+verified separately just to clear a threshold.
+
 Prefer `bulk-worker` for low-risk mechanical work. It is a lifecycle-visible dispatcher that submits a bounded task to the installed agent mux-scheduler, then returns the external receipt or executes natively only when the selected native backend requests it. Escalate a delegated unit when the selected backend's declared capabilities are insufficient.
 
 The mux-scheduler is agent-agnostic. Each backend has one metadata document declaring a common capability interface, availability checks, limits, numeric priority, and either a native runtime binding or a custom command/API adapter. Its top-level `native` boolean distinguishes those bindings. Routes are backend membership lists with no scheduling order. Selection filters by required capabilities, runtime, and availability before taking the highest-priority tier; equal priorities are equivalent and may be resolved by caller judgment without changing route order.
@@ -50,7 +74,8 @@ Reduce the need for these requests up front: commit or set aside uncommitted wor
 
 The installed Claude hook may:
 
-- classify a clear bulk/sharded prompt as delegation-required;
+- classify a clear bulk/sharded prompt, a prompt whose stated token budget
+  reaches the size threshold, or a multi-step prompt as delegation-required;
 - inject the delegation/fan-out policy into the current context;
 - deny parent mutation until required delegation evidence exists;
 - select delegation queue only through the installed mux-scheduler for a validated available single-stream backend, require one lifecycle dispatcher for any selected queue, and require actual overlapping workers for ordinary native multi-subsystem fan-out;
