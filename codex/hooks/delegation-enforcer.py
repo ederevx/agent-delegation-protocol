@@ -147,6 +147,19 @@ def nagged_dir(session_id: Any) -> Path:
     return Path(str(base(session_id)) + ".nagged")
 
 
+def pending_attempts_dir(session_id: Any, *, after_delegation: bool) -> Path:
+    """Agent calls awaiting the success-only PostToolUse event.
+
+    Codex does not emit PostToolUse when spawning fails. PreToolUse therefore
+    records each attempt, and a successful PostToolUse clears that call id. The
+    separate directories retain whether a worker had already started, which is
+    the distinction between failing open a first delegation and a later fan-out
+    attempt.
+    """
+    suffix = "multi-attempts" if after_delegation else "attempts"
+    return Path(str(base(session_id)) + f".{suffix}")
+
+
 def worker_key(value: Any) -> str:
     """Normalize an agent identity so a spawn id and a dismissal target compare equal."""
     raw = str(value or "").strip()
@@ -163,6 +176,15 @@ def is_dismissal_tool(name: str) -> bool:
     the agent available and therefore does not release its lifecycle slot.
     """
     return bool(shared.DISMISSAL_TOOL.search(name))
+
+
+def is_agent_tool(name: str) -> bool:
+    """Whether a hook tool name denotes Codex's spawn-agent operation.
+
+    ``Agent`` is the hooks matcher alias; current deliveries carry the
+    canonical ``spawn_agent`` name, optionally namespace-qualified.
+    """
+    return name == "Agent" or name.rsplit(".", 1)[-1] == "spawn_agent"
 
 
 def keys_match(finished: str, target: str) -> bool:
@@ -237,6 +259,8 @@ def reset_evidence(session_id: Any) -> None:
         finished_dir(session_id),
         dismissed_dir(session_id),
         nagged_dir(session_id),
+        pending_attempts_dir(session_id, after_delegation=False),
+        pending_attempts_dir(session_id, after_delegation=True),
     ):
         if directory.exists():
             shutil.rmtree(directory, ignore_errors=True)
@@ -322,7 +346,7 @@ def is_parent(event: dict[str, Any]) -> bool:
 def mutating_tool(event: dict[str, Any]) -> bool:
     name = str(event.get("tool_name") or "")
     data = event.get("tool_input") or {}
-    if name == "Agent":
+    if is_agent_tool(name):
         return False
     if name == "apply_patch" or name in {"Edit", "Write"}:
         return True
@@ -410,46 +434,36 @@ def handle_subagent_stop(event: dict[str, Any]) -> None:
         touch(finished_dir(session) / key)
 
 
-def result_failed(event: dict[str, Any]) -> bool:
-    """Whether this PostToolUse delivery reports the Agent call itself failing.
-
-    Codex, unlike Claude's dedicated PostToolUseFailure event, fires this hook on
-    every completed Agent call -- success included. A successful worker's own
-    report can legitimately quote an error string it diagnosed or fixed (e.g.
-    "permission denied"), so scanning `tool_response` unconditionally would read
-    that success as spawn-unavailability and silently disable enforcement for
-    the rest of the turn. Only look inside the response once the event's own
-    outcome fields say the call itself failed.
-    """
-    if event.get("is_error") is True or event.get("success") is False:
-        return True
-    if str(event.get("status") or "").lower() in ("error", "failed", "failure"):
-        return True
-    exit_code = event.get("exit_code")
-    if isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0:
-        return True
-    response = event.get("tool_response")
-    if isinstance(response, dict) and (response.get("is_error") is True or response.get("error")):
-        return True
-    return False
-
-
 def handle_agent_result(event: dict[str, Any]) -> None:
-    if not result_failed(event):
-        return
+    """Clear the matching attempt after Codex reports a successful spawn.
+
+    Codex 0.151.0 only emits PostToolUse for successful tool calls. Failed
+    spawns have no delivery here, so their PreToolUse attempt remains as the
+    payload-independent fail-open signal. Never inspect worker prose for error
+    wording: a successful worker can legitimately quote the same diagnostics.
+    """
     session = event.get("session_id")
-    response = event.get("tool_response")
-    text = json.dumps(response, ensure_ascii=False) if not isinstance(response, str) else response
-    if not shared.SPAWN_UNAVAILABLE.search(text):
+    call_id = safe(event.get("tool_use_id"))
+    if not call_id or call_id == "unknown":
         return
-    if marker(session, "delegated").exists():
-        touch(marker(session, "multi-unavailable"))
-    else:
-        touch(marker(session, "unavailable"))
+    for after_delegation in (False, True):
+        try:
+            (pending_attempts_dir(session, after_delegation=after_delegation) / call_id).unlink()
+        except FileNotFoundError:
+            pass
+
+
+def has_pending_attempt(session: Any, *, after_delegation: bool) -> bool:
+    directory = pending_attempts_dir(session, after_delegation=after_delegation)
+    try:
+        return any(path.is_file() for path in directory.iterdir())
+    except FileNotFoundError:
+        return False
 
 
 def unmet(session: Any, state: dict[str, Any]) -> str | None:
-    if not state.get("requires_delegation") or marker(session, "unavailable").exists():
+    if (not state.get("requires_delegation") or marker(session, "unavailable").exists()
+            or has_pending_attempt(session, after_delegation=False)):
         return None
     minimum = int(state.get("min_agents", 1))
     delegated = marker(session, "delegated").exists()
@@ -466,7 +480,9 @@ def unmet(session: Any, state: dict[str, Any]) -> str | None:
             "Delegation protocol requires a bounded subagent for this bulk/high-volume turn. Start `bulk_worker` when suitable "
             "or another supported worker before parent implementation."
         )
-    if fanout or (delegated and marker(session, "multi-unavailable").exists()):
+    if fanout or (delegated and (
+            marker(session, "multi-unavailable").exists()
+            or has_pending_attempt(session, after_delegation=True))):
         return None
     return (
         "Delegation protocol requires concurrent multi-agent fan-out for this turn. Two independent workers have not yet been "
@@ -492,11 +508,16 @@ def handle_pretool(event: dict[str, Any]) -> None:
         return
 
     # Reclaim finished workers before creating new ones.
-    if name == "Agent":
+    if is_agent_tool(name):
         held = outstanding_workers(session)
         if held and marker(session, "dismissal-tool").exists():
             emit({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                          "permissionDecisionReason": dismissal_reason(held, "before spawning another worker")}})
+            return
+        call_id = safe(event.get("tool_use_id"))
+        if call_id and call_id != "unknown":
+            after_delegation = marker(session, "delegated").exists()
+            touch(pending_attempts_dir(session, after_delegation=after_delegation) / call_id)
         return
 
     if not mutating_tool(event):
