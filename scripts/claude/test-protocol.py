@@ -409,55 +409,21 @@ def context_of(result: dict[str, Any] | None) -> str:
     return str(result["hookSpecificOutput"]["additionalContext"])
 
 
-def test_size_and_step_thresholds(home: Path) -> None:
-    # Size alone is enough. The prompt names no bulk or shard wording; it only
-    # says how much work this is, which is a quarter of the default window.
+def test_classifier_mapping_smoke(home: Path) -> None:
+    """Claude maps one shared-classifier decision into its mutation gate."""
     context = context_of(call_hook(home, "prompt", {
         "session_id": "size-test",
-        "prompt": "Port this parser to the new interface; expect about 80k tokens of work.",
+        "prompt": "Port this parser; expect about 80k tokens of work.",
     }))
-    require("HOOK CLASSIFICATION" in context, "a task above the size threshold was not classified")
-    require("80000 tokens" in context, f"the stated budget was not reported: {context}")
+    require("HOOK CLASSIFICATION" in context,
+            "shared classification was not injected into Claude")
+    require("SIZE AND SHAPE THRESHOLDS" in context,
+            "Claude omitted standing shared thresholds")
     denied = call_hook(home, "pretool", {
-        "session_id": "size-test", "tool_name": "Edit", "tool_input": {"file_path": "a.py"},
+        "session_id": "size-test", "tool_name": "Edit",
+        "tool_input": {"file_path": "a.py"},
     })
-    require(denied is not None and denied["hookSpecificOutput"]["permissionDecision"] == "deny",
-            "parent mutation was not blocked for a task above the size threshold")
-
-    # Shape alone is enough: three distinct steps, none of them bulk.
-    context = context_of(call_hook(home, "prompt", {
-        "session_id": "step-test",
-        "prompt": "First update the schema, then regenerate the client, then run the migration.",
-    }))
-    require("HOOK CLASSIFICATION" in context, "a multi-step task was not classified")
-    require("multi-step work" in context, f"multi-step reason was not reported: {context}")
-
-    # Two steps and one file remain ordinary parent work.
-    context = context_of(call_hook(home, "prompt", {
-        "session_id": "small-test",
-        "prompt": "Rename this helper and then update its one caller.",
-    }))
-    require("HOOK CLASSIFICATION" not in context, "a small two-step task was forced into delegation")
-
-    # The size threshold is a share of the window, so a wider window raises it.
-    context = context_of(call_hook(home, "prompt", {
-        "session_id": "wide-window-test",
-        "prompt": "Port this parser to the new interface; expect about 80k tokens of work.",
-    }, extra_env={"CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"}))
-    require("HOOK CLASSIFICATION" not in context,
-            "the size threshold did not scale with the configured window")
-
-    # The thresholds are stated to the parent on every turn, flagged or not.
-    require("SIZE AND SHAPE THRESHOLDS" in context, "standing thresholds were not injected")
-    require("250000+ tokens" in context, f"the injected threshold did not scale: {context}")
-
-    # An explicit opt-out still wins over both new thresholds.
-    context = context_of(call_hook(home, "prompt", {
-        "session_id": "size-opt-out-test",
-        "prompt": ("First update the schema, then regenerate the client, then run the "
-                   "migration. This is about 90k tokens of work. Do not delegate or spawn agents."),
-    }))
-    require("HOOK CLASSIFICATION" not in context, "explicit opt-out lost to the new thresholds")
+    require(denied is not None, "Claude did not gate a classified mutation")
 
 
 def test_explicit_opt_out(home: Path) -> None:
@@ -822,7 +788,7 @@ def main() -> int:
         test_delegation_queue(root / "queue-home")
         test_round_robin_delegation_queue(root / "round-robin-queue-home")
         test_queue_fallbacks(root / "queue-fallbacks")
-        test_size_and_step_thresholds(root / "thresholds-home")
+        test_classifier_mapping_smoke(root / "classifier-smoke-home")
         test_explicit_opt_out(root / "opt-out-home")
         test_pretool_matcher_covers_only_parent_mutation(root / "matcher-home")
         test_foreground_lifecycle(root / "foreground-home")
