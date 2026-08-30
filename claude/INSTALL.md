@@ -42,6 +42,9 @@ The installer refuses to overwrite an unrelated file or symlink at any destinati
 ~/.claude/.delegation-protocol/delegation-classifier.py
   -> <clone>/scripts/agents/delegation-classifier.py
 
+~/.claude/.delegation-protocol/delegation_queue.py
+  -> <clone>/scripts/agents/delegation_queue.py
+
 ~/.claude/.delegation-protocol/catalog
   -> <clone>/agents/catalog
 
@@ -87,7 +90,10 @@ The hook participates in these lifecycle events:
 - `SubagentStart` — records delegation, tracks active workers, and injects bounded-worker requirements into each spawned subagent.
 - `SubagentStop` — removes the worker from the active overlap set.
 - `PostToolUseFailure` for `Agent` — detects runtime/model/concurrency failures so enforcement can fail open only when delegation is actually unavailable.
-- `PreToolUse` for core mutation tools and `Agent` — denies parent mutation on an eligible bulk task until required delegation has occurred while allowing Agent launches to supply that evidence.
+- `PreToolUse` for core mutation tools — denies parent mutation on an eligible
+  bulk task until required delegation has occurred. Agent launches supply
+  evidence through their dedicated lifecycle events and are not routed through
+  this mutation gate.
 - `Stop` — blocks the parent from ending an eligible turn until required delegation evidence exists.
 
 For multi-subsystem work, enforcement ordinarily requires overlapping lifecycle-visible subagents. A selected delegation queue is the exception: one lifecycle dispatcher submits one batch, and a round-robin one-lane backend interleaves its virtual agents up to the advertised slot limit. Atomic per-agent marker files avoid races between simultaneous lifecycle hook processes.
