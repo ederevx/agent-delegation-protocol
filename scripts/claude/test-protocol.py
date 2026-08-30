@@ -402,6 +402,26 @@ def test_classifier_mapping_smoke(home: Path) -> None:
     require(denied is not None, "Claude did not gate a classified mutation")
 
 
+def test_ci_context_env_is_ignored(home: Path) -> None:
+    """Main derives thresholds only from Claude Code's context setting."""
+    context = context_of(call_hook(
+        home,
+        "prompt",
+        {
+            "session_id": "ci-context-env",
+            "prompt": "Port this parser; expect about 40k tokens of work.",
+        },
+        extra_env={
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "",
+            "CI_CLAUDE_CONTEXT_WINDOW": "100000",
+        },
+    ))
+    require("50000+ tokens" in context,
+            "CI-only context setting changed main's size threshold")
+    require("HOOK CLASSIFICATION" not in context,
+            "CI-only context setting made a sub-threshold task eligible")
+
+
 def test_explicit_opt_out(home: Path) -> None:
     session = "opt-out-test"
     call_hook(home, "prompt", {
@@ -765,6 +785,7 @@ def main() -> int:
         test_round_robin_delegation_queue(root / "round-robin-queue-home")
         test_queue_fallbacks(root / "queue-fallbacks")
         test_classifier_mapping_smoke(root / "classifier-smoke-home")
+        test_ci_context_env_is_ignored(root / "ci-context-env-home")
         test_explicit_opt_out(root / "opt-out-home")
         test_pretool_matcher_covers_only_parent_mutation(root / "matcher-home")
         test_foreground_lifecycle(root / "foreground-home")
