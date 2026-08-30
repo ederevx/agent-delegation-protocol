@@ -58,7 +58,14 @@ advertise both `batch` and `resumable-batch`, and provide a `queue_policy` with
 quantum. Both `run` and `queue` then use bounded `start`, `step`, and `cancel`
 adapter envelopes tagged with `adapter_protocol: cooperative-v1`. Start returns
 `ready` plus an opaque `token`; each yielded step returns the token needed by
-the next process, while complete and failed receipts are terminal. The
+the next process, while complete, cancelled, and failed receipts are terminal
+and never retain a token. Every response to a valid cooperative request echoes
+`schema_version`, `adapter_protocol`, and `operation`; adapters use the stable
+`unsupported_adapter_contract` classification for incompatible version or
+protocol negotiation instead of requiring callers to parse diagnostic text.
+Malformed envelopes and unknown operations produce non-contract `invalid_task`
+diagnostics without a fabricated protocol identity. The canonical schema and
+conformance corpus live under [`agents/contracts`](agents/contracts). The
 mux-scheduler owns a fair,
 cross-process ticket queue and releases the provider lane after every slice,
 so one queued batch of virtual agents makes interleaved progress without
@@ -67,6 +74,8 @@ tickets are pruned. Virtual slots bound in-process virtual-agent concurrency,
 not provider throughput. A yielded adapter may include a bounded
 `retry_after_seconds` delay; this lets temporary physical-lane contention
 re-enter the fair queue without consuming an agent-turn budget or spinning.
+Protocol v1 bounds an `agent_turn` quantum to 1–100 and negotiates the required
+`mux-command-execution-v1` scheduler capability in every request.
 
 The same policy may set `command_concurrency` (1–32) and
 `command_timeout_seconds`. A cooperative adapter can pause with
@@ -213,6 +222,7 @@ These tests use temporary config directories and do not modify your live Codex o
 ```bash
 python3 scripts/agents/render-bulk-workers.py --check
 python3 scripts/agents/test-delegation-core.py
+python3 scripts/agents/test-cooperative-contract.py
 python3 scripts/agents/test-mux-scheduler.py
 python3 scripts/codex/test-protocol.py
 python3 scripts/claude/test-protocol.py
