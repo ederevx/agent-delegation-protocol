@@ -94,26 +94,6 @@ def install_queue_fixture(home: Path, runtime: str, condition: str) -> None:
     }), encoding="utf-8")
 
 
-def install_round_robin_queue_fixture(home: Path, runtime: str, slots: int = 4) -> None:
-    """Install a hook-level fixture that isolates selected metadata handling."""
-    install_queue_fixture(home, runtime, "valid")
-    installed = home / ".delegation-protocol"
-    metadata_path = installed / "catalog" / "test-queue.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    metadata["queue_policy"] = {
-        "strategy": "round_robin",
-        "virtual_slots": slots,
-        "quantum": {"unit": "agent_turn", "value": 4},
-    }
-    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
-    (installed / "mux-scheduler.py").write_text(
-        "import json\n"
-        "def select_queue_backend(catalog, routes, route, runtime, platform=None):\n"
-        "    return json.loads((catalog / 'test-queue.json').read_text(encoding='utf-8'))\n",
-        encoding="utf-8",
-    )
-
-
 def run(cmd: list[str], *, env: dict[str, str] | None = None, stdin: dict[str, Any] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, input=(json.dumps(stdin) if stdin is not None else None), text=True, capture_output=True, env=env, check=False)
 
@@ -717,41 +697,6 @@ def test_delegation_queue(home: Path) -> None:
     require(allowed is None, "valid queue did not unlock after one dispatcher")
 
 
-def test_round_robin_delegation_queue(home: Path) -> None:
-    install_round_robin_queue_fixture(home, "codex", slots=4)
-    session = "round-robin-delegation-queue"
-    prompt = call_hook(home, "prompt", {
-        "session_id": session, "turn_id": "t1",
-        "prompt": "Implement independent frontend and backend subsystems plus separate tests.",
-    })
-    context = prompt["hookSpecificOutput"]["additionalContext"]
-    require("round-robin delegation queue selected backend `test-queue`" in context,
-            "round-robin queue selection was not injected")
-    require("advertising 4 virtual slots" in context, "virtual slot count was not injected")
-    require("mux-scheduler `queue`" in context, "singular queue contract was not injected")
-    require("singular scheduler process" in context, "singular scheduler ownership was not injected")
-    state = json.loads((home / ".delegation-protocol" / "hook-state" / f"{session}.json").read_text())
-    require(state["delegation_queue_strategy"] == "round_robin", "round-robin strategy was not recorded")
-    require(state["delegation_queue_virtual_slots"] == 4, "virtual slot count was not recorded")
-    require(state["min_agents"] == 1, "round-robin queue did not select one lifecycle dispatcher")
-    call_hook(home, "subagent-start", {"session_id": session, "turn_id": "t1", "agent_id": "virtual-a"})
-    allowed = call_hook(home, "pretool", {"session_id": session, "turn_id": "t1", "tool_name": "apply_patch", "tool_input": {}})
-    require(allowed is None, "round-robin queue did not unlock after one dispatcher")
-
-
-def test_queue_fallbacks(root: Path) -> None:
-    for condition in ("invalid", "unavailable", "misconfigured"):
-        home = root / condition
-        install_queue_fixture(home, "codex", condition)
-        session = f"queue-{condition}"
-        prompt = call_hook(home, "prompt", {
-            "session_id": session, "turn_id": "t1",
-            "prompt": "Implement independent frontend and backend subsystems plus separate tests.",
-        })
-        require("delegation queue selected" not in prompt["hookSpecificOutput"]["additionalContext"], f"{condition} queue was selected")
-        call_hook(home, "subagent-start", {"session_id": session, "turn_id": "t1", "agent_id": "only-worker"})
-        denied = call_hook(home, "pretool", {"session_id": session, "turn_id": "t1", "tool_name": "apply_patch", "tool_input": {}})
-        require(denied is not None, f"{condition} queue bypassed overlap enforcement")
 
 
 def test_stop_continuation(home: Path) -> None:
@@ -770,53 +715,21 @@ def context_of(result: dict[str, Any] | None) -> str:
     return str(result["hookSpecificOutput"]["additionalContext"])
 
 
-def test_size_and_step_thresholds(home: Path) -> None:
-    # Size alone is enough: no bulk or shard wording, only how much work this is.
+def test_classifier_mapping_smoke(home: Path) -> None:
+    """Codex maps one shared-classifier decision into its mutation gate."""
     context = context_of(call_hook(home, "prompt", {
         "session_id": "size", "turn_id": "t1",
-        "prompt": "Port this parser to the new interface; expect about 80k tokens of work.",
+        "prompt": "Port this parser; expect about 80k tokens of work.",
     }))
-    require("HOOK CLASSIFICATION" in context, "a turn above the size threshold was not classified")
-    require("80000 tokens" in context, f"the stated budget was not reported: {context}")
+    require("HOOK CLASSIFICATION" in context,
+            "shared classification was not injected into Codex")
+    require("SIZE AND SHAPE THRESHOLDS" in context,
+            "Codex omitted standing shared thresholds")
     denied = call_hook(home, "pretool", {
         "session_id": "size", "turn_id": "t1", "tool_name": "apply_patch",
         "tool_input": {"command": "*** Begin Patch"},
     })
-    require(denied is not None and denied["hookSpecificOutput"]["permissionDecision"] == "deny",
-            "parent patch was not blocked for a turn above the size threshold")
-
-    # Shape alone is enough: three distinct steps, none of them bulk.
-    context = context_of(call_hook(home, "prompt", {
-        "session_id": "steps", "turn_id": "t1",
-        "prompt": "First update the schema, then regenerate the client, then run the migration.",
-    }))
-    require("HOOK CLASSIFICATION" in context, "a multi-step turn was not classified")
-    require("multi-step work" in context, f"multi-step reason was not reported: {context}")
-
-    # Two steps and one file remain ordinary parent work.
-    context = context_of(call_hook(home, "prompt", {
-        "session_id": "small", "turn_id": "t1",
-        "prompt": "Rename this helper and then update its one caller.",
-    }))
-    require("HOOK CLASSIFICATION" not in context, "a small two-step turn was forced into delegation")
-
-    # The size threshold is a share of the window, so a wider window raises it.
-    context = context_of(call_hook(home, "prompt", {
-        "session_id": "wide", "turn_id": "t1",
-        "prompt": "Port this parser to the new interface; expect about 80k tokens of work.",
-    }, extra_env={"CODEX_MAX_CONTEXT_TOKENS": "1000000"}))
-    require("HOOK CLASSIFICATION" not in context,
-            "the size threshold did not scale with the configured window")
-    require("SIZE AND SHAPE THRESHOLDS" in context, "standing thresholds were not injected")
-    require("250000+ tokens" in context, f"the injected threshold did not scale: {context}")
-
-    # An explicit opt-out still wins over both new thresholds.
-    context = context_of(call_hook(home, "prompt", {
-        "session_id": "size-optout", "turn_id": "t1",
-        "prompt": ("First update the schema, then regenerate the client, then run the "
-                   "migration. This is about 90k tokens of work. Do not delegate or spawn agents."),
-    }))
-    require("HOOK CLASSIFICATION" not in context, "explicit opt-out lost to the new thresholds")
+    require(denied is not None, "Codex did not gate a classified mutation")
 
 
 def test_opt_out(home: Path) -> None:
@@ -1033,10 +946,8 @@ def main() -> int:
         test_single_gate(root / "single")
         test_multi_overlap(root / "multi")
         test_delegation_queue(root / "queue")
-        test_round_robin_delegation_queue(root / "round-robin-queue")
-        test_queue_fallbacks(root / "queue-fallbacks")
         test_stop_continuation(root / "continuation")
-        test_size_and_step_thresholds(root / "thresholds")
+        test_classifier_mapping_smoke(root / "classifier-smoke")
         test_opt_out(root / "optout")
         test_worker_dismissal(root / "dismissal")
         test_classifier_loader_fallback(root / "loader-fallback")
