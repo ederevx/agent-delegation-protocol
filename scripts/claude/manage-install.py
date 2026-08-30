@@ -71,6 +71,7 @@ def install(repo: Path, home: Path, python_exe: str) -> None:
     )
     for directory in ("rules", "agents", "hooks", ".delegation-protocol"):
         (home / directory).mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(home / ".delegation-protocol/__pycache__", ignore_errors=True)
     for source, destination in paths(repo, home):
         safe_link(source, destination)
     remove_if_ours(home / ".delegation-protocol/multiplexer.py",

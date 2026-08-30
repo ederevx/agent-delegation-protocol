@@ -98,6 +98,7 @@ rm -f "$state_dir/state" \
   "$state_dir/hooks-manifest.json"
 rm -f "$repo_root/.runtime/codex/AGENTS.composed.md"
 rm -rf "$state_dir/hook-state"
+rm -rf "$state_dir/__pycache__"
 rmdir "$state_dir" 2>/dev/null || true
 rmdir "$repo_root/.runtime/codex" 2>/dev/null || true
 rmdir "$repo_root/.runtime" 2>/dev/null || true
