@@ -180,6 +180,7 @@ Because a worker keeps holding a slot after its task ends, `SubagentStop` record
 Run the repository self-test:
 
 ```bash
+python3 scripts/agents/test-delegation-core.py
 python3 scripts/codex/test-protocol.py
 ```
 
