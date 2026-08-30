@@ -226,18 +226,48 @@ def execute_cooperative(value: dict[str, Any]) -> tuple[dict[str, Any], int]:
     operation = value.get("operation")
     if operation not in ("start", "step", "cancel"):
         raise AdapterError("operation must be start, step, or cancel")
+    identity = {
+        "schema_version": SCHEMA_VERSION,
+        "adapter_protocol": "cooperative-v1",
+        "operation": operation,
+    }
+    if (value.get("schema_version", SCHEMA_VERSION) != SCHEMA_VERSION
+            or value.get("adapter_protocol") != "cooperative-v1"):
+        return ({
+            "schema_version": SCHEMA_VERSION,
+            "classification": "unsupported_adapter_contract",
+            "status": "unsupported_adapter_contract",
+            "error": "unsupported cooperative adapter contract",
+        }, 64)
     quantum = value.get("quantum")
-    if (not isinstance(quantum, dict) or quantum.get("unit") != "agent_turn"
+    if (not isinstance(quantum, dict) or set(quantum) != {"unit", "value"}
+            or quantum.get("unit") != "agent_turn"
             or not isinstance(quantum.get("value"), int)
-            or isinstance(quantum.get("value"), bool) or quantum["value"] < 1):
-        raise AdapterError("quantum must contain a positive agent_turn value")
-    if value.get("adapter_protocol") != "cooperative-v1":
-        raise AdapterError("adapter_protocol must be cooperative-v1")
+            or isinstance(quantum.get("value"), bool)
+            or not 1 <= quantum["value"] <= 100):
+        raise AdapterError("quantum must contain an agent_turn value from 1 to 100")
+    scheduler = value.get("scheduler")
+    capabilities = scheduler.get("capabilities") if isinstance(scheduler, dict) else None
+    if (not isinstance(scheduler, dict)
+            or set(scheduler) != {"protocol_version", "capabilities"}
+            or scheduler.get("protocol_version") != 1
+            or not isinstance(capabilities, list) or not 1 <= len(capabilities) <= 32
+            or any(not isinstance(item, str) or not item
+                   or len(item.encode("utf-8")) > 128
+                   or "\0" in item for item in capabilities)
+            or len(capabilities) != len(set(capabilities))
+            or "mux-command-execution-v1" not in capabilities):
+        raise AdapterError("scheduler negotiation is unsupported")
     token = value.get("token")
+    if operation == "start" and "token" in value:
+        raise AdapterError("start must not include a token")
     if operation != "start" and (
         not isinstance(token, str) or not token or len(token.encode()) > 4096
+        or "\0" in token
     ):
         raise AdapterError("step/cancel requires a bounded token")
+    if operation != "start" and "task" in value:
+        raise AdapterError("step/cancel must not include a task")
     try:
         if operation == "start":
             task = validate_task(value.get("task"))
@@ -250,12 +280,17 @@ def execute_cooperative(value: dict[str, Any]) -> tuple[dict[str, Any], int]:
             )
         else:
             payload = cooperative_cancel(token, str(value.get("reason", "cancelled")))
-            state = "complete"
-        if state not in ("ready", "yielded", "permission_required", "complete"):
+            state = "cancelled"
+        allowed_states = {
+            "start": ("ready",),
+            "step": ("yielded", "permission_required", "complete"),
+            "cancel": ("cancelled",),
+        }[operation]
+        if state not in allowed_states:
             raise AdapterError("cooperative implementation returned an invalid state")
         receipt: dict[str, Any] = {
-            "schema_version": SCHEMA_VERSION, "classification": "success",
-            "status": "success", "state": state,
+            **identity, "classification": "success", "status": "success",
+            "state": state,
         }
         if state in ("ready", "yielded"):
             if not isinstance(payload, str) or not payload:
@@ -268,11 +303,12 @@ def execute_cooperative(value: dict[str, Any]) -> tuple[dict[str, Any], int]:
             receipt["request"] = payload
         else:
             receipt["response"] = payload
+            receipt["exit_code"] = 0
         return receipt, 0
     except AdapterError as error:
         return ({
-            "schema_version": SCHEMA_VERSION, "classification": "backend_error",
-            "status": "backend_error", "state": "failed", "error": str(error),
+            **identity, "classification": "backend_error", "status": "backend_error",
+            "state": "failed", "exit_code": 1, "error": str(error),
         }, 1)
 
 
@@ -289,9 +325,18 @@ def main() -> int:
         try:
             receipt, status = execute_cooperative(initial)
         except AdapterError as error:
-            receipt, status = ({"schema_version": SCHEMA_VERSION,
-                                "classification": "invalid_task", "status": "invalid_task",
-                                "state": "failed", "error": str(error)}, 64)
+            operation = initial.get("operation")
+            receipt = {
+                "schema_version": SCHEMA_VERSION,
+                "classification": "invalid_task", "status": "invalid_task",
+                "state": "failed", "exit_code": 64, "error": str(error),
+            }
+            if operation in ("start", "step", "cancel"):
+                receipt.update({
+                    "adapter_protocol": "cooperative-v1",
+                    "operation": operation,
+                })
+            status = 64
         print(json.dumps(receipt, sort_keys=True))
         return status
     try:
