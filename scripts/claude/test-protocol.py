@@ -450,8 +450,8 @@ def test_explicit_opt_out(home: Path) -> None:
     require(result is None, "explicit no-delegation instruction was not respected")
 
 
-def test_pretool_matcher_covers_agent(home: Path) -> None:
-    """The delegation gate must route Agent without claiming TaskStop."""
+def test_pretool_matcher_covers_only_parent_mutation(home: Path) -> None:
+    """The delegation gate must not intercept lifecycle-owned tools."""
     home.mkdir(parents=True, exist_ok=True)
     result = run([sys.executable, str(SETTINGS_MANAGER), "install", "--claude-home", str(home),
                   "--hook-path", str(HOOK), "--python", sys.executable])
@@ -464,8 +464,9 @@ def test_pretool_matcher_covers_agent(home: Path) -> None:
     ]
     require(bool(matchers), "no protocol-owned PreToolUse hook was installed")
     joined = "|".join(matchers).split("|")
-    for tool in ("Edit", "Write", "Bash", "Agent"):
+    for tool in ("Edit", "Write", "Bash"):
         require(tool in joined, f"PreToolUse matcher does not route {tool}")
+    require("Agent" not in joined, "protocol still intercepts lifecycle-owned Agent")
     require("TaskStop" not in joined, "protocol still intercepts runtime-owned TaskStop")
 
 
@@ -799,7 +800,7 @@ def main() -> int:
         test_queue_fallbacks(root / "queue-fallbacks")
         test_size_and_step_thresholds(root / "thresholds-home")
         test_explicit_opt_out(root / "opt-out-home")
-        test_pretool_matcher_covers_agent(root / "matcher-home")
+        test_pretool_matcher_covers_only_parent_mutation(root / "matcher-home")
         test_foreground_lifecycle(root / "foreground-home")
         test_unlaunched_agent_creates_no_debt(root / "phantom-home")
         test_completed_worker_allows_later_wave(root / "later-wave-home")
