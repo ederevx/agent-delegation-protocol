@@ -52,6 +52,9 @@ The installer refuses to overwrite an unrelated file or symlink at any destinati
   -> <clone>/agents/mux-scheduler.json
 ```
 
+With `CI_CLAUDE_FOREGROUND_ONLY=1`, the `bulk-worker.md` link instead targets
+`<clone>/claude/agents/ci-foreground-bulk-worker.md`.
+
 The Markdown rule is a semantic/supporting policy layer. Mechanical enforcement is performed by hooks and settings.
 
 ## Agent mux-scheduler
@@ -145,10 +148,13 @@ A direct higher-priority user/system restriction against delegation, unavailable
 First run the isolated self-test:
 
 ```bash
+python3 scripts/agents/test-delegation-core.py
 python3 scripts/claude/test-protocol.py
 ```
 
-It uses temporary configuration directories and verifies non-destructive settings merge/unmerge plus single-worker and concurrent-fan-out gating.
+These use temporary configuration directories and verify the shared classifier,
+non-destructive settings merge/unmerge, and single-worker and concurrent-fan-out
+gating.
 
 Then start a fresh Claude Code session and confirm:
 
