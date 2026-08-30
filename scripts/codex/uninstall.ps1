@@ -113,6 +113,10 @@ $HookStateDir = Join-Path $StateDir 'hook-state'
 if (Test-Path -LiteralPath $HookStateDir) {
     Remove-Item -LiteralPath $HookStateDir -Recurse -Force
 }
+$BytecodeCache = Join-Path $StateDir '__pycache__'
+if (Test-Path -LiteralPath $BytecodeCache) {
+    Remove-Item -LiteralPath $BytecodeCache -Recurse -Force
+}
 if ((Test-Path $StateDir) -and @(Get-ChildItem -LiteralPath $StateDir -Force).Count -eq 0) {
     Remove-Item -LiteralPath $StateDir -Force
 }

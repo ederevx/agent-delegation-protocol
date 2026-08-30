@@ -19,6 +19,7 @@ fi
 "$python_exe" "$repo_root/scripts/agents/render-bulk-workers.py" --check
 
 mkdir -p "$codex_home" "$codex_home/agents" "$codex_home/hooks" "$state_dir" "$runtime_dir"
+rm -rf "$state_dir/__pycache__"
 
 safe_link() {
   local src="$1" dst="$2"

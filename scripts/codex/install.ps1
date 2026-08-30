@@ -15,6 +15,10 @@ $PythonExe = $Python.Source
 if ($LASTEXITCODE -ne 0) { throw "Generated bulk workers are stale (exit code $LASTEXITCODE)" }
 
 New-Item -ItemType Directory -Force -Path $CodexHome, (Join-Path $CodexHome 'agents'), (Join-Path $CodexHome 'hooks'), $StateDir, $RuntimeDir | Out-Null
+$BytecodeCache = Join-Path $StateDir '__pycache__'
+if (Test-Path -LiteralPath $BytecodeCache) {
+    Remove-Item -LiteralPath $BytecodeCache -Recurse -Force
+}
 
 function New-SafeSymlink([string]$Source, [string]$Destination) {
     if (Test-Path -LiteralPath $Destination) {

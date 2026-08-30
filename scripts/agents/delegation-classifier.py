@@ -40,6 +40,13 @@ PROTOCOL_VERSION = 10
 # JSON file plus up to six marker directories for every session it ever ran.
 STATE_TTL_SECONDS = 7 * 24 * 3600
 
+STATE_ENTRY_SUFFIXES = (
+    ".json", ".active", ".finished", ".dismissed", ".known", ".nagged",
+    ".attempts", ".multi-attempts", ".delegated", ".fanout",
+    ".unavailable", ".multi-unavailable", ".dismissal-tool",
+    ".dismissal-nagged",
+)
+
 BULK_WORDS = (
     "bulk", "batch", "high-volume", "high volume", "many files", "many modules",
     "many packages", "many services", "many components", "many tasks", "all files",
@@ -393,12 +400,16 @@ def reap_state(root: Path, keep: str = "", ttl: int = STATE_TTL_SECONDS) -> int:
         return 0
     cutoff = time.time() - max(0, ttl)
     removed = 0
+    def belongs_to(name: str, session: str) -> bool:
+        return any(name == session + suffix for suffix in STATE_ENTRY_SUFFIXES) \
+            or name.startswith(session + ".json.")
+
     for path in sorted(root.iterdir()):
-        stem = path.name.split(".", 1)[0]
-        if keep and stem == keep:
+        if keep and belongs_to(path.name, keep):
             continue
+        legacy_unknown = belongs_to(path.name, "unknown")
         try:
-            if path.stat().st_mtime >= cutoff:
+            if not legacy_unknown and path.stat().st_mtime >= cutoff:
                 continue
         except OSError:
             continue
