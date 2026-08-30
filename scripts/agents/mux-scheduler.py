@@ -270,6 +270,10 @@ def validate_agent(agent: Any, source: str) -> dict[str, Any]:
                 f"{source}: queue_policy.quantum.unit must be 'agent_turn'"
             )
         _positive_int(quantum.get("value"), f"{source}: queue_policy.quantum.value")
+        if quantum["value"] > 100:
+            raise ConfigurationError(
+                f"{source}: queue_policy.quantum.value must not exceed 100"
+            )
         functions = capabilities["functions"]
         if (agent["native"] or not agent["delegation_queue"]
                 or limits["max_concurrency"] != 1
@@ -996,11 +1000,33 @@ def _cooperative_envelope(operation: str, quantum: dict[str, Any], *,
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
+def _cooperative_receipt(operation: str, **fields: Any) -> dict[str, Any]:
+    """Build a scheduler-owned receipt that obeys the adapter identity contract."""
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "adapter_protocol": "cooperative-v1",
+        "operation": operation,
+        **fields,
+    }
+
+
 def _cooperative_state(receipt: dict[str, Any], operation: str) -> tuple[str, str | None]:
+    if receipt.get("schema_version") != SCHEMA_VERSION:
+        raise InputError("cooperative receipt has unsupported schema_version")
+    if receipt.get("adapter_protocol") != "cooperative-v1":
+        raise InputError("cooperative receipt has invalid adapter_protocol")
+    if receipt.get("operation") != operation:
+        raise InputError("cooperative receipt did not echo the requested operation")
+    classification = receipt.get("classification")
+    if (not isinstance(classification, str) or not classification
+            or len(classification.encode("utf-8")) > 128 or "\0" in classification):
+        raise InputError("cooperative receipt requires a classification")
     state = receipt.get("state")
-    allowed = ("ready", "failed") if operation == "start" else (
-        "yielded", "permission_required", "complete", "failed"
-    )
+    allowed = {
+        "start": ("ready", "failed"),
+        "step": ("yielded", "permission_required", "complete", "failed"),
+        "cancel": ("cancelled", "failed"),
+    }[operation]
     if state not in allowed:
         raise InputError(
             f"cooperative {operation} receipt has invalid state"
@@ -1013,8 +1039,15 @@ def _cooperative_state(receipt: dict[str, Any], operation: str) -> tuple[str, st
         raise InputError(
             f"cooperative {state} receipt requires a bounded token"
         )
-    if token is not None and not isinstance(token, str):
-        raise InputError("cooperative token must be a string")
+    if state in ("complete", "cancelled", "failed") and token is not None:
+        raise InputError("cooperative terminal receipt must not retain a token")
+    exit_code = receipt.get("exit_code")
+    if state in ("ready", "yielded", "permission_required") and exit_code is not None:
+        raise InputError("cooperative resumable receipt must not include exit_code")
+    if state in ("complete", "cancelled", "failed") and (
+        not isinstance(exit_code, int) or isinstance(exit_code, bool) or exit_code < 0
+    ):
+        raise InputError("cooperative terminal receipt requires a non-negative exit_code")
     return state, token
 
 
@@ -1023,21 +1056,48 @@ def _cancel_cooperative(agent: dict[str, Any], token: str,
                         reason: str) -> dict[str, Any]:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        return {"state": "failed", "classification": "cancel_timeout"}
+        return _cooperative_receipt(
+            "cancel", state="failed", classification="cancel_timeout",
+            exit_code=124,
+        )
     try:
         with fair_step_lock(agent, deadline):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("timed out before cooperative cancel")
-            receipt, _, launched = invoke(
+            receipt, status, launched = invoke(
                 agent, _cooperative_envelope(
                     "cancel", quantum, token=token, reason=reason
                 ), remaining,
             )
     except TimeoutError:
-        return {"state": "failed", "classification": "cancel_timeout"}
+        return _cooperative_receipt(
+            "cancel", state="failed", classification="cancel_timeout",
+            exit_code=124,
+        )
     if not launched:
-        return receipt
+        return _cooperative_receipt(
+            "cancel", state="failed",
+            classification=receipt.get("classification", "launch_failed"),
+            status=receipt.get("status", "launch_failed"),
+            exit_code=status if status >= 0 else 71,
+            backend_receipt=receipt,
+        )
+    try:
+        state, _ = _cooperative_state(receipt, "cancel")
+    except InputError as error:
+        return _cooperative_receipt(
+            "cancel", state="failed", classification="invalid_receipt",
+            status="invalid_receipt", exit_code=65, error=str(error),
+            backend_receipt=receipt,
+        )
+    if state == "cancelled" and status != 0:
+        return _cooperative_receipt(
+            "cancel", state="failed", classification="adapter_error",
+            status="adapter_error", exit_code=status if status >= 0 else 65,
+            adapter_exit_code=status,
+            backend_receipt=receipt,
+        )
     return receipt
 
 
@@ -1142,11 +1202,11 @@ def run_cooperative(agent: dict[str, Any], tasks: list[dict[str, Any]],
         deadline = item["deadline"]
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            receipt = {
-                "schema_version": 1, "state": "failed",
-                "classification": "timeout", "status": "timeout",
-                "error": "cooperative task exceeded the mux-scheduler timeout",
-            }
+            receipt = _cooperative_receipt(
+                item["operation"], state="failed",
+                classification="timeout", status="timeout", exit_code=124,
+                error="cooperative task exceeded the mux-scheduler timeout",
+            )
             launched = True
             status = 124
         else:
@@ -1158,11 +1218,12 @@ def run_cooperative(agent: dict[str, Any], tasks: list[dict[str, Any]],
             )
             item["permission_resolution"] = None
             if len(envelope) > agent["binding"]["max_input_bytes"]:
-                receipt = {
-                    "schema_version": 1, "state": "failed",
-                    "classification": "invalid_request", "status": "invalid_request",
-                    "error": "cooperative envelope exceeds backend input limit",
-                }
+                receipt = _cooperative_receipt(
+                    item["operation"], state="failed",
+                    classification="invalid_request", status="invalid_request",
+                    exit_code=64,
+                    error="cooperative envelope exceeds backend input limit",
+                )
                 status, launched = 64, True
             else:
                 try:
@@ -1172,49 +1233,56 @@ def run_cooperative(agent: dict[str, Any], tasks: list[dict[str, Any]],
                             raise TimeoutError("timed out before cooperative step")
                         receipt, status, launched = invoke(agent, envelope, remaining)
                 except TimeoutError as error:
-                    receipt = {
-                        "schema_version": 1, "state": "failed",
-                        "classification": "timeout", "status": "timeout",
-                        "error": str(error),
-                    }
+                    receipt = _cooperative_receipt(
+                        item["operation"], state="failed",
+                        classification="timeout", status="timeout", exit_code=124,
+                        error=str(error),
+                    )
                     status, launched = 124, True
         if item["operation"] == "step":
             item["slices"] += 1
         if not launched:
             # Start/step launch failure is terminal for this task and is never
             # replayed on a different route member.
-            receipt = dict(receipt)
-            receipt["state"] = "failed"
+            receipt = _cooperative_receipt(
+                item["operation"], state="failed",
+                classification=receipt.get("classification", "launch_failed"),
+                status=receipt.get("status", "launch_failed"),
+                exit_code=status if status >= 0 else 71,
+                backend_receipt=receipt,
+            )
             state, token = "failed", None
         else:
             try:
                 state, token = _cooperative_state(receipt, item["operation"])
             except InputError as error:
-                receipt = {
-                    "schema_version": 1, "state": "failed",
-                    "classification": "invalid_receipt", "status": "invalid_receipt",
-                    "error": str(error), "backend_receipt": receipt,
-                }
+                receipt = _cooperative_receipt(
+                    item["operation"], state="failed",
+                    classification="invalid_receipt", status="invalid_receipt",
+                    exit_code=65, error=str(error), backend_receipt=receipt,
+                )
                 state, token, status = "failed", None, 65
         if state in ("ready", "yielded", "permission_required") and status != 0:
-            receipt = {
-                "schema_version": 1, "state": "failed",
-                "classification": "adapter_error", "status": "adapter_error",
-                "error": "cooperative adapter exited nonzero for a resumable state",
-                "adapter_exit_code": status, "backend_receipt": receipt,
-            }
+            receipt = _cooperative_receipt(
+                item["operation"], state="failed",
+                classification="adapter_error", status="adapter_error",
+                exit_code=status if status >= 0 else 65,
+                error="cooperative adapter exited nonzero for a resumable state",
+                adapter_exit_code=status, backend_receipt=receipt,
+            )
             state, token = "failed", None
         if state == "yielded" and "retry_after_seconds" in receipt:
             retry_after = receipt["retry_after_seconds"]
             if (not isinstance(retry_after, (int, float))
                     or isinstance(retry_after, bool)
                     or not 0 <= retry_after <= 60):
-                receipt = {
-                    "schema_version": 1, "state": "failed",
-                    "classification": "invalid_receipt", "status": "invalid_receipt",
-                    "error": "cooperative retry_after_seconds must be between 0 and 60",
-                    "backend_receipt": receipt,
-                }
+                receipt = _cooperative_receipt(
+                    item["operation"], state="failed",
+                    classification="invalid_receipt", status="invalid_receipt",
+                    exit_code=65,
+                    error="cooperative retry_after_seconds must be between 0 and 60",
+                    backend_receipt=receipt,
+                )
                 state, token, status = "failed", None, 65
             elif retry_after:
                 time.sleep(min(float(retry_after), max(0.0, deadline - time.monotonic())))
@@ -1227,11 +1295,11 @@ def run_cooperative(agent: dict[str, Any], tasks: list[dict[str, Any]],
             try:
                 mux_execution = _validated_mux_execution(receipt)
             except InputError as error:
-                receipt = {
-                    "schema_version": 1, "state": "failed",
-                    "classification": "invalid_receipt", "status": "invalid_receipt",
-                    "error": str(error), "backend_receipt": receipt,
-                }
+                receipt = _cooperative_receipt(
+                    item["operation"], state="failed",
+                    classification="invalid_receipt", status="invalid_receipt",
+                    exit_code=65, error=str(error), backend_receipt=receipt,
+                )
                 state, status = "failed", 65
             else:
                 if mux_execution is not None:
@@ -1249,12 +1317,13 @@ def run_cooperative(agent: dict[str, Any], tasks: list[dict[str, Any]],
         task_status = job.get("exit_code", status)
         if (not isinstance(task_status, int) or isinstance(task_status, bool)
                 or task_status < 0):
-            job = {
-                "schema_version": 1, "state": "failed",
-                "classification": "invalid_receipt", "status": "invalid_receipt",
-                "error": "cooperative terminal exit_code must be a non-negative integer",
-                "backend_receipt": receipt,
-            }
+            job = _cooperative_receipt(
+                item["operation"], state="failed",
+                classification="invalid_receipt", status="invalid_receipt",
+                exit_code=65,
+                error="cooperative terminal exit_code must be a non-negative integer",
+                backend_receipt=receipt,
+            )
             state, task_status = "failed", 65
         job["adapter_exit_code"] = status
         job["queue_index"] = item["index"]
