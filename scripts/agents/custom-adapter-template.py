@@ -121,14 +121,16 @@ def validate_task(value: Any, index: int = 0) -> dict[str, Any]:
     return task
 
 
-def load_manifest() -> tuple[list[dict[str, Any]], bool, bool]:
-    raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
+def parse_input(raw: bytes) -> Any:
     if len(raw) > MAX_INPUT_BYTES:
         raise AdapterError(f"manifest exceeds {MAX_INPUT_BYTES} bytes")
     try:
-        value = json.loads(raw)
+        return json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise AdapterError(f"invalid manifest JSON: {error}") from error
+
+
+def load_manifest(value: Any) -> tuple[list[dict[str, Any]], bool, bool]:
     if not isinstance(value, dict):
         raise AdapterError("manifest must be a JSON object")
     if "tasks" not in value:
@@ -276,17 +278,12 @@ def execute_cooperative(value: dict[str, Any]) -> tuple[dict[str, Any], int]:
 
 def main() -> int:
     raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
-    if len(raw) > MAX_INPUT_BYTES:
-        print(json.dumps({"schema_version": SCHEMA_VERSION,
-                          "classification": "invalid_task", "status": "invalid_task",
-                          "error": f"manifest exceeds {MAX_INPUT_BYTES} bytes"}, sort_keys=True))
-        return 64
     try:
-        initial = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        initial = parse_input(raw)
+    except AdapterError as error:
         print(json.dumps({"schema_version": SCHEMA_VERSION,
                           "classification": "invalid_task", "status": "invalid_task",
-                          "error": f"invalid manifest JSON: {error}"}, sort_keys=True))
+                          "error": str(error)}, sort_keys=True))
         return 64
     if isinstance(initial, dict) and "operation" in initial:
         try:
@@ -298,14 +295,7 @@ def main() -> int:
         print(json.dumps(receipt, sort_keys=True))
         return status
     try:
-        # Reuse the one-shot parser without requiring seekable stdin.
-        import io
-        original_stdin = sys.stdin
-        sys.stdin = io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8")
-        try:
-            tasks, stop_on_error, single = load_manifest()
-        finally:
-            sys.stdin = original_stdin
+        tasks, stop_on_error, single = load_manifest(initial)
     except AdapterError as error:
         print(json.dumps({
             "schema_version": SCHEMA_VERSION,
