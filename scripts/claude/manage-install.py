@@ -73,6 +73,9 @@ def install(repo: Path, home: Path, python_exe: str) -> None:
     )
     for directory in ("rules", "agents", "hooks", ".delegation-protocol"):
         (home / directory).mkdir(parents=True, exist_ok=True)
+    # Hook imports are bytecode-disabled now. Remove caches left by older
+    # protocol versions from this protocol-owned directory during upgrade.
+    shutil.rmtree(home / ".delegation-protocol/__pycache__", ignore_errors=True)
     for source, destination in paths(repo, home):
         safe_link(source, destination)
     remove_if_ours(home / ".delegation-protocol/multiplexer.py",

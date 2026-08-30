@@ -913,7 +913,7 @@ def test_reap_removes_stale_sessions(home: Path) -> None:
     """A sweep must remove an untouched session's state while keeping the one
     currently running, regardless of age."""
     module = load_hook_module(home)
-    stale, current = "stale-session", "current-session"
+    stale, current = "stale-session", "current.session"
     for session in (stale, current):
         module.save_state(session, {
             "protocol_version": module.shared.PROTOCOL_VERSION,
@@ -921,6 +921,8 @@ def test_reap_removes_stale_sessions(home: Path) -> None:
         })
         module.touch(module.active_dir(session) / "marker")
     stale_path, current_path = module.state_path(stale), module.state_path(current)
+    unknown_path = module.state_root() / "unknown.json"
+    unknown_path.write_text("{}", encoding="utf-8")
     require(stale_path.exists() and current_path.exists(), "reap fixture states were not written")
 
     # ttl=0 makes every untouched entry eligible immediately, since a write
@@ -931,6 +933,20 @@ def test_reap_removes_stale_sessions(home: Path) -> None:
             "reap_state left a stale session's state behind")
     require(current_path.exists() and module.active_dir(current).exists(),
             "reap_state removed the currently running session's state")
+    require(not unknown_path.exists(), "reap_state retained legacy uncorrelated state")
+
+
+def test_missing_session_id_never_persists_state(home: Path) -> None:
+    response = call_hook(home, "prompt", {
+        "turn_id": "t1", "prompt": "Update 20 files.",
+    })
+    require(response is not None, "uncorrelated prompt did not receive policy context")
+    call_hook(home, "pretool", {
+        "turn_id": "t1", "tool_name": "apply_patch", "tool_input": {},
+    })
+    state = home / ".delegation-protocol" / "hook-state"
+    require(not any(state.glob("unknown*")),
+            "missing session id created shared fallback state")
 
 
 def test_agent_attempt_lifecycle(home: Path) -> None:
@@ -1030,6 +1046,7 @@ def main() -> int:
         test_classifier_loader_fallback(root / "loader-fallback")
         test_state_version_discarded(root / "state-version")
         test_reap_removes_stale_sessions(root / "reap")
+        test_missing_session_id_never_persists_state(root / "missing-session")
         test_agent_attempt_lifecycle(root / "agent-attempt-lifecycle")
     print("Codex delegation protocol self-test: PASS")
     return 0
