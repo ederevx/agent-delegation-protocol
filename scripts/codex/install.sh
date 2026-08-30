@@ -162,6 +162,7 @@ remove_legacy_link_if_ours "$state_dir/multiplexer.py" "$repo_root/scripts/agent
 remove_legacy_link_if_ours "$state_dir/multiplexer.json" "$repo_root/agents/multiplexer.json"
 safe_link "$repo_root/scripts/agents/mux-scheduler.py" "$state_dir/mux-scheduler.py"
 safe_link "$repo_root/scripts/agents/delegation-classifier.py" "$state_dir/delegation-classifier.py"
+safe_link "$repo_root/scripts/agents/delegation_queue.py" "$state_dir/delegation_queue.py"
 safe_link "$repo_root/agents/catalog" "$state_dir/catalog"
 safe_link "$repo_root/agents/mux-scheduler.json" "$state_dir/mux-scheduler.json"
 
