@@ -175,20 +175,9 @@ Windows PowerShell:
 .\scripts\codex\install.ps1
 ```
 
-Codex now uses a four-layer implementation:
-
-1. **AGENTS authorization/semantic policy** — standing authorization for subagents and parallel delegation while preserving pre-existing global instructions.
-2. **Custom worker agents** — `bulk_worker` is the lifecycle-visible mux-scheduler dispatcher; `balanced_worker` remains pinned to GPT-5.6 Terra for work that needs more judgment.
-3. **Agent mux-scheduler** — capability-filtered, priority-ordered routing across native bindings and custom command/API adapters.
-4. **Lifecycle hooks** — `UserPromptSubmit`, `SubagentStart`, `SubagentStop`, `PreToolUse`, `PostToolUse(Agent)`, and `Stop` mechanically gate clear bulk/sharded, oversized, and multi-step work.
-
-For ordinary multi-subsystem tasks the Codex hook requires evidence of **actual overlapping workers**, not merely two sequential agent runs. When it selects a delegation queue, it instead requires one lifecycle-visible dispatcher and one queue batch; a round-robin mux-scheduler interleaves the batch's virtual agents on the provider lane and runs authorized command jobs concurrently.
-
-**Important:** current Codex requires non-managed hooks to be reviewed/trusted. After installation, restart Codex, run `/hooks`, review the protocol definition, and trust/enable it. Until then, the AGENTS policy/custom workers are installed but mechanical hook enforcement may be skipped.
-
-See [`codex/INSTALL.md`](codex/INSTALL.md).
-
-If an agent is upgrading an older AGENTS-only, partial, or legacy combined installation, it MUST follow [`codex/MIGRATE.md`](codex/MIGRATE.md). That runbook is written directly for Codex and requires non-destructive inventory, migration, verification, and rollback without touching Claude.
+See [`codex/INSTALL.md`](codex/INSTALL.md) for host-specific composition,
+hook trust, verification, and uninstall details. Older installations must use
+the non-destructive [`codex/MIGRATE.md`](codex/MIGRATE.md) runbook.
 
 ## Install Claude only
 
@@ -204,21 +193,9 @@ Windows PowerShell:
 .\scripts\claude\install.ps1
 ```
 
-Claude installation manages only the configured Claude home (normally `~/.claude`) and installs:
-
-- a lifecycle-visible `bulk-worker` dispatcher with Haiku as its native binding;
-- the shared agent catalog, route configuration, and mux-scheduler;
-- a supplementary semantic rule;
-- a local enforcement hook;
-- non-destructively merged lifecycle hooks in `settings.json`;
-- explicit subagent concurrency/depth defaults when absent;
-- experimental agent teams when absent, as an optional additional coordination capability.
-
-Claude enforcement is not text-only. The hook classifies clear bulk/sharded requests, stated token budgets at or above the size threshold, and multi-step requests, records actual worker starts/stops, denies parent mutation before required delegation, and blocks turn completion until delegation requirements are satisfied. Independent-subsystem work ordinarily uses overlapping lifecycle-visible workers. A selected delegation queue instead uses one dispatcher and one queue batch; a round-robin mux-scheduler interleaves its virtual agents on the single lane.
-
-See [`claude/INSTALL.md`](claude/INSTALL.md).
-
-If an agent is upgrading an older text-only, partial, or legacy combined installation, it MUST follow [`claude/MIGRATE.md`](claude/MIGRATE.md). That runbook is written directly for Claude Code and requires non-destructive settings/hook migration without touching Codex.
+See [`claude/INSTALL.md`](claude/INSTALL.md) for host-specific settings,
+lifecycle behavior, verification, and uninstall details. Older installations
+must use the non-destructive [`claude/MIGRATE.md`](claude/MIGRATE.md) runbook.
 
 ## Agent-facing migration runbooks
 
@@ -235,6 +212,7 @@ These tests use temporary config directories and do not modify your live Codex o
 
 ```bash
 python3 scripts/agents/render-bulk-workers.py --check
+python3 scripts/agents/test-delegation-core.py
 python3 scripts/agents/test-mux-scheduler.py
 python3 scripts/codex/test-protocol.py
 python3 scripts/claude/test-protocol.py
@@ -308,6 +286,9 @@ scripts/
     render-bulk-workers.py
     mux-scheduler.py
     delegation-classifier.py
+    delegation_queue.py
+    hook_settings.py
+    test-delegation-core.py
     custom-adapter-template.py
   codex/
     install.sh
@@ -322,6 +303,7 @@ scripts/
     install.ps1
     uninstall.ps1
     manage-settings.py
+    manage-install.py
     test-protocol.py
 ```
 
