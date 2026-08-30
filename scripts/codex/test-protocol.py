@@ -90,6 +90,28 @@ def install_queue_fixture(home: Path, runtime: str, condition: str) -> None:
     }), encoding="utf-8")
 
 
+def install_round_robin_queue_fixture(
+    home: Path, runtime: str, slots: int = 4,
+) -> None:
+    """Install a hook fixture isolating round-robin metadata mapping."""
+    install_queue_fixture(home, runtime, "valid")
+    installed = home / ".delegation-protocol"
+    metadata_path = installed / "catalog" / "test-queue.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["queue_policy"] = {
+        "strategy": "round_robin",
+        "virtual_slots": slots,
+        "quantum": {"unit": "agent_turn", "value": 4},
+    }
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    (installed / "mux-scheduler.py").write_text(
+        "import json\n"
+        "def select_queue_backend(catalog, routes, route, runtime, platform=None):\n"
+        "    return json.loads((catalog / 'test-queue.json').read_text(encoding='utf-8'))\n",
+        encoding="utf-8",
+    )
+
+
 def run(cmd: list[str], *, env: dict[str, str] | None = None, stdin: dict[str, Any] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, input=(json.dumps(stdin) if stdin is not None else None), text=True, capture_output=True, env=env, check=False)
 
@@ -342,7 +364,80 @@ def test_delegation_queue(home: Path) -> None:
     require(allowed is None, "valid queue did not unlock after one dispatcher")
 
 
+def test_round_robin_delegation_queue(home: Path) -> None:
+    install_round_robin_queue_fixture(home, "codex", slots=4)
+    session = "round-robin-delegation-queue"
+    prompt = call_hook(home, "prompt", {
+        "session_id": session,
+        "turn_id": "t1",
+        "prompt": (
+            "Implement independent frontend and backend subsystems plus "
+            "separate tests."
+        ),
+    })
+    context = prompt["hookSpecificOutput"]["additionalContext"]
+    require("round-robin delegation queue selected backend `test-queue`" in context,
+            "round-robin queue selection was not injected")
+    require("advertising 4 virtual slots" in context,
+            "virtual slot count was not injected")
+    require("mux-scheduler `queue`" in context,
+            "singular queue contract was not injected")
+    require("singular scheduler process" in context,
+            "singular scheduler ownership was not injected")
+    state_path = (
+        home / ".delegation-protocol" / "hook-state" / f"{session}.json"
+    )
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    require(state["delegation_queue_strategy"] == "round_robin",
+            "round-robin strategy was not recorded")
+    require(state["delegation_queue_virtual_slots"] == 4,
+            "virtual slot count was not recorded")
+    require(state["min_agents"] == 1,
+            "round-robin queue did not select one lifecycle dispatcher")
+    call_hook(home, "subagent-start", {
+        "session_id": session,
+        "turn_id": "t1",
+        "agent_id": "virtual-a",
+    })
+    allowed = call_hook(home, "pretool", {
+        "session_id": session,
+        "turn_id": "t1",
+        "tool_name": "apply_patch",
+        "tool_input": {},
+    })
+    require(allowed is None,
+            "round-robin queue did not unlock after one dispatcher")
 
+
+def test_queue_fallbacks(root: Path) -> None:
+    for condition in ("invalid", "unavailable", "misconfigured"):
+        home = root / condition
+        install_queue_fixture(home, "codex", condition)
+        session = f"queue-{condition}"
+        prompt = call_hook(home, "prompt", {
+            "session_id": session,
+            "turn_id": "t1",
+            "prompt": (
+                "Implement independent frontend and backend subsystems plus "
+                "separate tests."
+            ),
+        })
+        context = prompt["hookSpecificOutput"]["additionalContext"]
+        require("delegation queue selected" not in context,
+                f"{condition} queue was selected")
+        call_hook(home, "subagent-start", {
+            "session_id": session,
+            "turn_id": "t1",
+            "agent_id": "only-worker",
+        })
+        denied = call_hook(home, "pretool", {
+            "session_id": session,
+            "turn_id": "t1",
+            "tool_name": "apply_patch",
+            "tool_input": {},
+        })
+        require(denied is not None,
+                f"{condition} queue bypassed overlap enforcement")
 
 def test_stop_continuation(home: Path) -> None:
     session = "continuation"
@@ -589,6 +684,8 @@ def main() -> int:
         test_single_gate(root / "single")
         test_multi_overlap(root / "multi")
         test_delegation_queue(root / "queue")
+        test_round_robin_delegation_queue(root / "round-robin-queue")
+        test_queue_fallbacks(root / "queue-fallbacks")
         test_stop_continuation(root / "continuation")
         test_classifier_mapping_smoke(root / "classifier-smoke")
         test_opt_out(root / "optout")

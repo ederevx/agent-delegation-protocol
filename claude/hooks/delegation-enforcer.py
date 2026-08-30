@@ -67,7 +67,7 @@ def claude_home() -> Path:
 # Names of the environment overrides Claude Code exposes for the context window.
 # Passed to the shared classifier's window/threshold helpers so both halves read
 # the window the same way while each names its own host's variables.
-CONTEXT_ENV = ("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CI_CLAUDE_CONTEXT_WINDOW")
+CONTEXT_ENV = ("CLAUDE_CODE_MAX_CONTEXT_TOKENS",)
 
 shared = load_classifier()
 
