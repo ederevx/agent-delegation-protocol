@@ -52,9 +52,7 @@ The parent remains the single integration authority and must reconcile interface
 
 ## Worker lifecycle
 
-A worker does not disappear when its task ends. It goes idle and keeps holding a subagent slot until it is explicitly dismissed, so a turn that spawns workers and never dismisses them steadily consumes the concurrency budget for the rest of the session.
-
-Dismiss each worker with `TaskStop` (pass the worker name or its `name@session` id as `task_id`) as soon as its result has been read and integrated. Dismiss finished workers before spawning replacements rather than accumulating idle ones. Do not dismiss a worker whose output has not been collected yet, and do not keep one alive merely because it might be useful later — spawn a fresh worker when new work appears.
+Claude Code releases a foreground `Agent` when its result returns. Collect and integrate that result normally; do not call `TaskStop` with the completed Agent ID, because `TaskStop` addresses live background-task IDs. Use `TaskStop` only when a running background task actually needs cancellation. A completed foreground worker must not block a later Agent wave or the end of the turn.
 
 ## Local changes belong in this repository
 
@@ -80,7 +78,7 @@ The installed Claude hook may:
 - deny parent mutation until required delegation evidence exists;
 - select delegation queue only through the installed mux-scheduler for a validated available single-stream backend, require one lifecycle dispatcher for any selected queue, and require actual overlapping workers for ordinary native multi-subsystem fan-out;
 - block turn completion until the required delegation evidence exists;
-- record each worker whose task finished, and block new spawns and turn completion until those workers are dismissed with `TaskStop`;
+- track active worker overlap without treating completed foreground Agents as dismissal debt;
 - fail open only when the Agent runtime/model/concurrency path is observed to be unavailable.
 
 If the hook does not classify a task mechanically but this rule clearly applies, follow this rule proactively anyway.

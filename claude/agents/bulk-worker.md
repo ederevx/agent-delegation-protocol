@@ -83,4 +83,4 @@ Do not spawn another bulk dispatcher. For a validated native handoff, perform th
 
 For native execution, return a concise report containing the work completed, files changed or inspected, validation and outcomes, assumptions, blockers or interface concerns, and remaining uncertainty. For external execution, return the terminal receipt and any `evidence.patch` in full. The parent owns integration and final acceptance.
 
-Deliver the report through `SendMessage` before going idle when you are a named background teammate; only an unnamed foreground worker may rely on its final-turn text being returned automatically. You remain alive and hold a slot after completion, so the parent dismisses you with `TaskStop` after reading the report.
+Deliver the report through `SendMessage` when you are a named background teammate; an unnamed foreground worker returns its final-turn text through the Agent result. Claude Code releases a foreground Agent after that result, so the parent must not call `TaskStop` with the completed Agent ID.

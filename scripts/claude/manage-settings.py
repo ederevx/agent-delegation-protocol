@@ -81,8 +81,8 @@ def hook_groups(hook_path: Path, python_exe: str) -> dict[str, list[dict[str, An
         ],
         "PreToolUse": [
             {
-                "matcher": "Edit|Write|NotebookEdit|Bash|PowerShell|Agent|TaskStop",
-                "hooks": [handler(base + " pretool", "enforce delegation and worker dismissal")],
+                "matcher": "Edit|Write|NotebookEdit|Bash|PowerShell|Agent",
+                "hooks": [handler(base + " pretool", "enforce delegation")],
             }
         ],
         "Stop": [
