@@ -171,5 +171,6 @@ rm -f "$state_dir/hooks.before-first-install.json" \
 # long-lived home can carry state for every session it ever ran; it is entirely
 # protocol-owned, so uninstall removes it outright rather than leaving it.
 rm -rf "$state_dir/hook-state"
+rm -rf "$state_dir/__pycache__"
 rmdir "$state_dir" 2>/dev/null || true
 echo "Uninstalled Codex delegation protocol only; unrelated hooks/configuration were preserved and the prior Codex override was restored when applicable."

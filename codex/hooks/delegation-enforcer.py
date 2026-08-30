@@ -12,6 +12,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+sys.dont_write_bytecode = True
+
 
 def codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
@@ -83,6 +85,10 @@ def state_root() -> Path:
 def safe(value: Any) -> str:
     raw = str(value or "unknown")
     return re.sub(r"[^A-Za-z0-9_.-]", "_", raw)[:180] or "unknown"
+
+
+def valid_session_id(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
 
 
 def base(session_id: Any) -> Path:
@@ -335,14 +341,15 @@ def mutating_tool(event: dict[str, Any]) -> bool:
 
 def handle_prompt(event: dict[str, Any]) -> None:
     session = event.get("session_id")
+    correlated = valid_session_id(session)
     # Nothing else in this protocol ever swept old session state, so it grows
     # without bound. Reap once per turn, best effort: a sweep failure must never
     # affect the turn itself.
     try:
-        shared.reap_state(state_root(), keep=safe(session))
+        shared.reap_state(state_root(), keep=safe(session) if correlated else "")
     except Exception:
         pass
-    previous = load_state(session)
+    previous = load_state(session) if correlated else {}
     c = shared.classify(
         str(event.get("prompt") or ""), previous,
         continuation_prefix=CONTINUATION_PREFIX, context_env=CONTEXT_ENV,
@@ -359,15 +366,16 @@ def handle_prompt(event: dict[str, Any]) -> None:
             c["delegation_queue_strategy"] = queue["strategy"]
             c["delegation_queue_virtual_slots"] = queue["virtual_slots"]
             c["min_agents"] = 1
-    if not c.get("carry_forward"):
-        reset_evidence(session)
-    save_state(session, {
-        "protocol_version": shared.PROTOCOL_VERSION,
-        "prompt": str(event.get("prompt") or ""),
-        "turn_id": str(event.get("turn_id") or ""),
-        **c,
-        "completed": False,
-    })
+    if correlated:
+        if not c.get("carry_forward"):
+            reset_evidence(session)
+        save_state(session, {
+            "protocol_version": shared.PROTOCOL_VERSION,
+            "prompt": str(event.get("prompt") or ""),
+            "turn_id": str(event.get("turn_id") or ""),
+            **c,
+            "completed": False,
+        })
     emit({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": policy_context(c)}})
 
 
@@ -564,7 +572,10 @@ def main() -> int:
     if handler is None:
         print(f"unknown mode: {sys.argv[1]}", file=sys.stderr)
         return 2
-    handler(read_event())
+    event = read_event()
+    if sys.argv[1] != "prompt" and not valid_session_id(event.get("session_id")):
+        return 0
+    handler(event)
     return 0
 
 

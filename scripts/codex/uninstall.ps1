@@ -210,6 +210,8 @@ foreach ($owned in @(
 # protocol-owned, so uninstall removes it outright rather than leaving it.
 $HookStateDir = Join-Path $StateDir 'hook-state'
 if (Test-Path -LiteralPath $HookStateDir) { Remove-Item -LiteralPath $HookStateDir -Recurse -Force }
+$BytecodeCache = Join-Path $StateDir '__pycache__'
+if (Test-Path -LiteralPath $BytecodeCache) { Remove-Item -LiteralPath $BytecodeCache -Recurse -Force }
 if ($InstructionCleanupComplete) {
     foreach ($owned in @('state', 'AGENTS.composed.md', 'original-active-global.md')) {
         $path = Join-Path $StateDir $owned
