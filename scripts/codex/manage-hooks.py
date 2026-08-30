@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Any
 
-STATUS_PREFIX = "Delegation protocol:"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agents"))
+from hook_settings import atomic_write, handler, load_json, merge_hook_groups, quote, strip_owned_hooks
 
 
 def parse_args() -> argparse.Namespace:
@@ -20,42 +18,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--hook-path", required=True)
     p.add_argument("--python", dest="python_exe", default=sys.executable)
     return p.parse_args()
-
-
-def quote(value: str) -> str:
-    return '"' + value.replace('"', '\\"') + '"'
-
-
-def load_json(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise SystemExit(f"Refusing to modify invalid JSON at {path}: {exc}")
-    if not isinstance(data, dict):
-        raise SystemExit(f"Refusing to modify non-object JSON at {path}")
-    return data
-
-
-def atomic_write(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".delegation-protocol.tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
-
-
-def handler(command: str, status: str) -> dict[str, Any]:
-    return {
-        "type": "command",
-        "command": command,
-        "timeout": 5,
-        "statusMessage": f"{STATUS_PREFIX} {status}",
-    }
-
-
-def owned(value: Any) -> bool:
-    return isinstance(value, dict) and str(value.get("statusMessage", "")).startswith(STATUS_PREFIX)
 
 
 def groups(hook_path: Path, python_exe: str) -> dict[str, list[dict[str, Any]]]:
@@ -68,36 +30,6 @@ def groups(hook_path: Path, python_exe: str) -> dict[str, list[dict[str, Any]]]:
         "PostToolUse": [{"matcher": "^Agent$", "hooks": [handler(base + " agent-result", "complete Agent attempt")]}],
         "Stop": [{"hooks": [handler(base + " stop", "verify delegation before stop")]}],
     }
-
-
-def strip_owned(settings: dict[str, Any]) -> None:
-    hooks = settings.get("hooks")
-    if not isinstance(hooks, dict):
-        return
-    for event in list(hooks):
-        event_groups = hooks.get(event)
-        if not isinstance(event_groups, list):
-            continue
-        kept_groups: list[Any] = []
-        for group in event_groups:
-            if not isinstance(group, dict):
-                kept_groups.append(group)
-                continue
-            handlers = group.get("hooks")
-            if not isinstance(handlers, list):
-                kept_groups.append(group)
-                continue
-            kept_handlers = [h for h in handlers if not owned(h)]
-            if kept_handlers:
-                new_group = dict(group)
-                new_group["hooks"] = kept_handlers
-                kept_groups.append(new_group)
-        if kept_groups:
-            hooks[event] = kept_groups
-        else:
-            hooks.pop(event, None)
-    if not hooks:
-        settings.pop("hooks", None)
 
 
 def inspect_config(codex_home: Path) -> tuple[bool, bool]:
@@ -130,15 +62,7 @@ def install(codex_home: Path, hooks_path: Path, state_dir: Path, hook_path: Path
     if hooks_path.exists() and not backup.exists():
         shutil.copy2(hooks_path, backup)
 
-    strip_owned(data)
-    hooks = data.setdefault("hooks", {})
-    if not isinstance(hooks, dict):
-        raise SystemExit("Refusing to replace existing non-object `hooks` value")
-    for event, new_groups in groups(hook_path, python_exe).items():
-        current = hooks.setdefault(event, [])
-        if not isinstance(current, list):
-            raise SystemExit(f"Refusing to replace existing non-array hooks.{event}")
-        current.extend(new_groups)
+    merge_hook_groups(data, groups(hook_path, python_exe))
 
     atomic_write(hooks_path, data)
     atomic_write(state_dir / "hooks-manifest.json", {
@@ -159,7 +83,7 @@ def install(codex_home: Path, hooks_path: Path, state_dir: Path, hook_path: Path
 def uninstall(hooks_path: Path, state_dir: Path) -> None:
     if hooks_path.exists():
         data = load_json(hooks_path)
-        strip_owned(data)
+        strip_owned_hooks(data)
         atomic_write(hooks_path, data)
     manifest = state_dir / "hooks-manifest.json"
     if manifest.exists():
