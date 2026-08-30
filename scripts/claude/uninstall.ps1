@@ -22,6 +22,7 @@ $AgentSource = Join-Path $RepoRoot 'claude\agents\bulk-worker.md'
 $HookSource = Join-Path $RepoRoot 'claude\hooks\delegation-enforcer.py'
 $MuxSource = Join-Path $RepoRoot 'scripts\agents\mux-scheduler.py'
 $ClassifierSource = Join-Path $RepoRoot 'scripts\agents\delegation-classifier.py'
+$QueueSource = Join-Path $RepoRoot 'scripts\agents\delegation_queue.py'
 $CatalogSource = Join-Path $RepoRoot 'agents\catalog'
 $RoutesSource = Join-Path $RepoRoot 'agents\mux-scheduler.json'
 $RuleDest = Join-Path $ClaudeHome 'rules\delegation-protocol.md'
@@ -29,6 +30,7 @@ $AgentDest = Join-Path $ClaudeHome 'agents\bulk-worker.md'
 $HookDest = Join-Path $ClaudeHome 'hooks\delegation-enforcer.py'
 $MuxDest = Join-Path $ClaudeHome '.delegation-protocol\mux-scheduler.py'
 $ClassifierDest = Join-Path $ClaudeHome '.delegation-protocol\delegation-classifier.py'
+$QueueDest = Join-Path $ClaudeHome '.delegation-protocol\delegation_queue.py'
 $CatalogDest = Join-Path $ClaudeHome '.delegation-protocol\catalog'
 $RoutesDest = Join-Path $ClaudeHome '.delegation-protocol\mux-scheduler.json'
 
@@ -40,6 +42,7 @@ Remove-IfOurs $AgentDest $AgentSource
 Remove-IfOurs $HookDest $HookSource
 Remove-IfOurs $MuxDest $MuxSource
 Remove-IfOurs $ClassifierDest $ClassifierSource
+Remove-IfOurs $QueueDest $QueueSource
 Remove-IfOurs (Join-Path $ClaudeHome '.delegation-protocol\multiplexer.py') (Join-Path $RepoRoot 'scripts\agents\multiplexer.py')
 Remove-IfOurs $CatalogDest $CatalogSource
 Remove-IfOurs $RoutesDest $RoutesSource
