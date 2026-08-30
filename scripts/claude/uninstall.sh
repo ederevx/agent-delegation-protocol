@@ -30,6 +30,7 @@ remove_if_ours "$claude_home/agents/bulk-worker.md" "$repo_root/claude/agents/bu
 remove_if_ours "$claude_home/hooks/delegation-enforcer.py" "$repo_root/claude/hooks/delegation-enforcer.py"
 remove_if_ours "$claude_home/.delegation-protocol/mux-scheduler.py" "$repo_root/scripts/agents/mux-scheduler.py"
 remove_if_ours "$claude_home/.delegation-protocol/delegation-classifier.py" "$repo_root/scripts/agents/delegation-classifier.py"
+remove_if_ours "$claude_home/.delegation-protocol/delegation_queue.py" "$repo_root/scripts/agents/delegation_queue.py"
 remove_if_ours "$claude_home/.delegation-protocol/multiplexer.py" "$repo_root/scripts/agents/multiplexer.py"
 remove_if_ours "$claude_home/.delegation-protocol/catalog" "$repo_root/agents/catalog"
 remove_if_ours "$claude_home/.delegation-protocol/mux-scheduler.json" "$repo_root/agents/mux-scheduler.json"
