@@ -30,6 +30,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+sys.dont_write_bytecode = True
+
 
 def load_classifier() -> Any:
     """Import the shared classifier: installed copy first, then this clone.
@@ -103,12 +105,16 @@ def safe_session_id(value: Any) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", raw)[:160] or "unknown"
 
 
+def valid_session_id(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
 def turn_base(session_id: Any) -> Path:
     return state_root() / safe_session_id(session_id)
 
 
 def state_path(session_id: Any) -> Path:
-    return turn_base(session_id).with_suffix(".json")
+    return Path(str(turn_base(session_id)) + ".json")
 
 
 def active_dir(session_id: Any) -> Path:
@@ -283,16 +289,19 @@ def is_relayed_message(prompt: str) -> bool:
 
 def handle_prompt(event: dict[str, Any]) -> None:
     session_id = event.get("session_id")
+    correlated = valid_session_id(session_id)
 
     # Best effort only: a sweep failure must never affect the turn it happens to
     # run alongside. This is the once-per-turn entry point, so it is also the one
     # place a periodic sweep costs nothing extra to schedule.
     try:
-        shared.reap_state(state_root(), keep=safe_session_id(session_id))
+        shared.reap_state(
+            state_root(), keep=safe_session_id(session_id) if correlated else ""
+        )
     except Exception:
         pass
 
-    previous = load_state(session_id)
+    previous = load_state(session_id) if correlated else {}
     prompt = str(event.get("prompt") or "")
 
     # Carry the in-flight turn forward rather than reopening it. Only a real user turn
@@ -325,16 +334,17 @@ def handle_prompt(event: dict[str, Any]) -> None:
             classification["delegation_queue_strategy"] = queue["strategy"]
             classification["delegation_queue_virtual_slots"] = queue["virtual_slots"]
             classification["min_agents"] = 1
-    reset_evidence(session_id)
-    save_state(
-        session_id,
-        {
-            "protocol_version": shared.PROTOCOL_VERSION,
-            "prompt": prompt,
-            **classification,
-            "completed": False,
-        },
-    )
+    if correlated:
+        reset_evidence(session_id)
+        save_state(
+            session_id,
+            {
+                "protocol_version": shared.PROTOCOL_VERSION,
+                "prompt": prompt,
+                **classification,
+                "completed": False,
+            },
+        )
     emit(
         {
             "hookSpecificOutput": {
@@ -485,7 +495,10 @@ def main() -> int:
     if handler is None:
         print(f"unknown mode: {sys.argv[1]}", file=sys.stderr)
         return 2
-    handler(read_input())
+    event = read_input()
+    if sys.argv[1] != "prompt" and not valid_session_id(event.get("session_id")):
+        return 0
+    handler(event)
     return 0
 
 

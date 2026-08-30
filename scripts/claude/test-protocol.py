@@ -749,11 +749,12 @@ def test_state_version_mismatch_is_discarded(home: Path) -> None:
 def test_reap_removes_stale_sessions(home: Path) -> None:
     """An old session's state is swept while the session in progress is kept."""
     stale_session = "reap-stale-session"
-    current_session = "reap-current-session"
+    current_session = "reap.current.session"
     call_hook(home, "prompt", {"session_id": stale_session, "prompt": "Do some work"})
     call_hook(home, "prompt", {"session_id": current_session, "prompt": "Do some other work"})
 
     sessions_dir = home / ".delegation-protocol" / "sessions"
+    (sessions_dir / "unknown.json").write_text("{}", encoding="utf-8")
     stale_path = sessions_dir / f"{stale_session}.json"
     current_path = sessions_dir / f"{current_session}.json"
     require(stale_path.exists() and current_path.exists(), "fixture state was not written")
@@ -768,6 +769,19 @@ def test_reap_removes_stale_sessions(home: Path) -> None:
 
     require(not stale_path.exists(), "reap did not remove an old session's state")
     require(current_path.exists(), "reap removed the state of the session in progress")
+    require(not (sessions_dir / "unknown.json").exists(),
+            "reap retained legacy uncorrelated session state")
+
+
+def test_missing_session_id_never_persists_state(home: Path) -> None:
+    response = call_hook(home, "prompt", {"prompt": "Update 20 files."})
+    require(response is not None, "uncorrelated prompt did not receive policy context")
+    call_hook(home, "pretool", {
+        "tool_name": "Edit", "tool_input": {"file_path": "example.py"},
+    })
+    sessions = home / ".delegation-protocol" / "sessions"
+    require(not any(sessions.glob("unknown*")),
+            "missing session id created shared fallback state")
 
 
 def main() -> int:
@@ -795,6 +809,7 @@ def main() -> int:
         test_classifier_loader_falls_back_to_clone(root / "loader-fallback-home")
         test_state_version_mismatch_is_discarded(root / "stale-version-home")
         test_reap_removes_stale_sessions(root / "reap-home")
+        test_missing_session_id_never_persists_state(root / "missing-session-home")
     print("Claude delegation protocol self-test: PASS")
     return 0
 
