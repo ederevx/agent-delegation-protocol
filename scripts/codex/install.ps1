@@ -258,6 +258,10 @@ if ($savedOverrideItem -and -not $overrideItem -and -not $validInterruptedRecove
 }
 
 New-Item -ItemType Directory -Force -Path $CodexHome, (Join-Path $CodexHome 'agents'), (Join-Path $CodexHome 'hooks'), $StateDir | Out-Null
+$BytecodeCache = Join-Path $StateDir '__pycache__'
+if (Test-Path -LiteralPath $BytecodeCache) {
+    Remove-Item -LiteralPath $BytecodeCache -Recurse -Force
+}
 
 function New-SafeSymlink([string]$Source, [string]$Destination) {
     $item = Get-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue

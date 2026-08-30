@@ -460,6 +460,7 @@ install_global_instructions() {
 
 preflight_install
 mkdir -p "$codex_home" "$codex_home/agents" "$codex_home/hooks" "$state_dir"
+rm -rf "$state_dir/__pycache__"
 
 install_global_instructions
 remove_legacy_worker_if_ours \
