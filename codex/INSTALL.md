@@ -91,6 +91,7 @@ The installer also adds symlinks under `$CODEX_HOME/.delegation-protocol/`:
 ```text
 mux-scheduler.py          -> <clone>/scripts/agents/mux-scheduler.py
 delegation-classifier.py  -> <clone>/scripts/agents/delegation-classifier.py
+delegation_queue.py       -> <clone>/scripts/agents/delegation_queue.py
 catalog                   -> <clone>/agents/catalog
 mux-scheduler.json        -> <clone>/agents/mux-scheduler.json
 ```
