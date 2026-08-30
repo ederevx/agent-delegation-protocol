@@ -605,6 +605,7 @@ print(json.dumps({{"classification": "success"}}))
             ("delegation_queue", False),
             ("virtual_slots", 33),
             ("quantum_unit", "second"),
+            ("quantum_value", 101),
             ("protocol", "oneshot"),
         ]
         for field, replacement in cases:
@@ -613,6 +614,8 @@ print(json.dumps({{"classification": "success"}}))
                 changed["queue_policy"]["virtual_slots"] = replacement
             elif field == "quantum_unit":
                 changed["queue_policy"]["quantum"]["unit"] = replacement
+            elif field == "quantum_value":
+                changed["queue_policy"]["quantum"]["value"] = replacement
             elif field == "protocol":
                 changed["binding"]["protocol"] = replacement
             else:
@@ -638,26 +641,30 @@ assert value["adapter_protocol"] == "cooperative-v1"
 if "AGENT_INFERENCE_CONFIG" in os.environ:
     assert json.loads(os.environ["AGENT_INFERENCE_CONFIG"])["effort"] == "medium"
 operation = value["operation"]
+identity = {{"schema_version": 1, "adapter_protocol": "cooperative-v1",
+            "operation": operation}}
 if operation == "start":
     name = value["task"]["id"]
     time.sleep({delay!r})
-    print(json.dumps({{"state": "ready", "classification": "success",
+    print(json.dumps({{**identity, "state": "ready", "classification": "success",
                       "token": f"{{name}}:0"}}))
     raise SystemExit(0)
 name, raw_count = value["token"].split(":")
 if operation == "cancel":
-    print(json.dumps({{"state": "complete", "classification": "success"}}))
+    print(json.dumps({{**identity, "state": "cancelled",
+                      "classification": "cancelled", "exit_code": 0}}))
     raise SystemExit(0)
 count = int(raw_count) + 1
 with Path({str(events)!r}).open("a") as handle:
     handle.write(f"{{name}}{{count}}\\n")
 time.sleep({delay!r})
 if count < 2:
-    print(json.dumps({{"state": "yielded", "classification": "success",
+    print(json.dumps({{**identity, "state": "yielded", "classification": "success",
                       "token": f"{{name}}:{{count}}"}}))
 else:
-    print(json.dumps({{"state": "complete", "classification": "success",
-                      "status": "success", "task_id": name}}))
+    print(json.dumps({{**identity, "state": "complete", "classification": "success",
+                      "status": "success", "exit_code": 0,
+                      "task_id": name}}))
 """)
 
     def test_cooperative_queue_interleaves_tasks(self) -> None:
@@ -694,8 +701,11 @@ else:
 import json, sys
 from pathlib import Path
 value = json.load(sys.stdin)
+identity = {{"schema_version": 1, "adapter_protocol": "cooperative-v1",
+            "operation": value["operation"], "classification": "success"}}
 if value["operation"] == "start":
-    print(json.dumps({{"state": "ready", "token": value["task"]["id"] + ":ready"}}))
+    print(json.dumps({{**identity, "state": "ready",
+                      "token": value["task"]["id"] + ":ready"}}))
     raise SystemExit(0)
 name = value["token"].split(":", 1)[0]
 resolution = value.get("permission_resolution")
@@ -714,7 +724,7 @@ if resolution is None:
     else:
         argv = [{sys.executable!r}, "-c", {command_code!r}, name]
     print(json.dumps({{
-        "state": "permission_required", "token": name + ":command",
+        **identity, "state": "permission_required", "token": name + ":command",
         "request": {{
             "request_id": "request-" + name, "tool_name": "Bash",
             "tool_input": {{"command": "fixture " + name}},
@@ -726,7 +736,7 @@ assert resolution["request_id"] == "request-" + name
 assert resolution["decision"] == "handled"
 with Path({str(results)!r}).open("a") as handle:
     handle.write(json.dumps({{"name": name, "result": resolution["result"]}}) + "\\n")
-print(json.dumps({{"state": "complete", "classification": "success",
+print(json.dumps({{**identity, "state": "complete", "classification": "success",
                   "exit_code": 0, "task_id": name}}))
 """)
 
@@ -906,18 +916,20 @@ print(json.dumps({{"state": "complete", "classification": "success",
         stub = self.make_stub("deadline-cooperative.py", f"""
 import json, sys, time
 value = json.load(sys.stdin)
+identity = {{"schema_version": 1, "adapter_protocol": "cooperative-v1",
+            "operation": value["operation"], "classification": "success"}}
 time.sleep(.2)
 if value["operation"] == "start":
-    print(json.dumps({{"state": "ready", "token": "A:ready"}}))
+    print(json.dumps({{**identity, "state": "ready", "token": "A:ready"}}))
 elif value.get("permission_resolution") is None:
     print(json.dumps({{
-        "state": "permission_required", "token": "A:command",
+        **identity, "state": "permission_required", "token": "A:command",
         "request": {{"request_id": "request-A", "tool_name": "Bash",
                     "mux_execution": {{"argv": [{sys.executable!r}, "-c",
                         "import time; time.sleep(.7)"], "cwd": {str(self.root)!r}}}}},
     }}))
 else:
-    print(json.dumps({{"state": "complete", "exit_code": 0}}))
+    print(json.dumps({{**identity, "state": "complete", "exit_code": 0}}))
 """)
         agent = metadata("cooperative", [sys.executable, str(stub)], cooperative=True)
         agent["binding"]["timeout_seconds"] = 1
@@ -934,13 +946,15 @@ else:
 import json, sys
 from pathlib import Path
 value = json.load(sys.stdin)
+identity = {{"schema_version": 1, "adapter_protocol": "cooperative-v1",
+            "operation": value["operation"], "classification": "success"}}
 name = value.get("task", {{}}).get("id") or value["token"]
 with Path({str(events)!r}).open("a") as handle:
     handle.write(value["operation"] + ":" + name + "\\n")
 if value["operation"] == "start":
-    print(json.dumps({{"state": "ready", "token": name}}))
+    print(json.dumps({{**identity, "state": "ready", "token": name}}))
 else:
-    print(json.dumps({{"state": "complete", "exit_code": 0}}))
+    print(json.dumps({{**identity, "state": "complete", "exit_code": 0}}))
 """)
         agent = metadata("cooperative", [sys.executable, str(stub)], cooperative=True)
         agent["queue_policy"]["virtual_slots"] = 2
@@ -1022,11 +1036,13 @@ else:
         stub = self.make_stub("permission-cooperative.py", """
 import json, sys
 value = json.load(sys.stdin)
+identity = {"schema_version": 1, "adapter_protocol": "cooperative-v1",
+            "operation": value["operation"], "classification": "success"}
 if value["operation"] == "start":
-    print(json.dumps({"state": "ready", "token": "permission-token"}))
+    print(json.dumps({**identity, "state": "ready", "token": "permission-token"}))
 elif "permission_resolution" not in value:
     print(json.dumps({
-        "state": "permission_required", "token": value["token"],
+        **identity, "state": "permission_required", "token": value["token"],
         "request": {
             "request_id": "request-1", "tool_name": "Bash",
             "tool_input": {"command": "git status"},
@@ -1037,7 +1053,7 @@ else:
         "request_id": "request-1", "decision": "allow",
     }
     print(json.dumps({
-        "state": "complete", "exit_code": 0,
+        **identity, "state": "complete", "exit_code": 0,
         "classification": "success", "task_id": "A",
     }))
 """)
@@ -1088,10 +1104,12 @@ else:
         stub = self.make_stub("nonzero-yield.py", """
 import json, sys
 value = json.load(sys.stdin)
+identity = {"schema_version": 1, "adapter_protocol": "cooperative-v1",
+            "operation": value["operation"], "classification": "success"}
 if value["operation"] == "start":
-    print(json.dumps({"state": "ready", "token": "opaque"}))
+    print(json.dumps({**identity, "state": "ready", "token": "opaque"}))
 else:
-    print(json.dumps({"state": "yielded", "token": "opaque"}))
+    print(json.dumps({**identity, "state": "yielded", "token": "opaque"}))
     raise SystemExit(7)
 """)
         self.write_agent(metadata("cooperative", [sys.executable, str(stub)],
@@ -1108,13 +1126,15 @@ else:
         stub = self.make_stub("retry-yield.py", """
 import json, sys
 value = json.load(sys.stdin)
+identity = {"schema_version": 1, "adapter_protocol": "cooperative-v1",
+            "operation": value["operation"], "classification": "success"}
 if value["operation"] == "start":
-    print(json.dumps({"state": "ready", "token": "A:0"}))
+    print(json.dumps({**identity, "state": "ready", "token": "A:0"}))
 elif value["token"] == "A:0":
-    print(json.dumps({"state": "yielded", "token": "A:1",
+    print(json.dumps({**identity, "state": "yielded", "token": "A:1",
                       "retry_after_seconds": 0.05}))
 else:
-    print(json.dumps({"state": "complete", "exit_code": 0}))
+    print(json.dumps({**identity, "state": "complete", "exit_code": 0}))
 """)
         self.write_agent(metadata("cooperative", [sys.executable, str(stub)],
                                   cooperative=True))
@@ -1143,13 +1163,16 @@ else:
 import json, sys
 from pathlib import Path
 value = json.load(sys.stdin)
+identity = {{"schema_version": 1, "adapter_protocol": "cooperative-v1",
+            "operation": value["operation"], "classification": "success"}}
 if value["operation"] == "start":
-    print(json.dumps({{"state": "ready", "token": value["task"]["id"]}}))
+    print(json.dumps({{**identity, "state": "ready", "token": value["task"]["id"]}}))
 elif value["operation"] == "cancel":
     Path({str(marker)!r}).write_text(value["token"])
-    print(json.dumps({{"state": "complete", "classification": "success"}}))
+    print(json.dumps({{**identity, "state": "cancelled",
+                      "classification": "cancelled", "exit_code": 0}}))
 else:
-    print(json.dumps({{"state": "failed", "classification": "task_failed",
+    print(json.dumps({{**identity, "state": "failed", "classification": "task_failed",
                       "exit_code": 3}}))
 """)
         self.write_agent(metadata("cooperative", [sys.executable, str(stub)],
@@ -1170,19 +1193,22 @@ else:
 import json, sys
 from pathlib import Path
 value = json.load(sys.stdin)
+identity = {{"schema_version": 1, "adapter_protocol": "cooperative-v1",
+            "operation": value["operation"], "classification": "success"}}
 if value["operation"] == "start":
-    print(json.dumps({{"state": "ready", "token": value["task"]["id"]}}))
+    print(json.dumps({{**identity, "state": "ready", "token": value["task"]["id"]}}))
 elif value["operation"] == "cancel":
     Path({str(marker)!r}).write_text(value["token"])
-    print(json.dumps({{"state": "complete"}}))
+    print(json.dumps({{**identity, "state": "cancelled",
+                      "classification": "cancelled", "exit_code": 0}}))
 elif value["token"] == "A":
     print(json.dumps({{
-        "state": "permission_required", "token": "A",
+        **identity, "state": "permission_required", "token": "A",
         "request": {{"request_id": "parent-A", "tool_name": "Write",
                     "tool_input": {{"path": "owned.txt"}}}},
     }}))
 else:
-    print(json.dumps({{"state": "failed", "classification": "task_failed",
+    print(json.dumps({{**identity, "state": "failed", "classification": "task_failed",
                       "exit_code": 3}}))
 """)
         self.write_agent(metadata("cooperative", [sys.executable, str(stub)],
@@ -1215,13 +1241,16 @@ else:
         stub = self.make_stub("windows-tree-cooperative.py", f"""
 import json, sys
 value = json.load(sys.stdin)
+identity = {{"schema_version": 1, "adapter_protocol": "cooperative-v1",
+            "operation": value["operation"], "classification": "success"}}
 if value["operation"] == "start":
-    print(json.dumps({{"state": "ready", "token": "tree"}}))
+    print(json.dumps({{**identity, "state": "ready", "token": "tree"}}))
 elif value["operation"] == "cancel":
-    print(json.dumps({{"state": "complete"}}))
+    print(json.dumps({{**identity, "state": "cancelled",
+                      "classification": "cancelled", "exit_code": 0}}))
 else:
     print(json.dumps({{
-        "state": "permission_required", "token": "tree",
+        **identity, "state": "permission_required", "token": "tree",
         "request": {{"request_id": "request-tree", "tool_name": "Bash",
                     "mux_execution": {{"argv": [{sys.executable!r}, "-c",
                         {command_code!r}], "cwd": {str(self.root)!r}}}}},
@@ -1307,14 +1336,17 @@ else:
 import json, sys
 from pathlib import Path
 value = json.load(sys.stdin)
+identity = {{"schema_version": 1, "adapter_protocol": "cooperative-v1",
+            "operation": value["operation"], "classification": "success"}}
 if value["operation"] == "start":
-    print(json.dumps({{"state": "ready", "token": "A:ready"}}))
+    print(json.dumps({{**identity, "state": "ready", "token": "A:ready"}}))
 elif value["operation"] == "cancel":
     Path({str(adapter_cancelled)!r}).write_text(value["token"])
-    print(json.dumps({{"state": "complete"}}))
+    print(json.dumps({{**identity, "state": "cancelled",
+                      "classification": "cancelled", "exit_code": 0}}))
 else:
     print(json.dumps({{
-        "state": "permission_required", "token": "A:command",
+        **identity, "state": "permission_required", "token": "A:command",
         "request": {{"request_id": "request-A", "tool_name": "Bash",
                     "mux_execution": {{"argv": [{sys.executable!r}, "-c",
                         {command_code!r}], "cwd": {str(self.root)!r}}}}},
@@ -1443,7 +1475,10 @@ class AdapterTemplateTests(unittest.TestCase):
 
     def test_cooperative_envelope_is_bounded_and_protocol_checked(self) -> None:
         result = self.invoke({
-            "adapter_protocol": "cooperative-v1", "operation": "start",
+            "schema_version": 1, "adapter_protocol": "cooperative-v1",
+            "operation": "start",
+            "scheduler": {"protocol_version": 1,
+                          "capabilities": ["mux-command-execution-v1"]},
             "quantum": {"unit": "agent_turn", "value": 4},
             "task": {"id": "one", "prompt": "audit", "mode": "read", "repo": self.repo},
         })
@@ -1454,11 +1489,47 @@ class AdapterTemplateTests(unittest.TestCase):
         self.assertIn("cooperative custom API start is not configured", receipt["error"])
 
         result = self.invoke({
-            "adapter_protocol": "wrong", "operation": "step", "token": "opaque",
+            "schema_version": 1, "adapter_protocol": "wrong",
+            "operation": "step", "token": "opaque",
             "quantum": {"unit": "agent_turn", "value": 4},
         })
         self.assertEqual(result.returncode, 64)
-        self.assertEqual(json.loads(result.stdout)["classification"], "invalid_task")
+        receipt = json.loads(result.stdout)
+        self.assertEqual(receipt["classification"], "unsupported_adapter_contract")
+        self.assertNotIn("adapter_protocol", receipt)
+        self.assertNotIn("operation", receipt)
+
+        result = self.invoke({
+            "schema_version": 1, "adapter_protocol": "cooperative-v1",
+            "operation": "unknown", "quantum": {"unit": "agent_turn", "value": 4},
+        })
+        self.assertEqual(result.returncode, 64)
+        receipt = json.loads(result.stdout)
+        self.assertEqual(receipt["classification"], "invalid_task")
+        self.assertNotIn("adapter_protocol", receipt)
+        self.assertNotIn("operation", receipt)
+
+        result = self.invoke({
+            "schema_version": 1, "adapter_protocol": "cooperative-v1",
+            "operation": "start",
+            "scheduler": {"protocol_version": 1, "capabilities": [{}]},
+            "quantum": {"unit": "agent_turn", "value": 101},
+            "task": {"id": "one"},
+        })
+        self.assertEqual(result.returncode, 64)
+        receipt = json.loads(result.stdout)
+        self.assertEqual(receipt["classification"], "invalid_task")
+        self.assertEqual(receipt["operation"], "start")
+
+        result = subprocess.run(
+            [sys.executable, str(ADAPTER)], input="not-json", text=True,
+            capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 64)
+        receipt = json.loads(result.stdout)
+        self.assertEqual(receipt["classification"], "invalid_task")
+        self.assertNotIn("adapter_protocol", receipt)
+        self.assertNotIn("operation", receipt)
 
 
 if __name__ == "__main__":
