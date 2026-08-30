@@ -23,7 +23,7 @@
         "A backend permission request uses the same escalation path: relay it to the parent and never widen it into a standing grant."
       ],
       "lifecycle_contract": [
-        "Deliver the report through `SendMessage` before going idle when you are a named background teammate; only an unnamed foreground worker may rely on its final-turn text being returned automatically. You remain alive and hold a slot after completion, so the parent dismisses you with `TaskStop` after reading the report."
+        "Deliver the report through `SendMessage` when you are a named background teammate; an unnamed foreground worker returns its final-turn text through the Agent result. Claude Code releases a foreground Agent after that result, so the parent must not call `TaskStop` with the completed Agent ID."
       ],
       "output": {
         "path": "claude/agents/bulk-worker.md",
