@@ -64,6 +64,15 @@ def manage_settings(repo: Path, home: Path, python_exe: str, action: str) -> Non
     )
 
 
+def manage_git_gate(repo: Path, python_exe: str, action: str) -> None:
+    subprocess.run(
+        [python_exe, str(repo / "scripts/git/manage-conventions.py"), action,
+         "--owner", "claude", *(["--python", python_exe]
+                                 if action == "install" else [])],
+        check=True,
+    )
+
+
 def install(repo: Path, home: Path, python_exe: str) -> None:
     subprocess.run(
         [python_exe, str(repo / "scripts/agents/render-bulk-workers.py"), "--check"],
@@ -79,12 +88,15 @@ def install(repo: Path, home: Path, python_exe: str) -> None:
     remove_if_ours(home / ".delegation-protocol/multiplexer.json",
                    repo / "agents/multiplexer.json")
     manage_settings(repo, home, python_exe, "install")
+    manage_git_gate(repo, python_exe, "install")
     print("Installed Claude delegation protocol only: hooks, settings, rule, "
-          "bulk-worker, and agent mux-scheduler. Restart Claude Code sessions.")
+          "bulk-worker, agent mux-scheduler, and the shared Git convention "
+          "gate. Restart Claude Code sessions.")
 
 
 def uninstall(repo: Path, home: Path, python_exe: str) -> None:
     manage_settings(repo, home, python_exe, "uninstall")
+    manage_git_gate(repo, python_exe, "uninstall")
     owned = paths(repo, home)
     owned.extend([
         (repo / "scripts/agents/multiplexer.py", home / ".delegation-protocol/multiplexer.py"),

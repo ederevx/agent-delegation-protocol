@@ -171,6 +171,8 @@ safe_link "$repo_root/agents/mux-scheduler.json" "$state_dir/mux-scheduler.json"
   --codex-home "$codex_home" \
   --hook-path "$codex_home/hooks/delegation-enforcer.py" \
   --python "$python_exe"
+"$python_exe" "$repo_root/scripts/git/manage-conventions.py" install \
+  --owner codex --python "$python_exe"
 
-echo "Installed Codex delegation protocol only: supplementary AGENTS instructions, worker tiers, agent mux-scheduler, and lifecycle hooks."
+echo "Installed Codex delegation protocol only: supplementary AGENTS instructions, worker tiers, agent mux-scheduler, lifecycle hooks, and the shared Git convention gate."
 echo "Restart Codex, run /hooks, and review/trust the Agent Delegation Protocol hooks before relying on mechanical enforcement."

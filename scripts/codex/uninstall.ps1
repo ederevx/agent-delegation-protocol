@@ -72,6 +72,8 @@ $RoutesDest = Join-Path $StateDir 'mux-scheduler.json'
 
 & $PythonExe (Join-Path $RepoRoot 'scripts\codex\manage-hooks.py') uninstall --codex-home $CodexHome --hook-path $HookDest --python $PythonExe
 if ($LASTEXITCODE -ne 0) { throw "Codex hook uninstallation failed with exit code $LASTEXITCODE" }
+& $PythonExe (Join-Path $RepoRoot 'scripts\git\manage-conventions.py') uninstall --owner codex
+if ($LASTEXITCODE -ne 0) { throw "Git convention gate uninstallation failed with exit code $LASTEXITCODE" }
 
 Remove-ManagedCopyIfOurs $BulkDest $BulkSource (Join-Path $StateDir 'bulk-worker.sha256')
 Remove-LegacyWorkerIfOurs $LegacyBulkDest $LegacyBulkSource $LegacyBulkHash
