@@ -88,6 +88,9 @@ class RepositoryConfigurationTests(unittest.TestCase):
             self.assertFalse(external["native"])
             self.assertTrue(external["delegation_queue"])
             self.assertGreater(external["priority"], 0)
+            self.assertEqual(external["limits"]["concurrency_owner"], "backend")
+            self.assertEqual(external["queue_policy"]["quantum"],
+                             {"unit": "agent_turn", "value": 1})
 
 
 class MuxSchedulerTests(unittest.TestCase):
