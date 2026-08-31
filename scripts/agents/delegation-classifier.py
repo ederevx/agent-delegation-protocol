@@ -407,9 +407,6 @@ def reap_state(root: Path, keep: str = "", ttl: int = STATE_TTL_SECONDS) -> int:
     for path in sorted(root.iterdir()):
         if keep and belongs_to(path.name, keep):
             continue
-        # Older hooks persisted blank session ids under one shared fallback.
-        # It cannot safely correlate to a real session and should never survive
-        # an upgrade sweep regardless of age.
         legacy_unknown = belongs_to(path.name, "unknown")
         try:
             if not legacy_unknown and path.stat().st_mtime >= cutoff:
