@@ -63,8 +63,6 @@ remove_legacy_bulk_if_ours() {
   --codex-home "$codex_home" \
   --hook-path "$codex_home/hooks/delegation-enforcer.py" \
   --python "$python_exe"
-"$python_exe" "$repo_root/scripts/git/manage-conventions.py" uninstall \
-  --owner codex
 
 remove_managed_copy_if_ours \
   "$codex_home/agents/bulk_worker.toml" \

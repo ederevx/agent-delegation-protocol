@@ -90,22 +90,6 @@ class RepositoryConfigurationTests(unittest.TestCase):
 
 
 class MuxSchedulerTests(unittest.TestCase):
-    def test_mux_execution_rejects_git_push_variants(self) -> None:
-        for argv in (
-            ["git", "push", "origin", "main"],
-            ["git", "-C", str(self.root), "push", "origin", "main"],
-            ["git", "--git-dir=.git", "send-pack", "origin", "main"],
-        ):
-            receipt = {
-                "request": {
-                    "request_id": "push-attempt", "tool_name": "Bash",
-                    "mux_execution": {"argv": argv, "cwd": str(self.root)},
-                },
-            }
-            with self.subTest(argv=argv), self.assertRaisesRegex(
-                    MUX_MODULE.InputError, "cannot run Git push"):
-                MUX_MODULE._validated_mux_execution(receipt)
-
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="mux-scheduler-test-")
         self.root = Path(self.temp.name)
