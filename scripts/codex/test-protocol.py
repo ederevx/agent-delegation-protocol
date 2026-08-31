@@ -21,6 +21,7 @@ INSTALLER = REPO_ROOT / "scripts" / "codex" / "install.sh"
 UNINSTALLER = REPO_ROOT / "scripts" / "codex" / "uninstall.sh"
 WORKER_RENDERER = REPO_ROOT / "scripts" / "agents" / "render-bulk-workers.py"
 CLASSIFIER = REPO_ROOT / "scripts" / "agents" / "delegation-classifier.py"
+GIT_GATE = REPO_ROOT / "scripts" / "git" / "manage-conventions.py"
 
 
 def load_hook_module(codex_home: Path) -> Any:
@@ -210,6 +211,15 @@ def test_codex_worker_install(root: Path) -> None:
 
     result = run(["bash", str(INSTALLER)], env=env)
     require(result.returncode == 0, f"installer failed: {result.stderr}")
+    git_state = Path(env["DELEGATION_PROTOCOL_GIT_STATE"])
+    git_manifest = json.loads(
+        (git_state / "manifest.json").read_text(encoding="utf-8")
+    )
+    require(git_manifest["owners"] == ["codex"],
+            "Codex installer did not claim the shared Git gate")
+    require((git_state / "hooks" / "commit-msg").is_file()
+            and (git_state / "hooks" / "pre-push").is_file(),
+            "Codex installer omitted a Git convention hook")
     require(balanced.is_symlink() and balanced.resolve() == balanced_source.resolve(),
             "balanced worker link was not preserved")
     require(not legacy_bulk.exists() and not legacy_bulk.is_symlink(),
@@ -264,6 +274,8 @@ def test_codex_worker_install(root: Path) -> None:
     result = run(["bash", str(UNINSTALLER)], env=env)
     require(result.returncode == 0, f"uninstaller failed: {result.stderr}")
     require(not bulk.exists(), "uninstaller left the unmodified managed worker copy")
+    require(not (git_state / "manifest.json").exists(),
+            "Codex uninstaller retained its last Git gate ownership")
     result = run(["bash", str(UNINSTALLER)], env=env)
     require(result.returncode == 0, f"idempotent uninstall failed: {result.stderr}")
 
@@ -692,9 +704,13 @@ def main() -> int:
     require(UNINSTALLER.exists(), f"missing {UNINSTALLER}")
     require(WORKER_RENDERER.exists(), f"missing {WORKER_RENDERER}")
     require(CLASSIFIER.exists(), f"missing {CLASSIFIER}")
+    require(GIT_GATE.exists(), f"missing {GIT_GATE}")
     test_generated_workers()
     with tempfile.TemporaryDirectory(prefix="codex-delegation-test-") as tmp:
         root = Path(tmp)
+        os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
+        os.environ["GIT_CONFIG_GLOBAL"] = str(root / "global.gitconfig")
+        os.environ["DELEGATION_PROTOCOL_GIT_STATE"] = str(root / "git-gate")
         test_codex_worker_install(root / "installer")
         test_hooks_merge(root / "merge")
         test_single_gate(root / "single")

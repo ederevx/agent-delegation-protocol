@@ -17,6 +17,7 @@ HOOK = REPO_ROOT / "claude" / "hooks" / "delegation-enforcer.py"
 SETTINGS_MANAGER = REPO_ROOT / "scripts" / "claude" / "manage-settings.py"
 MUX_SCHEDULER = REPO_ROOT / "scripts" / "agents" / "mux-scheduler.py"
 WORKER_RENDERER = REPO_ROOT / "scripts" / "agents" / "render-bulk-workers.py"
+GIT_GATE = REPO_ROOT / "scripts" / "git" / "manage-conventions.py"
 
 
 def install_queue_fixture(home: Path, runtime: str, condition: str) -> None:
@@ -251,6 +252,15 @@ def test_installer_migrates_mux_scheduler_links(home: Path) -> None:
             "Claude mux-scheduler route link was not installed")
     require((protocol / "delegation-classifier.py").is_symlink(),
             "Claude shared classifier link was not installed")
+    git_state = Path(env["DELEGATION_PROTOCOL_GIT_STATE"])
+    git_manifest = json.loads(
+        (git_state / "manifest.json").read_text(encoding="utf-8")
+    )
+    require(git_manifest["owners"] == ["claude"],
+            "Claude installer did not claim the shared Git gate")
+    require((git_state / "hooks" / "commit-msg").is_file()
+            and (git_state / "hooks" / "pre-push").is_file(),
+            "Claude installer omitted a Git convention hook")
 
     result = run(["bash", str(REPO_ROOT / "scripts" / "claude" / "uninstall.sh")], env=env)
     require(result.returncode == 0, f"Claude uninstaller failed: {result.stderr}")
@@ -258,6 +268,8 @@ def test_installer_migrates_mux_scheduler_links(home: Path) -> None:
             "Claude uninstaller retained mux-scheduler executable")
     require(not (protocol / "delegation-classifier.py").is_symlink(),
             "Claude uninstaller retained shared classifier link")
+    require(not (git_state / "manifest.json").exists(),
+            "Claude uninstaller retained its last Git gate ownership")
 
 
 def test_single_agent_gate(home: Path) -> None:
@@ -788,9 +800,13 @@ def main() -> int:
     require(HOOK.exists(), f"missing hook: {HOOK}")
     require(SETTINGS_MANAGER.exists(), f"missing settings manager: {SETTINGS_MANAGER}")
     require(WORKER_RENDERER.exists(), f"missing worker renderer: {WORKER_RENDERER}")
+    require(GIT_GATE.exists(), f"missing Git convention manager: {GIT_GATE}")
     test_generated_workers()
     with tempfile.TemporaryDirectory(prefix="delegation-protocol-test-") as tmp:
         root = Path(tmp)
+        os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
+        os.environ["GIT_CONFIG_GLOBAL"] = str(root / "global.gitconfig")
+        os.environ["DELEGATION_PROTOCOL_GIT_STATE"] = str(root / "git-gate")
         test_settings_merge(root / "settings-home")
         test_installer_migrates_mux_scheduler_links(root / "installer-home")
         test_single_agent_gate(root / "single-home")

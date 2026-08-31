@@ -156,6 +156,8 @@ New-SafeSymlink $RoutesSource $RoutesDest
 
 & $PythonExe (Join-Path $RepoRoot 'scripts\codex\manage-hooks.py') install --codex-home $CodexHome --hook-path $HookDest --python $PythonExe
 if ($LASTEXITCODE -ne 0) { throw "Codex hook installation failed with exit code $LASTEXITCODE" }
+& $PythonExe (Join-Path $RepoRoot 'scripts\git\manage-conventions.py') install --owner codex --python $PythonExe
+if ($LASTEXITCODE -ne 0) { throw "Git convention gate installation failed with exit code $LASTEXITCODE" }
 
-Write-Host 'Installed Codex delegation protocol only: supplementary AGENTS instructions, worker tiers, agent mux-scheduler, and lifecycle hooks.'
+Write-Host 'Installed Codex delegation protocol only: supplementary AGENTS instructions, worker tiers, agent mux-scheduler, lifecycle hooks, and the shared Git convention gate.'
 Write-Host 'Restart Codex, run /hooks, and review/trust the Agent Delegation Protocol hooks before relying on mechanical enforcement.'
