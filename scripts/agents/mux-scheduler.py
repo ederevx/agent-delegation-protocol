@@ -723,11 +723,39 @@ def _harden_command_argv(argv: list[str]) -> list[str]:
         argv[0],
         "-c", "core.fsmonitor=false",
         "-c", f"core.hooksPath={os.devnull}",
+        "-c", f"alias.{_git_subcommand(argv) or 'invalid'}=",
         "-c", "credential.helper=",
         "-c", "gpg.program=false",
         "-c", "protocol.file.allow=never",
         *arguments,
     ]
+
+
+def _git_subcommand(argv: list[str]) -> str | None:
+    """Return a direct Git subcommand after bounded global-option parsing."""
+    if not argv or Path(argv[0]).name.lower() not in ("git", "git.exe"):
+        return None
+    takes_value = {
+        "-C", "-c", "--git-dir", "--work-tree", "--namespace",
+        "--super-prefix", "--config-env", "--exec-path",
+    }
+    index = 1
+    while index < len(argv):
+        value = argv[index]
+        if value in takes_value:
+            index += 2
+            continue
+        if any(
+            value.startswith(option + "=")
+            for option in takes_value if option.startswith("--")
+        ):
+            index += 1
+            continue
+        if value.startswith("-"):
+            index += 1
+            continue
+        return value.lower()
+    return None
 
 
 def _try_command_slot(agent_id: str, limit: int) -> Any | None:
@@ -785,6 +813,11 @@ def _validated_mux_execution(receipt: dict[str, Any]) -> tuple[str, list[str], P
             or any(not isinstance(arg, str) or not arg or "\0" in arg
                    or len(arg.encode("utf-8")) > 4096 for arg in argv)):
         raise InputError("mux_execution argv must contain 1 to 64 bounded strings")
+    if _git_subcommand(argv) in ("push", "send-pack"):
+        raise InputError(
+            "mux_execution cannot run Git push operations; the parent must "
+            "push through the installed pre-push convention gate"
+        )
     cwd_value = execution.get("cwd")
     if not isinstance(cwd_value, str) or not Path(cwd_value).is_absolute():
         raise InputError("mux_execution cwd must be absolute")
