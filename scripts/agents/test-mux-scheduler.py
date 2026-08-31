@@ -28,7 +28,8 @@ select_queue_backend = MUX_MODULE.select_queue_backend
 def metadata(agent_id: str, argv: list[str] | None = None, *, native: bool = False,
              runtime: str = "codex", concurrency: int = 1,
              delegation_queue: bool = False, priority: int = 0,
-             cooperative: bool = False) -> dict[str, object]:
+             cooperative: bool = False,
+             concurrency_owner: str | None = None) -> dict[str, object]:
     binding: dict[str, object]
     if native:
         binding = {"runtime": runtime, "agent_type": "bulk_worker", "reasoning_effort": "medium"}
@@ -52,6 +53,8 @@ def metadata(agent_id: str, argv: list[str] | None = None, *, native: bool = Fal
         },
         "limits": {"max_concurrency": concurrency},
     }
+    if concurrency_owner is not None:
+        result["limits"]["concurrency_owner"] = concurrency_owner
     if cooperative:
         result["delegation_queue"] = True
         result["capabilities"]["functions"].extend(["batch", "resumable-batch"])
@@ -269,6 +272,25 @@ class MuxSchedulerTests(unittest.TestCase):
         result = self.run_mux("validate")
         self.assertEqual(result.returncode, 64)
         self.assertIn("unknown fields: surprise", json.loads(result.stdout)["error"])
+
+    def test_concurrency_owner_defaults_to_scheduler_and_is_validated(self) -> None:
+        valid = metadata("valid", [sys.executable, "unused.py"])
+        self.write_agent(valid)
+        self.write_routes(["valid"])
+        self.assertEqual(self.run_mux("validate").returncode, 0)
+
+        for owner in ("scheduler", "backend"):
+            changed = json.loads(json.dumps(valid))
+            changed["limits"]["concurrency_owner"] = owner
+            self.write_agent(changed)
+            self.assertEqual(self.run_mux("validate").returncode, 0, owner)
+
+        invalid = json.loads(json.dumps(valid))
+        invalid["limits"]["concurrency_owner"] = "worker"
+        self.write_agent(invalid)
+        result = self.run_mux("validate")
+        self.assertEqual(result.returncode, 64)
+        self.assertIn("concurrency_owner must be scheduler or backend", result.stdout)
 
     def test_inference_metadata_is_validated(self) -> None:
         valid = metadata("valid", [sys.executable, "unused.py"])
@@ -597,6 +619,55 @@ print(json.dumps({{"classification": "success"}}))
         lines = events.read_text().splitlines()
         self.assertIn(lines, (["0:start", "0:end", "1:start", "1:end"],
                               ["1:start", "1:end", "0:start", "0:end"]))
+
+    def test_backend_owned_oneshot_requests_can_overlap(self) -> None:
+        events = self.root / "backend-events"
+        stub = self.make_stub("backend-owned.py", f"""
+import json, sys, time
+from pathlib import Path
+value = json.load(sys.stdin)
+p = Path({str(events)!r})
+with p.open("a") as f: f.write(value["id"] + ":start\\n")
+time.sleep(0.25)
+with p.open("a") as f: f.write(value["id"] + ":end\\n")
+print(json.dumps({{"classification": "success"}}))
+""")
+        agent = metadata("backend-owned", [sys.executable, str(stub)],
+                         concurrency_owner="backend")
+        self.write_agent(agent)
+        self.write_routes(["backend-owned"])
+        command = [sys.executable, str(MUX), "--catalog", str(self.catalog),
+                   "--routes", str(self.routes), "run", "--route", "bulk",
+                   "--runtime", "codex"]
+        env = os.environ.copy()
+        env["AGENT_MUX_SCHEDULER_STATE_DIR"] = str(self.state)
+        first = subprocess.Popen(
+            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, env=env
+        )
+        first.stdin.write(json.dumps({"id": "0"}))
+        first.stdin.close()
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if events.exists() and events.read_text().splitlines() == ["0:start"]:
+                break
+            time.sleep(0.01)
+        self.assertEqual(events.read_text().splitlines(), ["0:start"])
+        second = subprocess.Popen(
+            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, env=env
+        )
+        second_stdout, second_stderr = second.communicate(json.dumps({"id": "1"}),
+                                                           timeout=5)
+        first.wait(timeout=5)
+        first_stdout, first_stderr = first.stdout.read(), first.stderr.read()
+        first.stdout.close()
+        first.stderr.close()
+        for process, stdout, stderr in ((first, first_stdout, first_stderr),
+                                        (second, second_stdout, second_stderr)):
+            self.assertEqual(process.returncode, 0, (stdout, stderr))
+        self.assertEqual(events.read_text().splitlines(),
+                         ["0:start", "1:start", "0:end", "1:end"])
 
     def test_round_robin_metadata_contract_is_enforced(self) -> None:
         valid = metadata("cooperative", [sys.executable, "unused.py"], cooperative=True)
