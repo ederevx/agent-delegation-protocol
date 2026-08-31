@@ -13,7 +13,7 @@
     "command_timeout_seconds": 900,
     "quantum": {
       "unit": "agent_turn",
-      "value": 4
+      "value": 1
     }
   },
   "provider": "cheapestinference",
@@ -41,6 +41,7 @@
     "deliveries": ["json-receipt"]
   },
   "limits": {
-    "max_concurrency": 1
+    "max_concurrency": 1,
+    "concurrency_owner": "backend"
   }
 }
