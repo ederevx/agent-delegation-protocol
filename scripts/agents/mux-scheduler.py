@@ -203,8 +203,15 @@ def validate_agent(agent: Any, source: str) -> dict[str, Any]:
     limits = agent["limits"]
     if not isinstance(limits, dict):
         raise ConfigurationError(f"{source}: limits must be an object")
-    _reject_unknown(limits, {"max_concurrency"}, f"{source}: limits")
+    _reject_unknown(
+        limits, {"max_concurrency", "concurrency_owner"}, f"{source}: limits"
+    )
     _positive_int(limits.get("max_concurrency"), f"{source}: limits.max_concurrency")
+    concurrency_owner = limits.get("concurrency_owner", "scheduler")
+    if concurrency_owner not in ("scheduler", "backend"):
+        raise ConfigurationError(
+            f"{source}: limits.concurrency_owner must be scheduler or backend"
+        )
     if agent["delegation_queue"] and (
         agent["native"]
         or "batch" not in capabilities["functions"]
@@ -449,6 +456,25 @@ def concurrency_lock(agent: dict[str, Any]) -> Iterator[None]:
     lock_path = root / f"{agent['id']}.lock"
     with _file_lock(lock_path):
         yield
+
+
+@contextlib.contextmanager
+def provider_lane_lock(agent: dict[str, Any], deadline: float | None = None
+                       ) -> Iterator[None]:
+    """Guard a provider request when scheduling ownership is ours.
+
+    A backend-owned binding promises to serialize its own provider calls, so
+    the mux must not add a process-wide lock around those calls. Cooperative
+    state remains protected by its token protocol and operation-level callers.
+    """
+    if agent["limits"].get("concurrency_owner", "scheduler") == "backend":
+        yield
+    elif deadline is None:
+        with concurrency_lock(agent):
+            yield
+    else:
+        with fair_step_lock(agent, deadline):
+            yield
 
 
 def _pid_alive(pid: Any) -> bool:
@@ -1061,7 +1087,7 @@ def _cancel_cooperative(agent: dict[str, Any], token: str,
             exit_code=124,
         )
     try:
-        with fair_step_lock(agent, deadline):
+        with provider_lane_lock(agent, deadline):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("timed out before cooperative cancel")
@@ -1227,7 +1253,7 @@ def run_cooperative(agent: dict[str, Any], tasks: list[dict[str, Any]],
                 status, launched = 64, True
             else:
                 try:
-                    with fair_step_lock(agent, deadline):
+                    with provider_lane_lock(agent, deadline):
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             raise TimeoutError("timed out before cooperative step")
@@ -1528,7 +1554,7 @@ def main() -> int:
                 )
                 emit(receipt)
                 return status
-            with concurrency_lock(agent):
+            with provider_lane_lock(agent):
                 receipt, status, _ = invoke(agent, task)
             emit(receipt)
             return status
@@ -1550,7 +1576,7 @@ def main() -> int:
                 receipt, status = run_cooperative(agent, [json.loads(task)], False)
                 emit(receipt)
                 return status
-            with concurrency_lock(agent):
+            with provider_lane_lock(agent):
                 receipt, status, launched = invoke(agent, task)
             if launched:
                 emit(receipt)
