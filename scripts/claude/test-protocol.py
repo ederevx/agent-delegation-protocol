@@ -269,7 +269,6 @@ def test_installer_migrates_mux_scheduler_links(home: Path) -> None:
             "Claude uninstaller retained mux-scheduler executable")
     require(not (protocol / "delegation-classifier.py").is_symlink(),
             "Claude uninstaller retained shared classifier link")
-
     env["CI_CLAUDE_FOREGROUND_ONLY"] = "1"
     result = run(["bash", str(REPO_ROOT / "scripts" / "claude" / "install.sh")], env=env)
     require(result.returncode == 0, f"foreground Claude installer failed: {result.stderr}")
@@ -424,7 +423,6 @@ def test_classifier_mapping_smoke(home: Path) -> None:
         "tool_input": {"file_path": "a.py"},
     })
     require(denied is not None, "Claude did not gate a classified mutation")
-
 
 def test_explicit_opt_out(home: Path) -> None:
     session = "opt-out-test"

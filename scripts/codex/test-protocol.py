@@ -94,8 +94,10 @@ def install_queue_fixture(home: Path, runtime: str, condition: str) -> None:
     }), encoding="utf-8")
 
 
-def install_round_robin_queue_fixture(home: Path, runtime: str, slots: int = 4) -> None:
-    """Install a hook-level fixture that isolates selected metadata handling."""
+def install_round_robin_queue_fixture(
+    home: Path, runtime: str, slots: int = 4,
+) -> None:
+    """Install a hook fixture isolating round-robin metadata mapping."""
     install_queue_fixture(home, runtime, "valid")
     installed = home / ".delegation-protocol"
     metadata_path = installed / "catalog" / "test-queue.json"
@@ -259,6 +261,7 @@ def test_windows_non_elevated_installer_preflight(root: Path) -> None:
     legacy_after = legacy_composed.read_bytes() if legacy_composed.exists() else None
     require(legacy_after == legacy_before,
             "non-elevated Windows preflight changed shared legacy composition state")
+
 
 
 def call_hook(home: Path, mode: str, payload: dict[str, Any],
@@ -721,8 +724,12 @@ def test_round_robin_delegation_queue(home: Path) -> None:
     install_round_robin_queue_fixture(home, "codex", slots=4)
     session = "round-robin-delegation-queue"
     prompt = call_hook(home, "prompt", {
-        "session_id": session, "turn_id": "t1",
-        "prompt": "Implement independent frontend and backend subsystems plus separate tests.",
+        "session_id": session,
+        "turn_id": "t1",
+        "prompt": (
+            "Implement independent frontend and backend subsystems plus "
+            "separate tests."
+        ),
     })
     context = prompt["hookSpecificOutput"]["additionalContext"]
     require("round-robin delegation queue selected backend `test-queue`" in context,
@@ -758,8 +765,12 @@ def test_queue_fallbacks(root: Path) -> None:
         install_queue_fixture(home, "codex", condition)
         session = f"queue-{condition}"
         prompt = call_hook(home, "prompt", {
-            "session_id": session, "turn_id": "t1",
-            "prompt": "Implement independent frontend and backend subsystems plus separate tests.",
+            "session_id": session,
+            "turn_id": "t1",
+            "prompt": (
+                "Implement independent frontend and backend subsystems plus "
+                "separate tests."
+            ),
         })
         context = prompt["hookSpecificOutput"]["additionalContext"]
         require("delegation queue selected" not in context,
