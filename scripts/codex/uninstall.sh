@@ -170,6 +170,7 @@ rm -f "$state_dir/hooks.before-first-install.json" \
 # Per-session turn state was never reaped before this hook gained a sweep, so a
 # long-lived home can carry state for every session it ever ran; it is entirely
 # protocol-owned, so uninstall removes it outright rather than leaving it.
+rm -f "$repo_root/.runtime/codex/AGENTS.composed.md"
 rm -rf "$state_dir/hook-state"
 rm -rf "$state_dir/__pycache__"
 rmdir "$state_dir" 2>/dev/null || true
