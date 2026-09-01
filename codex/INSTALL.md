@@ -32,10 +32,16 @@ without partially enabling the protocol.
 
 ## Installed surface
 
-The active home receives the Codex policy and worker plus protocol-owned links:
+When no global instruction file exists, the active home receives a direct
+protocol-owned link at `$CODEX_HOME/AGENTS.md`. When `AGENTS.md` or
+`AGENTS.override.md` already exists, the installer preserves the active content,
+composes it before the protocol policy under installation state, and activates
+that composition through a managed `AGENTS.override.md` link. Uninstall restores
+the prior override, when one existed, and never replaces unrelated instructions.
+
+The active home also receives the worker and protocol-owned links:
 
 ```text
-$CODEX_HOME/AGENTS.md
 $CODEX_HOME/agents/bulk_worker.toml
 $CODEX_HOME/agents/balanced-worker.toml
 $CODEX_HOME/hooks/delegation-enforcer.py
