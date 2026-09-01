@@ -12,7 +12,10 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 import tempfile
+import subprocess
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +43,8 @@ def atomic_json(path: Path, value: dict[str, Any]) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(value, handle, indent=2, sort_keys=True)
             handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temporary, path)
     finally:
         try:
@@ -53,7 +58,16 @@ def acquire_lock(state: Path) -> Path:
     try:
         lock.mkdir()
     except FileExistsError:
-        raise SystemExit(f"protocol installation is already active: {lock}")
+        try:
+            pid = int((lock / "pid").read_text().strip())
+            os.kill(pid, 0)
+        except (FileNotFoundError, ValueError, ProcessLookupError):
+            shutil.rmtree(lock, ignore_errors=True)
+            lock.mkdir()
+        except PermissionError:
+            raise SystemExit(f"protocol installation is already active: {lock}")
+        else:
+            raise SystemExit(f"protocol installation is already active: {lock}")
     (lock / "pid").write_text(str(os.getpid()) + "\n", encoding="utf-8")
     return lock
 
@@ -94,16 +108,18 @@ def validate_destination(source: Path, destination: Path, kind: str, owned: bool
 
 def prepare(repo: Path, home: Path, host: str, manifest: dict[str, Any] | None) -> list[tuple[Path, Path, str]]:
     state = home / ".delegation-protocol"
-    for directory in ((home / "rules" if host == "claude" else home), home / "agents", home / "hooks", state):
+    directories = ((home / "rules" if host == "claude" else home), home / "agents", home / "hooks", state)
+    for directory in directories:
         if directory.exists() and (not directory.is_dir() or directory.is_symlink()):
             raise SystemExit(f"unsafe protocol directory: {directory}")
-        directory.mkdir(parents=True, exist_ok=True)
     owned = set((manifest or {}).get("owned", []))
     result = resources(repo, home, host)
     for source, destination, kind in result:
         if not source.exists():
             raise SystemExit(f"missing protocol source: {source}")
         validate_destination(source, destination, kind, str(destination) in owned)
+    for directory in directories:
+        directory.mkdir(parents=True, exist_ok=True)
     return result
 
 
@@ -113,28 +129,52 @@ def install(repo: Path, home: Path, host: str) -> None:
     manifest_path = state / "manifest.json"
     previous = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else None
     lock = acquire_lock(state)
-    changed: list[Path] = []
+    changed: list[tuple[Path, bytes | None, bool]] = []
+    settings_path = home / ("settings.json" if host == "claude" else "hooks.json")
+    prior_settings = settings_path.read_bytes() if settings_path.exists() else None
     try:
         items = prepare(repo, home, host, previous)
         for source, destination, kind in items:
             if kind == "link":
                 if same_link(destination, source):
                     continue
+                changed.append((destination, None, destination.exists() or destination.is_symlink()))
                 destination.symlink_to(source, target_is_directory=source.is_dir())
             else:
                 if destination.exists() and digest(destination) == digest(source):
                     continue
+                prior = destination.read_bytes() if destination.exists() else None
+                changed.append((destination, prior, prior is not None))
                 shutil.copy2(source, destination)
-            changed.append(destination)
+        # Host settings are configured only after every filesystem destination
+        # has passed ownership checks.  The host manager is itself idempotent;
+        # a later failure removes newly-created links before returning.
+        manager = (repo / "scripts/claude/manage-settings.py" if host == "claude"
+                   else repo / "scripts/codex/manage-hooks.py")
+        command = [sys.executable, os.fspath(manager), "install"]
+        if host == "claude":
+            command += ["--claude-home", os.fspath(home), "--hook-path",
+                        os.fspath(home / "hooks/delegation-enforcer.py"), "--python", os.sys.executable]
+        else:
+            command += ["--codex-home", os.fspath(home), "--hook-path",
+                        os.fspath(home / "hooks/delegation-enforcer.py"), "--python", os.sys.executable]
+        if manager.exists():
+            subprocess.run(command, check=True)
         manifest = {"version": VERSION, "host": host, "repo": str(repo),
                     "release": "automatic_release" if host == "claude" else "session_release",
                     "owned": [str(destination) for _, destination, _ in items],
                     "hashes": {str(destination): digest(source) for source, destination, _ in items}}
         atomic_json(manifest_path, manifest)
     except Exception:
-        for destination in reversed(changed):
+        for destination, prior, existed in reversed(changed):
             if destination.is_symlink() or destination.is_file():
                 destination.unlink(missing_ok=True)
+            if existed and prior is not None:
+                destination.write_bytes(prior)
+        if prior_settings is None:
+            settings_path.unlink(missing_ok=True)
+        else:
+            settings_path.write_bytes(prior_settings)
         raise
     finally:
         shutil.rmtree(lock, ignore_errors=True)
@@ -150,6 +190,18 @@ def uninstall(home: Path, host: str) -> None:
         raise SystemExit("unsupported or mismatched protocol manifest; refusing uninstall")
     lock = acquire_lock(state)
     try:
+        repo = Path(manifest.get("repo", ""))
+        manager = (repo / "scripts/claude/manage-settings.py" if host == "claude"
+                   else repo / "scripts/codex/manage-hooks.py")
+        if manager.exists():
+            command = [sys.executable, os.fspath(manager), "uninstall"]
+            if host == "claude":
+                command += ["--claude-home", os.fspath(home), "--hook-path",
+                            os.fspath(home / "hooks/delegation-enforcer.py"), "--python", sys.executable]
+            else:
+                command += ["--codex-home", os.fspath(home), "--hook-path",
+                            os.fspath(home / "hooks/delegation-enforcer.py"), "--python", sys.executable]
+            subprocess.run(command, check=True)
         for name in manifest.get("owned", []):
             path = Path(name)
             if path.is_symlink() or (path.is_file() and digest(path) == manifest.get("hashes", {}).get(name)):
