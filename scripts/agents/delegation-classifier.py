@@ -14,8 +14,7 @@ map to which mode, and how a decision is worded back to the host. What lives
 here is the decision itself, plus the state-compatibility contract both halves
 must agree on.
 
-Installed as `<agent home>/.delegation-protocol/delegation-classifier.py`, the
-same way `mux-scheduler.py` already is.
+Installed as `<agent home>/.delegation-protocol/delegation-classifier.py`.
 """
 from __future__ import annotations
 
@@ -26,13 +25,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-# Bumped whenever the on-disk turn state changes meaning. A hook that reads a
-# file stamped with a different version must discard it rather than interpret
-# it: the state describes one turn's delegation evidence, so throwing it away
-# costs at most a re-classification, while misreading it silently enforces the
-# wrong policy. This supersedes the separate per-half versions (Claude 9,
-# Codex 5), which were written into every state file and never read back.
-PROTOCOL_VERSION = 10
+# Hook state uses the protocol-v2 schema and is discarded on any mismatch.
+PROTOCOL_VERSION = 2
 
 # How long an untouched session's state may sit before a sweep removes it.
 # Turn state is written per session and was never reaped by anything -- not the
@@ -407,9 +401,8 @@ def reap_state(root: Path, keep: str = "", ttl: int = STATE_TTL_SECONDS) -> int:
     for path in sorted(root.iterdir()):
         if keep and belongs_to(path.name, keep):
             continue
-        legacy_unknown = belongs_to(path.name, "unknown")
         try:
-            if not legacy_unknown and path.stat().st_mtime >= cutoff:
+            if path.stat().st_mtime >= cutoff:
                 continue
         except OSError:
             continue
