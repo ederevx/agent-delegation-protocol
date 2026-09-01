@@ -60,7 +60,7 @@ def main() -> None:
         installed = run(
             environment, "deployment", "install", "--config",
             str(CI_DEPLOYMENT), "--launcher",
-            str(ROOT.parent / "ci-claude" / "ci-claude-v3.sh"), "ci-claude")
+            str(ROOT.parent / "ci-claude" / "ci-claude"), "ci-claude")
         assert installed["classification"] == "deployment_installed"
         run(environment, "credential", "set", "--deployment", "ci-claude",
             "--from-file", str(source_credential))
