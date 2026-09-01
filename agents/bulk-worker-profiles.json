@@ -34,38 +34,6 @@
         "max_turns": 30
       }
     },
-    "claude_ci_foreground": {
-      "host_name": "Claude",
-      "runtime": "claude",
-      "config_home": "the isolated ci-claude config directory",
-      "parent_channel": "`SendMessage` (use `ListAgents` to identify the parent)",
-      "task_transport_contract": [
-        "Create one bounded task JSON file under your scratchpad with `Write`, validate that it is non-empty JSON, and keep its absolute path through any permission resume. Do not interpolate the task through the shell or send it on stdin. Remove only that worker-owned task file after a terminal receipt or launch failure."
-      ],
-      "launch_contract": [
-        "Invoke the mux-scheduler once through foreground `Bash` with `timeout: 600000`. Do not redirect or background the command: the owning ci-claude session must remain paused while its worker uses the single provider lane. If the command cannot finish within that ceiling, report the exact failure without replaying the task."
-      ],
-      "permission_contract": [
-        "Ask the parent through `SendMessage`, including the request's `tool_name`, `tool_input`, and `reason` plus your recommendation. Wait for the answer, then write the exact resolution to a bounded JSON file and pass it with `--resolution-file`. Use `allow` for one exact single-use grant, `deny` to continue without the operation, or `handled` with a bounded JSON `result` when the parent performed it."
-      ],
-      "waiting_contract": [
-        "Classify the foreground command's receipt before interpreting its exit status. Never start a second mux-scheduler process for the same assignment."
-      ],
-      "conflict_contract": [
-        "A backend permission request uses the same escalation path: relay it to the parent and never widen it into a standing grant."
-      ],
-      "lifecycle_contract": [
-        "Return the report through the foreground Agent result. Claude Code releases the foreground Agent after that result; no parent dismissal is required."
-      ],
-      "output": {
-        "path": "claude/agents/ci-foreground-bulk-worker.md",
-        "format": "claude-markdown",
-        "name": "bulk-worker",
-        "model": "haiku",
-        "effort": "medium",
-        "max_turns": 30
-      }
-    },
     "codex": {
       "host_name": "Codex",
       "runtime": "codex",
