@@ -14,7 +14,7 @@
         "functions": ["audit", "edit", "batch"]
       },
       "availability": {
-        "commands": ["claude"],
+        "commands": [],
         "environment": []
       },
       "execution": {

@@ -40,7 +40,8 @@ def main() -> None:
             "      'token': os.environ.get('ANTHROPIC_AUTH_TOKEN'),\n"
             "      'real': os.environ.get('CHEAPESTINFERENCE_API_KEY')}))\n"
             "    print(json.dumps({'num_turns': 1, 'is_error': False, "
-            "'result': 'ok'}))\n",
+            "'result': 'ok'}))\n"
+            "raise SystemExit(int(os.environ.get('FAKE_EXIT', '0')))\n",
             encoding="utf-8")
         fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
         source_credential = root / "source-credential"
@@ -73,6 +74,12 @@ def main() -> None:
         binding = json.loads(record.read_text(encoding="utf-8"))
         assert binding["base"].startswith("http://127.0.0.1:")
         assert binding["token"] and binding["real"] is None
+        failed_launch = subprocess.run(
+            [sys.executable, str(CTL), "launch", "--deployment", "ci-claude",
+             "--", "--print", "fail"], env={**environment, "FAKE_EXIT": "23"},
+            text=True, capture_output=True, timeout=30, check=False)
+        assert failed_launch.returncode == 23, (
+            failed_launch.stdout, failed_launch.stderr)
 
         catalog = root / "catalog.json"
         catalog.write_text(json.dumps({
@@ -114,11 +121,22 @@ def main() -> None:
         assert "lane" not in completed
         status = run(environment, "service", "status", "--deployment", "ci-claude")
         assert status["clients"] == []
+        installed_launcher = root / "bin" / "ci-claude"
+        original_launcher = installed_launcher.read_bytes()
+        installed_launcher.write_bytes(original_launcher + b"# modified\n")
+        refused = run(
+            environment, "deployment", "uninstall", "--deployment",
+            "ci-claude", expected=64)
+        assert refused["classification"] == "configuration_error"
+        credential = (root / "xdg-config" / "agent-delegation-protocol" /
+                      "credentials" / "cheapestinference")
+        assert credential.is_file()
+        installed_launcher.write_bytes(original_launcher)
+        installed_launcher.chmod(0o755)
         removed = run(
             environment, "deployment", "uninstall", "--deployment", "ci-claude")
         assert removed["credential_removed"] is True
-        assert not (root / "xdg-config" / "agent-delegation-protocol" /
-                    "credentials" / "cheapestinference").exists()
+        assert not credential.exists()
         print("Managed controller tests: PASS")
 
 
