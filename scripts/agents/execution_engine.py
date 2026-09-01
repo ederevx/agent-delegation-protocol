@@ -94,12 +94,15 @@ def validate_task(value: Any) -> dict[str, Any]:
     if task["mode"] == "read" and validation:
         raise ExecutionError("read tasks cannot declare validation commands")
     budgets = task.get("budgets")
-    maxima = {"timeout_seconds": 7200, "max_output_bytes": 8 * 1024 * 1024,
-              "max_steps": 1000}
+    maxima = {"timeout_seconds": 7200, "max_input_tokens": 1_000_000,
+              "max_output_tokens": 131_072,
+              "max_output_bytes": 8 * 1024 * 1024, "max_steps": 1000}
     if not isinstance(budgets, dict) or set(budgets) != set(maxima):
         raise ExecutionError("task.budgets fields are invalid")
     for name, maximum in maxima.items():
         amount = budgets.get(name)
+        if name in {"max_input_tokens", "max_output_tokens"} and amount is None:
+            continue
         if (not isinstance(amount, int) or isinstance(amount, bool)
                 or not 1 <= amount <= maximum):
             raise ExecutionError(f"task.budgets.{name} is out of range")

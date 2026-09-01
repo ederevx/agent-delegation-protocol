@@ -27,7 +27,7 @@ structured receipt → parent integration and validation
 ```
 
 `delegationctl` validates catalogs and requests and selects an available
-backend by capability and numeric priority. External JSON adapters use the
+backend by capability and an exact cost tier. External JSON adapters use the
 role-blind scheduler lane. Managed deployments instead route interactive and
 delegated traffic through one authenticated gateway. That service owns FIFO
 admission for each actual provider request; runtimes receive only scoped dummy
@@ -67,21 +67,25 @@ release modes.
 [`agents/protocol-v2.json`](agents/protocol-v2.json) contains native backends,
 route membership, and optional catalog includes. Each backend declares exactly
 one kind (`native`, `oneshot`, or `session`), selector capabilities,
-availability checks, JSON, managed, or native delivery, and numeric priority.
+availability checks, JSON, managed, or native delivery, and an exact cost tier.
 External JSON adapters declare a scheduler lane; managed backends name a
 separately installed deployment whose resource configuration is authoritative.
-Route order has no selection meaning; highest priority wins after filtering,
-with backend ID as the deterministic tie break.
+Route order defines fallback order after exact-tier filtering. Selection never
+crosses tiers.
 
 `run` and `batch` accept `--request-file`. Their top-level selector fields are:
 
 - `schema_version`, fixed at `2`;
-- `route`, `runtime`, `platform`, `function`, `mode`, and `workspace`;
+- `route`, `tier`, `runtime`, `platform`, `function`, `mode`, and `workspace`;
 - `task` for `run`, or non-empty `tasks` for `batch`.
 
 Every task contains exactly `schema_version`, `id`, `mode`, `repo`, `prompt`,
 `allowed_paths`, `workspace`, `validation`, and `budgets`. Budgets contain
-positive `timeout_seconds`, `max_output_bytes`, and `max_steps`. Validation is
+positive `timeout_seconds`, `max_input_tokens`, `max_output_tokens`,
+`max_output_bytes`, and `max_steps`. Low-tier input/output token budgets are
+`null` because the terminal tier is policy-unbounded; provider/model physical
+limits still apply. Balanced is capped at 200,000/16,000 and parent at
+100,000/8,000 input/output tokens. Validation is
 a list of exact argv arrays. Credentials and deployment settings are never task
 data.
 

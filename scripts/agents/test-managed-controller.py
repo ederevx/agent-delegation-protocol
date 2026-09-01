@@ -12,7 +12,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 CTL = ROOT / "scripts" / "agents" / "delegationctl.py"
-CI_DEPLOYMENT = ROOT.parent / "ci-claude" / "deployment.json"
+CI_REPO = Path(os.environ.get("CI_CLAUDE_REPO", ROOT.parent / "ci-claude"))
+CI_DEPLOYMENT = CI_REPO / "deployment.json"
 
 
 def run(environment: dict[str, str], *arguments: str,
@@ -62,7 +63,7 @@ def main() -> None:
         installed = run(
             environment, "deployment", "install", "--config",
             str(CI_DEPLOYMENT), "--launcher",
-            str(ROOT.parent / "ci-claude" / "ci-claude"), "ci-claude")
+            str(CI_REPO / "ci-claude"), "ci-claude")
         assert installed["classification"] == "deployment_installed"
         run(environment, "credential", "set", "--deployment", "ci-claude",
             "--from-file", str(source_credential))
@@ -85,9 +86,14 @@ def main() -> None:
         catalog = root / "catalog.json"
         catalog.write_text(json.dumps({
             "schema_version": 2,
+            "tiers": {
+                "low": {"max_input_tokens": None, "max_output_tokens": None},
+                "balanced": {"max_input_tokens": 200000, "max_output_tokens": 16000},
+                "parent": {"max_input_tokens": 100000, "max_output_tokens": 8000},
+            },
             "backends": [{
                 "id": "managed-test", "name": "Managed test",
-                "kind": "session", "priority": 100,
+                "kind": "session", "tier": "low",
                 "selector": {
                     "runtimes": ["test"], "platforms": ["linux"],
                     "modes": ["read"], "workspaces": ["shared"],
@@ -103,13 +109,14 @@ def main() -> None:
         }), encoding="utf-8")
         request = root / "request.json"
         request.write_text(json.dumps({
-            "schema_version": 2, "route": "bulk", "runtime": "test",
+            "schema_version": 2, "route": "bulk", "tier": "low", "runtime": "test",
             "platform": "linux", "function": "audit", "mode": "read",
             "workspace": "shared", "task": {
                 "schema_version": 2, "id": "managed-run", "mode": "read",
                 "repo": str(ROOT), "prompt": "return ok", "allowed_paths": [],
                 "workspace": "shared", "validation": [], "budgets": {
-                    "timeout_seconds": 20, "max_output_bytes": 65536,
+                    "timeout_seconds": 20, "max_input_tokens": None,
+                    "max_output_tokens": None, "max_output_bytes": 65536,
                     "max_steps": 5,
                 },
             },

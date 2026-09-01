@@ -22,16 +22,20 @@ Accept only large-text triage and compression. Strictly preserve unique, relevan
 ## v2 request contract
 
 Create one request file containing the selector fields `schema_version`,
-`route`, `runtime`, `platform`, `function`, `mode`, and `workspace`, plus
+`route`, `tier`, `runtime`, `platform`, `function`, `mode`, and `workspace`, plus
 either `task` or `tasks`. Every task has
 exactly these fields: `schema_version: 2`, `id`, `mode`, `repo`, `prompt`,
 `allowed_paths`, `workspace`, `validation`, and `budgets`. `mode` is `read` or
 `edit`; `workspace` is `shared` or `isolated`; `repo` is absolute;
 `allowed_paths` are unique repository-relative paths and never contain `.git`
 or `..`; `validation` contains trusted argv arrays; and `budgets` contains
-positive `timeout_seconds`, `max_output_bytes`, and `max_steps`.
+positive `timeout_seconds`, `max_input_tokens`, `max_output_tokens`,
+`max_output_bytes`, and `max_steps`.
 
-Set `function` to `compress` and every task's `mode` to `read`. Do not submit
+Set `tier` to `low`, `function` to `compress`, and every task's `mode` to
+`read`. Set both token-budget fields to `null`: the terminal low tier has no
+policy ceiling, though provider/model physical limits still apply.
+Do not submit
 an `audit`, `edit`, or general-purpose `batch` request from this role.
 
 Use `run` for one task and `batch` for independently verifiable tasks. A batch

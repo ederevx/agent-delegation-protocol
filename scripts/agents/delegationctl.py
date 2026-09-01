@@ -97,7 +97,7 @@ def _validate_backend(backend: Any) -> dict[str, Any]:
     if not isinstance(backend, dict):
         raise ProtocolError("backend must be an object")
     required = {
-        "id", "name", "kind", "priority", "selector", "availability",
+        "id", "name", "kind", "tier", "selector", "availability",
         "execution",
     }
     if not required <= set(backend) <= required | {"lane"}:
@@ -107,9 +107,8 @@ def _validate_backend(backend: Any) -> dict[str, Any]:
         raise ProtocolError("backend.id is required")
     if backend["kind"] not in {"native", "oneshot", "session"}:
         raise ProtocolError(f"{backend_id}: invalid kind")
-    if (not isinstance(backend["priority"], int) or
-            not 0 <= backend["priority"] <= 100):
-        raise ProtocolError(f"{backend_id}: invalid priority")
+    if backend["tier"] not in {"low", "balanced", "parent"}:
+        raise ProtocolError(f"{backend_id}: invalid tier")
     selector = backend["selector"]
     if not isinstance(selector, dict) or set(selector) != {
         "runtimes", "platforms", "modes", "workspaces", "functions"
@@ -182,8 +181,25 @@ def load_catalog(path: Path) -> dict[str, Any]:
     value = _json(path)
     if not isinstance(value, dict) or value.get("schema_version") != 2:
         raise ProtocolError("catalog must declare schema_version 2")
-    if not set(value) <= {"schema_version", "backends", "routes", "includes"}:
+    if not set(value) <= {"schema_version", "tiers", "backends", "routes", "includes"}:
         raise ProtocolError("catalog contains unsupported fields")
+    tiers = value.get("tiers")
+    if not isinstance(tiers, dict) or set(tiers) != {"low", "balanced", "parent"}:
+        raise ProtocolError("catalog must define low, balanced, and parent tiers")
+    for tier, limits in tiers.items():
+        if (not isinstance(limits, dict) or set(limits) != {
+                "max_input_tokens", "max_output_tokens"}):
+            raise ProtocolError(f"catalog tier {tier} limits are invalid")
+    if any(tiers["low"][field] is not None for field in (
+            "max_input_tokens", "max_output_tokens")):
+        raise ProtocolError("catalog low tier must be unbounded")
+    for field in ("max_input_tokens", "max_output_tokens"):
+        balanced = tiers["balanced"][field]
+        parent = tiers["parent"][field]
+        if (isinstance(balanced, bool) or not isinstance(balanced, int) or
+                isinstance(parent, bool) or not isinstance(parent, int) or
+                not balanced > parent > 0):
+            raise ProtocolError(f"catalog tiers must strictly descend for {field}")
     backends = value.get("backends")
     routes = value.get("routes")
     includes = value.get("includes", [])
@@ -253,13 +269,11 @@ def select_backend(catalog: dict[str, Any], request: dict[str, Any]) -> dict[str
     for backend_id in members:
         backend = catalog["by_id"][backend_id]
         selector = backend["selector"]
-        if all(request.get(key[:-1]) in selector[key] for key in (
+        if backend["tier"] == request.get("tier") and all(request.get(key[:-1]) in selector[key] for key in (
             "runtimes", "platforms", "modes", "workspaces", "functions"
         )) and _available(backend):
-            matches.append(backend)
-    if not matches:
-        raise ProtocolError("no_backend")
-    return sorted(matches, key=lambda item: (-item["priority"], item["id"]))[0]
+            return backend
+    raise ProtocolError("no_backend")
 
 
 def validate_task(task: Any) -> dict[str, Any]:
@@ -302,9 +316,13 @@ def validate_task(task: Any) -> dict[str, Any]:
         raise ProtocolError("read tasks cannot declare validation commands")
     budgets = task["budgets"]
     if (not isinstance(budgets, dict) or set(budgets) != {
-            "timeout_seconds", "max_output_bytes", "max_steps"} or
-            any(not isinstance(value, int) or value < 1
-                for value in budgets.values())):
+            "timeout_seconds", "max_input_tokens", "max_output_tokens",
+            "max_output_bytes", "max_steps"} or
+            any((value is not None and
+                 (isinstance(value, bool) or not isinstance(value, int) or value < 1))
+                for value in budgets.values()) or
+            any(budgets[field] is None for field in (
+                "timeout_seconds", "max_output_bytes", "max_steps"))):
         raise ProtocolError("task.budgets is invalid")
     return task
 
@@ -323,7 +341,7 @@ def validate_request(value: Any, operation: str) -> dict[str, Any]:
             raise ProtocolError("resume resolution must be an object")
         return value
     common = {
-        "schema_version", "route", "runtime", "platform", "function",
+        "schema_version", "route", "tier", "runtime", "platform", "function",
         "mode", "workspace",
     }
     task_field = "tasks" if operation == "batch" else "task"
@@ -339,7 +357,26 @@ def validate_request(value: Any, operation: str) -> dict[str, Any]:
         value["tasks"] = [validate_task(task) for task in value["tasks"]]
     else:
         value["task"] = validate_task(value["task"])
+    if value["tier"] not in {"low", "balanced", "parent"}:
+        raise ProtocolError("request.tier is invalid")
     return value
+
+
+def validate_tier_budgets(catalog: dict[str, Any], request: dict[str, Any]) -> None:
+    limits = catalog["tiers"][request["tier"]]
+    tasks = request.get("tasks", [request.get("task")])
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        budgets = task["budgets"]
+        for field in ("max_input_tokens", "max_output_tokens"):
+            if limits[field] is None:
+                if budgets[field] is not None:
+                    raise ProtocolError(
+                        f"task.budgets.{field} must be null for unbounded low tier")
+            elif budgets[field] is None or budgets[field] > limits[field]:
+                raise ProtocolError(
+                    f"task.budgets.{field} exceeds {request['tier']} tier limit")
 
 
 def receipt(status: str, classification: str, **fields: Any) -> dict[str, Any]:
@@ -583,6 +620,7 @@ def run_operation(
             "resolution": request["resolution"],
         }, client)
         return {**answer, "backend": backend["id"]}
+    validate_tier_budgets(catalog, request)
     backend = select_backend(catalog, request)
     tasks = request["tasks"] if operation == "batch" else [request["task"]]
     if backend["kind"] == "native":
@@ -641,6 +679,7 @@ def run_operation(
 def _selector_from_args(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "route": args.route,
+        "tier": args.tier,
         "runtime": args.runtime,
         "platform": args.platform,
         "mode": args.mode,
@@ -939,7 +978,7 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("validate")
     commands.add_parser("list")
     select = commands.add_parser("select")
-    for field in ("route", "runtime", "platform", "mode", "workspace", "function"):
+    for field in ("route", "tier", "runtime", "platform", "mode", "workspace", "function"):
         select.add_argument(f"--{field}", required=True)
     for name in ("run", "batch", "resume"):
         command = commands.add_parser(name)
