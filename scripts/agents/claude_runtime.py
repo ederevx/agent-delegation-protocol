@@ -588,55 +588,65 @@ def launch(deployment: Mapping[str, Any], arguments: Sequence[str], *,
            gateway: object = None,
            environ: Mapping[str, str] | None = None) -> int:
     """Launch Claude with a protocol gateway binding and preserve its status."""
-    source = os.environ if environ is None else environ
-    runtime = _runtime(deployment)
-    executable = _resolve_executable(runtime, source)
-    configured_arguments = runtime.get("arguments", [])
-    if (not isinstance(configured_arguments, list) or
-            any(not isinstance(value, str) for value in configured_arguments)):
-        raise RuntimeProfileError("runtime.arguments must contain strings")
-    caller_arguments = list(arguments)
-    control = bool(caller_arguments and caller_arguments[0] in CONTROL_COMMANDS)
-    values = caller_arguments if control else [*configured_arguments, *caller_arguments]
-    validate_arguments(values)
-    session_dir = _session_dir(runtime, source)
-    configure_session(deployment, session_dir)
-    control_environment = build_environment(
-        deployment, session_dir, gateway=gateway, environ=source, control=True)
-    if control:
-        return subprocess.run(
-            _command(executable, values), env=control_environment,
-            check=False).returncode
-
-    environment = build_environment(
-        deployment, session_dir, gateway=gateway, environ=source)
-    inference = _inference(deployment)
-    effort = inference.get("interactive_effort", "high")
-    if not isinstance(effort, str) or effort not in VALID_EFFORTS:
-        raise RuntimeProfileError(
-            "inference.interactive_effort must be low, medium, high, xhigh, "
-            "max, unset, or auto")
-    if _has_effort(values):
-        environment.pop("CLAUDE_CODE_EFFORT_LEVEL", None)
-    elif effort in {"unset", "auto"}:
-        environment["CLAUDE_CODE_EFFORT_LEVEL"] = effort
-    else:
-        environment.pop("CLAUDE_CODE_EFFORT_LEVEL", None)
-        values = ["--effort", effort, *values]
-    overlay = provider_overlay(deployment, session_dir)
-    values = ["--settings", str(overlay), *values]
-
-    before = _background_ids(executable, control_environment)
-    process = subprocess.Popen(_command(executable, values), env=environment)
     retained = False
+    process: subprocess.Popen[Any] | None = None
     try:
+        source = os.environ if environ is None else environ
+        runtime = _runtime(deployment)
+        executable = _resolve_executable(runtime, source)
+        configured_arguments = runtime.get("arguments", [])
+        if (not isinstance(configured_arguments, list) or
+                any(not isinstance(value, str)
+                    for value in configured_arguments)):
+            raise RuntimeProfileError("runtime.arguments must contain strings")
+        caller_arguments = list(arguments)
+        control = bool(
+            caller_arguments and caller_arguments[0] in CONTROL_COMMANDS)
+        values = (caller_arguments if control else
+                  [*configured_arguments, *caller_arguments])
+        validate_arguments(values)
+        session_dir = _session_dir(runtime, source)
+        configure_session(deployment, session_dir)
+        control_environment = build_environment(
+            deployment, session_dir, gateway=gateway, environ=source,
+            control=True)
+        if control:
+            return subprocess.run(
+                _command(executable, values), env=control_environment,
+                check=False).returncode
+
+        environment = build_environment(
+            deployment, session_dir, gateway=gateway, environ=source)
+        inference = _inference(deployment)
+        effort = inference.get("interactive_effort", "high")
+        if not isinstance(effort, str) or effort not in VALID_EFFORTS:
+            raise RuntimeProfileError(
+                "inference.interactive_effort must be low, medium, high, "
+                "xhigh, max, unset, or auto")
+        if _has_effort(values):
+            environment.pop("CLAUDE_CODE_EFFORT_LEVEL", None)
+        elif effort in {"unset", "auto"}:
+            environment["CLAUDE_CODE_EFFORT_LEVEL"] = effort
+        else:
+            environment.pop("CLAUDE_CODE_EFFORT_LEVEL", None)
+            values = ["--effort", effort, *values]
+        overlay = provider_overlay(deployment, session_dir)
+        values = ["--settings", str(overlay), *values]
+
+        before = _background_ids(executable, control_environment)
+        process = subprocess.Popen(_command(executable, values), env=environment)
         status = _wait(process, gateway)
         after = _background_ids(executable, control_environment)
-        if gateway is not None and (after is None or before is None or after != before):
-            retained = _binding_action(gateway, "retain")
+        if gateway is not None:
+            if before is None or after is None:
+                retained = _binding_action(gateway, "retain", None)
+            else:
+                created = after - before
+                if created:
+                    retained = _binding_action(gateway, "retain", created)
         return status
     finally:
-        if process.poll() is None:
+        if process is not None and process.poll() is None:
             process.terminate()
             process.wait()
         if gateway is not None and not retained:
@@ -724,90 +734,95 @@ def worker_runner(deployment: Mapping[str, Any], gateway_factory: object):
             binding = register(
                 f"worker:{context['token']}:{context['step']}",
                 pid=os.getpid(), dependency_seconds=dependency)
-        permission_store = context.get("permissions")
-        permission_path = getattr(permission_store, "path", None)
-        if not isinstance(permission_path, Path):
-            permission_path = Path(str(permission_path))
-        worker_session = permission_path.parent / "claude-session"
-        configure_session(deployment, worker_session)
-        environment = build_environment(
-            deployment, worker_session, gateway=binding)
-        environment.update({
-            "DELEGATION_PERMISSION_STATE": str(permission_path),
-            "DELEGATION_TASK_ID": str(context["token"]),
-            "DELEGATION_WORKSPACE_ROOT": str(cwd),
-            "DELEGATION_TASK_MODE": str(task["mode"]),
-            "DELEGATION_ALLOWED_PATHS": json.dumps(
-                task.get("allowed_paths", []), separators=(",", ":")),
-        })
-        effort = inference.get("worker_effort", "low")
-        environment["CLAUDE_CODE_EFFORT_LEVEL"] = str(effort)
-        thinking = _object(inference.get("thinking", {}), "inference.thinking")
-        if thinking.get("type") == "disabled":
-            environment["MAX_THINKING_TOKENS"] = "0"
-        elif thinking.get("type") == "adaptive":
-            environment.pop("MAX_THINKING_TOKENS", None)
-        elif thinking.get("type") == "enabled":
-            environment["MAX_THINKING_TOKENS"] = str(_positive_int(
-                thinking.get("budget_tokens"), "inference.thinking.budget_tokens", 1))
-        else:
-            raise RuntimeProfileError("inference.thinking.type is invalid")
-        executable = _resolve_executable(runtime, environment)
-        maximum = max(1, int(context["remaining_steps"]))
-        arguments = [
-            "-p", "--output-format", "json", "--max-turns", str(maximum),
-        ]
-        if int(context.get("step", 0)):
-            arguments.extend(["--resume", str(context["token"])])
-        else:
-            arguments.extend(["--session-id", str(context["token"])])
-        tools = ("Read,Grep,Glob,Bash" if task["mode"] == "read" else
-                 "Read,Grep,Glob,Bash,Edit,Write")
-        arguments.extend([
-            "--effort", str(effort), "--disable-slash-commands",
-            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-            "--setting-sources", "user", "--permission-mode",
-            "dontAsk" if task["mode"] == "read" else "acceptEdits",
-            "--tools", tools, "--settings",
-            str(provider_overlay(deployment, worker_session)),
-        ])
         try:
+            permission_store = context.get("permissions")
+            permission_path = getattr(permission_store, "path", None)
+            if not isinstance(permission_path, Path):
+                permission_path = Path(str(permission_path))
+            worker_session = permission_path.parent / "claude-session"
+            configure_session(deployment, worker_session)
+            environment = build_environment(
+                deployment, worker_session, gateway=binding)
+            environment.update({
+                "DELEGATION_PERMISSION_STATE": str(permission_path),
+                "DELEGATION_TASK_ID": str(context["token"]),
+                "DELEGATION_WORKSPACE_ROOT": str(cwd),
+                "DELEGATION_TASK_MODE": str(task["mode"]),
+                "DELEGATION_ALLOWED_PATHS": json.dumps(
+                    task.get("allowed_paths", []), separators=(",", ":")),
+            })
+            effort = inference.get("worker_effort", "low")
+            environment["CLAUDE_CODE_EFFORT_LEVEL"] = str(effort)
+            thinking = _object(
+                inference.get("thinking", {}), "inference.thinking")
+            if thinking.get("type") == "disabled":
+                environment["MAX_THINKING_TOKENS"] = "0"
+            elif thinking.get("type") == "adaptive":
+                environment.pop("MAX_THINKING_TOKENS", None)
+            elif thinking.get("type") == "enabled":
+                environment["MAX_THINKING_TOKENS"] = str(_positive_int(
+                    thinking.get("budget_tokens"),
+                    "inference.thinking.budget_tokens", 1))
+            else:
+                raise RuntimeProfileError("inference.thinking.type is invalid")
+            executable = _resolve_executable(runtime, environment)
+            maximum = max(1, int(context["remaining_steps"]))
+            arguments = [
+                "-p", "--output-format", "json", "--max-turns", str(maximum),
+            ]
+            if int(context.get("step", 0)):
+                arguments.extend(["--resume", str(context["token"])])
+            else:
+                arguments.extend(["--session-id", str(context["token"])])
+            tools = ("Read,Grep,Glob,Bash" if task["mode"] == "read" else
+                     "Read,Grep,Glob,Bash,Edit,Write")
+            arguments.extend([
+                "--effort", str(effort), "--disable-slash-commands",
+                "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+                "--setting-sources", "user", "--permission-mode",
+                "dontAsk" if task["mode"] == "read" else "acceptEdits",
+                "--tools", tools, "--settings",
+                str(provider_overlay(deployment, worker_session)),
+            ])
             returncode, stdout, stderr, timed_out = _worker_process(
                 _command(executable, arguments), _worker_prompt(task, context),
                 cwd, environment, float(context["remaining_seconds"]))
+            try:
+                response = json.loads(stdout)
+            except json.JSONDecodeError:
+                response = stdout
+            pending = (permission_store.pending()
+                       if permission_store is not None else None)
+            turns = (response.get("num_turns", 1)
+                     if isinstance(response, dict) else 1)
+            if not isinstance(turns, int) or isinstance(turns, bool) or turns < 1:
+                turns = 1
+            max_turns = isinstance(response, dict) and (
+                response.get("subtype") == "error_max_turns"
+                or response.get("stop_reason") == "max_turns")
+            if timed_out:
+                classification, completed = "timeout", True
+            elif pending is not None:
+                classification, completed = "permission_requested", False
+            elif max_turns:
+                classification, completed = "session_yielded", False
+            elif returncode:
+                classification, completed = (
+                    "backend_missing" if returncode == 127 else
+                    "backend_error"), True
+            elif isinstance(response, dict) and response.get("is_error"):
+                classification, completed = "backend_reported_error", True
+            elif not isinstance(response, dict):
+                classification, completed = "invalid_backend_output", True
+            else:
+                classification, completed = "success", True
+            return {
+                "completed": completed, "classification": classification,
+                "steps_used": min(turns, maximum), "returncode": returncode,
+                "response": response, "stderr": stderr,
+            }
         finally:
             _binding_action(binding, "close")
-        try:
-            response = json.loads(stdout)
-        except json.JSONDecodeError:
-            response = stdout
-        pending = permission_store.pending() if permission_store is not None else None
-        turns = response.get("num_turns", 1) if isinstance(response, dict) else 1
-        if not isinstance(turns, int) or isinstance(turns, bool) or turns < 1:
-            turns = 1
-        max_turns = isinstance(response, dict) and (
-            response.get("subtype") == "error_max_turns"
-            or response.get("stop_reason") == "max_turns")
-        if timed_out:
-            classification, completed = "timeout", True
-        elif pending is not None:
-            classification, completed = "permission_requested", False
-        elif max_turns:
-            classification, completed = "session_yielded", False
-        elif returncode:
-            classification, completed = (
-                "backend_missing" if returncode == 127 else "backend_error"), True
-        elif isinstance(response, dict) and response.get("is_error"):
-            classification, completed = "backend_reported_error", True
-        elif not isinstance(response, dict):
-            classification, completed = "invalid_backend_output", True
-        else:
-            classification, completed = "success", True
-        return {
-            "completed": completed, "classification": classification,
-            "steps_used": min(turns, maximum), "returncode": returncode,
-            "response": response, "stderr": stderr,
-        }
 
     return runner
 

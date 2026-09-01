@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts" / "agents"))
 from managed_service import (  # noqa: E402
     CONTROL_PREFIX,
+    ClientRegistry,
     DeploymentError,
     ServiceClient,
     credential_path,
@@ -269,7 +270,7 @@ class ManagedServiceTests(unittest.TestCase):
     def test_retained_binding_survives_service_restart_on_preferred_port(self):
         client = self.start()
         binding = client.register("background-client")
-        self.assertTrue(binding.retain())
+        self.assertTrue(binding.retain({"bg-restart"}))
         old_port = client.port
         descriptor = json.loads((self.state / "service.json").read_text())
         old_pid = descriptor["pid"]
@@ -285,6 +286,33 @@ class ManagedServiceTests(unittest.TestCase):
         self.assertEqual((response.status, response.read()),
                          (200, b"firstsecond"))
         connection.close()
+        retained = restarted.status()["clients"]
+        self.assertEqual(retained[0]["retained_session_ids"], ["bg-restart"])
+
+    def test_retained_session_ownership_reconciles_across_restart(self):
+        state_file = self.root / "registry.json"
+        registry = ClientRegistry(8, 60, state_file)
+        first = registry.register("first", os.getpid(), 0)
+        wildcard = registry.register("wildcard", os.getpid(), 0)
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(wildcard)
+        assert first is not None and wildcard is not None
+        self.assertTrue(registry.retain(first.registration_id, {"bg-1", "bg-2"}))
+        self.assertTrue(registry.retain(wildcard.registration_id))
+
+        restarted = ClientRegistry(8, 60, state_file)
+        restarted.reconcile_retained({"bg-2", "bg-3"})
+        by_client = {item["client_id"]: item for item in restarted.snapshot()}
+        self.assertEqual(by_client["first"]["retained_session_ids"], ["bg-2"])
+        self.assertEqual(by_client["wildcard"]["retained_session_ids"],
+                         ["bg-2", "bg-3"])
+
+        restarted.reconcile_retained({"bg-3"})
+        by_client = {item["client_id"]: item for item in restarted.snapshot()}
+        self.assertNotIn("first", by_client)
+        self.assertEqual(by_client["wildcard"]["retained_session_ids"], ["bg-3"])
+        restarted.reconcile_retained(set())
+        self.assertEqual(restarted.snapshot(), [])
 
 
 if __name__ == "__main__":
