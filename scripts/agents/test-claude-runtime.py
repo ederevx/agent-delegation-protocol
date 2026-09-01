@@ -10,6 +10,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from permission_service import PermissionStore
+
 
 HERE = Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location(
@@ -116,6 +118,11 @@ def test_launch_environment_and_arguments(root: Path) -> None:
             "permission mode was not configured")
     require(settings["env"]["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"] == "3",
             "agent cap was not configured")
+    require(settings["hooks"]["PermissionRequest"][0]["hooks"][0][
+        "statusMessage"] == "delegation: permission policy",
+        "protocol permission hook was not installed")
+    require(len(settings["hooks"]["PreToolUse"]) == 2,
+            "protocol preflight hooks were not installed")
 
 
 def test_control_passthrough_needs_no_gateway(root: Path) -> None:
@@ -154,6 +161,9 @@ def test_background_handoff_retains_binding(root: Path) -> None:
     require(status == 0, f"background launch returned {status}")
     require(binding.actions == ["retain"],
             f"background binding was not retained: {binding.actions}")
+    identifiers = runtime.background_session_ids(
+        deployment(stub, session), environ=environment)
+    require(identifiers == {"bg-1"}, f"background probe failed: {identifiers}")
 
 
 def test_validation(root: Path) -> None:
@@ -176,13 +186,98 @@ def test_validation(root: Path) -> None:
         raise AssertionError("launch without a gateway was accepted")
 
 
+def test_worker_runner_uses_bounded_headless_contract(root: Path) -> None:
+    stub = root / "claude-worker"
+    stub.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, pathlib, sys\n"
+        "prompt = sys.stdin.read()\n"
+        "pathlib.Path(os.environ['WORKER_RECORD']).write_text(json.dumps({\n"
+        " 'argv': sys.argv[1:], 'prompt': prompt,\n"
+        " 'permission': os.environ.get('DELEGATION_PERMISSION_STATE'),\n"
+        " 'workspace': os.environ.get('DELEGATION_WORKSPACE_ROOT')}))\n"
+        "print(json.dumps({'type':'result','result':'done','num_turns':2}))\n",
+        encoding="utf-8")
+    stub.chmod(0o755)
+    record = root / "worker.json"
+    task = {
+        "schema_version": 2, "id": "task-1", "mode": "read",
+        "repo": str(root), "prompt": "audit this", "allowed_paths": [],
+        "workspace": "shared", "validation": [],
+        "budgets": {"timeout_seconds": 30, "max_output_bytes": 100000,
+                    "max_steps": 5},
+    }
+    permissions = PermissionStore(root / "permissions.json", "session-1")
+    context = {
+        "token": "session-1", "step": 0, "remaining_seconds": 30.0,
+        "remaining_steps": 5, "continuation": None,
+        "permissions": permissions,
+    }
+    binding = Binding()
+    configured = deployment(stub, root / "interactive-session")
+    configured["inference"]["worker_effort"] = "low"
+    configured["inference"]["thinking"] = {"type": "adaptive"}
+    old = os.environ.get("WORKER_RECORD")
+    os.environ["WORKER_RECORD"] = str(record)
+    try:
+        outcome = runtime.worker_runner(
+            configured, lambda _task, _context: binding)(task, root, context)
+    finally:
+        if old is None:
+            os.environ.pop("WORKER_RECORD", None)
+        else:
+            os.environ["WORKER_RECORD"] = old
+    require(outcome["classification"] == "success" and outcome["completed"],
+            f"worker outcome failed: {outcome}")
+    require(outcome["steps_used"] == 2, "worker turn count was not normalized")
+    seen = json.loads(record.read_text(encoding="utf-8"))
+    require(seen["argv"][:5] == ["-p", "--output-format", "json",
+                                  "--max-turns", "5"],
+            f"headless argv changed: {seen['argv']}")
+    require("--strict-mcp-config" in seen["argv"] and
+            '{"mcpServers":{}}' in seen["argv"], "MCP was not emptied")
+    require(seen["permission"] == str(permissions.path),
+            "permission state was not handed to the hook")
+    require(seen["workspace"] == str(root), "workspace was not bounded")
+    require(binding.actions == ["close"], "worker did not close its binding")
+
+
+def test_permission_codec_issues_normalized_parent_request(root: Path) -> None:
+    state = root / "permission-state.json"
+    PermissionStore(state, "permission-session")
+    event = {
+        "hook_event_name": "PreToolUse", "tool_name": "Bash",
+        "tool_input": {"command": "make test"}, "cwd": str(root),
+    }
+    environment = dict(
+        os.environ, DELEGATION_PERMISSION_STATE=str(state),
+        DELEGATION_TASK_ID="permission-session",
+        DELEGATION_WORKSPACE_ROOT=str(root), DELEGATION_TASK_MODE="edit",
+        DELEGATION_ALLOWED_PATHS="[]")
+    result = subprocess.run(
+        [sys.executable, str(HERE / "claude_runtime.py"), "hook", "permission"],
+        input=json.dumps(event), text=True, capture_output=True,
+        env=environment, check=False)
+    require(result.returncode == 0, f"permission codec failed: {result.stderr}")
+    output = json.loads(result.stdout)
+    require(output["hookSpecificOutput"]["permissionDecision"] == "deny",
+            "parent-required operation was not paused")
+    pending = PermissionStore(state, "permission-session").pending()
+    require(pending is not None and pending["operation"] == "shell",
+            f"normalized permission was not persisted: {pending}")
+    require(pending["arguments"] == {"command": "make test"},
+            "permission arguments changed")
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="claude-runtime-test-") as temporary:
         root = Path(temporary)
         tests = [test_launch_environment_and_arguments,
                  test_control_passthrough_needs_no_gateway,
                  test_background_handoff_retains_binding,
-                 test_validation]
+                 test_validation,
+                 test_worker_runner_uses_bounded_headless_contract,
+                 test_permission_codec_issues_normalized_parent_request]
         for index, test in enumerate(tests):
             case = root / str(index)
             case.mkdir()
