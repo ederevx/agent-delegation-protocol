@@ -39,6 +39,42 @@ def main() -> None:
         install.uninstall(home, "claude")
         assert not (home / "hooks/delegation-enforcer.py").exists()
         assert not (home / ".delegation-protocol/manifest.json").exists()
+
+        codex = root / "codex-empty"
+        install.install(repo, codex, "codex")
+        assert (codex / "AGENTS.md").is_symlink()
+        install.uninstall(codex, "codex")
+        assert not (codex / "AGENTS.md").exists()
+
+        codex = root / "codex-agents"
+        codex.mkdir()
+        original = b"user instructions\n"
+        (codex / "AGENTS.md").write_bytes(original)
+        install.install(repo, codex, "codex")
+        override = codex / "AGENTS.override.md"
+        assert override.is_symlink()
+        assert override.read_bytes() == original.rstrip(b"\n") + b"\n\n" + (
+            repo / "codex/AGENTS.md"
+        ).read_bytes()
+        (repo / "codex/AGENTS.md").write_text(
+            "updated protocol\n", encoding="utf-8"
+        )
+        install.install(repo, codex, "codex")
+        assert override.read_text(encoding="utf-8").endswith("updated protocol\n")
+        install.uninstall(codex, "codex")
+        assert not override.exists()
+        assert (codex / "AGENTS.md").read_bytes() == original
+
+        codex = root / "codex-override"
+        codex.mkdir()
+        (codex / "AGENTS.md").write_text("shadowed\n", encoding="utf-8")
+        prior_override = codex / "AGENTS.override.md"
+        prior_override.write_text("active override\n", encoding="utf-8")
+        install.install(repo, codex, "codex")
+        assert prior_override.is_symlink()
+        install.uninstall(codex, "codex")
+        assert not prior_override.is_symlink()
+        assert prior_override.read_text(encoding="utf-8") == "active override\n"
         print("Host v2 installation tests: PASS")
 
 
