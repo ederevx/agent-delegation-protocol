@@ -202,6 +202,15 @@ class ProtocolV2(unittest.TestCase):
         )
         self.assertEqual(json.loads(selected.stdout)["id"], "native-codex-bulk")
 
+    def test_native_route_selects_native_with_integration_available(self) -> None:
+        selected = self.runctl(
+            "select", "--route", "native-bulk", "--tier", "low",
+            "--runtime", "codex", "--platform", "linux", "--mode", "read",
+            "--workspace", "shared", "--function", "audit",
+        )
+        self.assertEqual(selected.returncode, 0, selected.stderr)
+        self.assertEqual(json.loads(selected.stdout)["id"], "native-codex-bulk")
+
     def test_catalog_rejects_backend_lane_ownership(self) -> None:
         value = json.loads((ROOT / "agents" / "protocol-v2.json").read_text())
         value["includes"] = []
