@@ -1,24 +1,268 @@
 #!/usr/bin/env python3
-import json, os, subprocess, sys, tempfile, unittest
+from __future__ import annotations
+
+import json
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
 from pathlib import Path
-ROOT=Path(__file__).resolve().parents[2]; CTL=ROOT/"scripts/agents/delegationctl.py"; ADAPTER=ROOT/"scripts/agents/reference-adapter.py"
-sys.path.insert(0,str(ROOT/"scripts/agents"))
-from lane_service import Lane
-class V2(unittest.TestCase):
- def runctl(self,*args): return subprocess.run([sys.executable,str(CTL),*args],text=True,capture_output=True)
- def test_catalog(self): self.assertEqual(self.runctl("validate").returncode,0)
- def test_select_runtime(self):
-  r=self.runctl("select","--route","bulk","--runtime","codex","--platform","linux","--mode","read","--workspace","shared","--function","audit"); self.assertEqual(json.loads(r.stdout)["id"],"native-codex-bulk")
- def test_select_rejects_wrong_runtime(self):
-  r=self.runctl("select","--route","bulk","--runtime","claude","--platform","linux","--mode","read","--workspace","shared","--function","audit"); self.assertEqual(json.loads(r.stdout)["id"],"native-claude-bulk")
- def test_reference_run_and_session(self):
-  env={**os.environ,"DELEGATION_V2_STATE":tempfile.mkdtemp()}
-  run=subprocess.run([sys.executable,str(ADAPTER)],input=json.dumps({"schema_version":2,"task":{"prompt":"hello"}}),text=True,capture_output=True,env=env); self.assertEqual(json.loads(run.stdout)["status"],"success")
-  start=subprocess.run([sys.executable,str(ADAPTER)],input='{"schema_version":2,"operation":"start"}',text=True,capture_output=True,env=env); token=json.loads(start.stdout)["token"]
-  step=subprocess.run([sys.executable,str(ADAPTER)],input=json.dumps({"schema_version":2,"operation":"step","token":token}),text=True,capture_output=True,env=env); self.assertEqual(json.loads(step.stdout)["status"],"complete")
- def test_lane_fifo_reentry_expiry_and_crash_release(self):
-  lane=Lane(lease_seconds=1)
-  token=lane.acquire("a"); self.assertEqual(lane.acquire("a",token),token)
-  self.assertFalse(lane.release("b",token)); self.assertTrue(lane.heartbeat("a",token)); self.assertTrue(lane.release("a",token))
-  token=lane.acquire("a"); import time; time.sleep(1.05); self.assertFalse(lane.release("a",token)); self.assertEqual(lane.acquire("b"),lane.current.token)
-if __name__=="__main__": unittest.main()
+
+ROOT = Path(__file__).resolve().parents[2]
+CTL = ROOT / "scripts" / "agents" / "delegationctl.py"
+ADAPTER = ROOT / "scripts" / "agents" / "reference-adapter.py"
+sys.path.insert(0, str(ROOT / "scripts" / "agents"))
+from delegationctl import ProtocolError, load_catalog  # noqa: E402
+from lane_service import Lane, LaneClient  # noqa: E402
+
+
+def task(task_id: str, prompt: str = "hello") -> dict:
+    return {
+        "schema_version": 2,
+        "id": task_id,
+        "mode": "read",
+        "repo": str(ROOT),
+        "prompt": prompt,
+        "allowed_paths": [],
+        "workspace": "shared",
+        "validation": [[sys.executable, "-V"]],
+        "budgets": {
+            "timeout_seconds": 10,
+            "max_output_bytes": 65536,
+            "max_steps": 5,
+        },
+    }
+
+
+def request(operation: str, tasks: list[dict]) -> dict:
+    value = {
+        "schema_version": 2,
+        "route": "bulk",
+        "runtime": "test",
+        "platform": "linux",
+        "function": "batch" if operation == "batch" else "audit",
+        "mode": "read",
+        "workspace": "shared",
+    }
+    value["tasks" if operation == "batch" else "task"] = (
+        tasks if operation == "batch" else tasks[0]
+    )
+    return value
+
+
+class ProtocolV2(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.lane_state = self.root / "lane"
+        self.adapter_state = self.root / "adapter"
+        self.environment = {
+            **os.environ,
+            "DELEGATION_LANE_STATE_DIR": str(self.lane_state),
+            "DELEGATION_V2_STATE": str(self.adapter_state),
+        }
+        self.server = subprocess.Popen(
+            [sys.executable, str(CTL), "lane", "serve", "--state-dir",
+             str(self.lane_state)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if (self.lane_state / "lane.json").exists():
+                break
+            if self.server.poll() is not None:
+                self.fail(f"lane server failed: {self.server.stderr.read()}")
+            time.sleep(0.02)
+        else:
+            self.fail("lane server did not publish its endpoint")
+
+    def tearDown(self) -> None:
+        self.server.terminate()
+        try:
+            self.server.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            self.server.kill()
+            self.server.wait(timeout=3)
+        if self.server.stderr:
+            self.server.stderr.close()
+        self.temporary.cleanup()
+
+    def runctl(self, *arguments: str, catalog: Path | None = None) -> subprocess.CompletedProcess:
+        command = [sys.executable, str(CTL)]
+        if catalog:
+            command += ["--catalog", str(catalog)]
+        command += list(arguments)
+        return subprocess.run(command, text=True, capture_output=True,
+                              env=self.environment, timeout=20)
+
+    def write_request(self, value: dict, name: str = "request.json") -> Path:
+        path = self.root / name
+        path.write_text(json.dumps(value), encoding="utf-8")
+        return path
+
+    def external_catalog(self, kind: str = "session") -> Path:
+        value = {
+            "schema_version": 2,
+            "backends": [{
+                "id": "reference",
+                "name": "Reference",
+                "kind": kind,
+                "priority": 50,
+                "selector": {
+                    "runtimes": ["test"],
+                    "platforms": ["linux"],
+                    "modes": ["read"],
+                    "workspaces": ["shared"],
+                    "functions": ["audit", "batch"],
+                },
+                "availability": {"commands": [sys.executable], "environment": []},
+                "execution": {
+                    "delivery": "json",
+                    "argv": [sys.executable, str(ADAPTER)],
+                    "timeout_seconds": 10,
+                    "max_steps": 10,
+                },
+                "lane": {"id": "reference", "max_concurrency": 1,
+                         "lease_seconds": 3},
+            }],
+            "routes": {"bulk": ["reference"]},
+            "includes": [],
+        }
+        path = self.root / f"{kind}.json"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        return path
+
+    def test_catalog_validate_list_and_select(self) -> None:
+        self.assertEqual(self.runctl("validate").returncode, 0)
+        listed = json.loads(self.runctl("list").stdout)
+        self.assertEqual(listed["status"], "completed")
+        selected = self.runctl(
+            "select", "--route", "bulk", "--runtime", "codex",
+            "--platform", "linux", "--mode", "read", "--workspace",
+            "shared", "--function", "audit",
+        )
+        self.assertEqual(json.loads(selected.stdout)["id"], "native-codex-bulk")
+
+    def test_catalog_rejects_backend_lane_ownership(self) -> None:
+        value = json.loads((ROOT / "agents" / "protocol-v2.json").read_text())
+        value["backends"][0]["lane"]["owner"] = "backend"
+        path = self.root / "invalid.json"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaisesRegex(ProtocolError, "scheduler lane"):
+            load_catalog(path)
+
+    def test_native_run_returns_handoff_without_starting_lane(self) -> None:
+        value = request("run", [task("native")])
+        value["runtime"] = "codex"
+        path = self.write_request(value)
+        result = self.runctl("run", "--request-file", str(path))
+        answer = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 69)
+        self.assertEqual(answer["status"], "native_required")
+        self.assertEqual(answer["task_ids"], ["native"])
+
+    def test_oneshot_run_and_batch(self) -> None:
+        catalog = self.external_catalog("oneshot")
+        run_path = self.write_request(request("run", [task("one")]), "run.json")
+        run = self.runctl("run", "--request-file", str(run_path), catalog=catalog)
+        self.assertEqual(json.loads(run.stdout)["status"], "completed")
+        batch_path = self.write_request(
+            request("batch", [task("a"), task("b")]), "batch.json"
+        )
+        batch = self.runctl("batch", "--request-file", str(batch_path),
+                            catalog=catalog)
+        self.assertEqual([item["task_id"] for item in json.loads(batch.stdout)["results"]],
+                         ["a", "b"])
+
+    def test_session_run_and_round_robin_batch(self) -> None:
+        catalog = self.external_catalog()
+        run_path = self.write_request(request("run", [task("one")]), "run.json")
+        answer = json.loads(self.runctl(
+            "run", "--request-file", str(run_path), catalog=catalog
+        ).stdout)
+        self.assertEqual((answer["status"], answer["task_id"]),
+                         ("completed", "one"))
+        batch_path = self.write_request(
+            request("batch", [task("a"), task("b")]), "batch.json"
+        )
+        answer = json.loads(self.runctl(
+            "batch", "--request-file", str(batch_path), catalog=catalog
+        ).stdout)
+        self.assertEqual(answer["status"], "completed")
+        self.assertEqual([item["task_id"] for item in answer["results"]],
+                         ["a", "b"])
+
+    def test_permission_pause_and_resume(self) -> None:
+        catalog = self.external_catalog()
+        run_path = self.write_request(
+            request("run", [task("pause", "permission please")]), "run.json"
+        )
+        paused = json.loads(self.runctl(
+            "run", "--request-file", str(run_path), catalog=catalog
+        ).stdout)
+        self.assertEqual(paused["status"], "permission_required")
+        resume = {
+            "schema_version": 2,
+            "backend": "reference",
+            "token": paused["token"],
+            "resolution": {"decision": "allow"},
+        }
+        resume_path = self.write_request(resume, "resume.json")
+        completed = json.loads(self.runctl(
+            "resume", "--request-file", str(resume_path), catalog=catalog
+        ).stdout)
+        self.assertEqual(completed["status"], "completed")
+
+    def test_lane_reentry_expiry_and_fifo(self) -> None:
+        lane = Lane(1, lease_seconds=1)
+        first = lane.acquire("first")
+        self.assertEqual(lane.acquire("first", first), first)
+        result: list[str] = []
+
+        def waiter() -> None:
+            result.append(lane.acquire("second", timeout_seconds=3))
+
+        thread = threading.Thread(target=waiter)
+        thread.start()
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline and lane.status()["queued"] != 1:
+            time.sleep(0.01)
+        self.assertEqual(lane.status()["queued"], 1)
+        self.assertTrue(lane.release("first", first))
+        thread.join(timeout=2)
+        self.assertEqual(len(result), 1)
+        time.sleep(1.05)
+        self.assertFalse(lane.release("second", result[0]))
+
+    def test_loopback_authentication_and_status(self) -> None:
+        client = LaneClient(self.lane_state / "lane.json")
+        self.assertEqual(client.request("status")["status"], "completed")
+        descriptor = json.loads((self.lane_state / "lane.json").read_text())
+        with socket.create_connection((descriptor["host"], descriptor["port"])) as raw:
+            raw.sendall(b'{"operation":"status","auth":"wrong"}\n')
+            response = raw.makefile("rb").readline()
+        self.assertEqual(json.loads(response)["status"], "unauthorized")
+
+    def test_unavailable_backend_is_not_selected(self) -> None:
+        catalog = json.loads(self.external_catalog().read_text())
+        catalog["backends"][0]["availability"]["commands"] = [
+            "delegation-v2-definitely-missing-command"
+        ]
+        path = self.root / "unavailable.json"
+        path.write_text(json.dumps(catalog), encoding="utf-8")
+        selected = self.runctl(
+            "select", "--route", "bulk", "--runtime", "test",
+            "--platform", "linux", "--mode", "read", "--workspace",
+            "shared", "--function", "audit", catalog=path,
+        )
+        self.assertEqual(json.loads(selected.stdout)["classification"], "no_backend")
+
+
+if __name__ == "__main__":
+    unittest.main()

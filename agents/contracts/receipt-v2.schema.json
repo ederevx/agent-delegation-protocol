@@ -1,1 +1,20 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://github.com/ederevx/agent-delegation-protocol/agents/contracts/receipt-v2.schema.json","title":"Delegation receipt v2","type":"object","additionalProperties":false,"required":["schema_version","status","classification"],"properties":{"schema_version":{"const":2},"status":{"enum":["success","native_required","no_backend","invalid_request","unsupported_contract","backend_error","timeout","cancelled"]},"classification":{"type":"string","minLength":1},"backend":{"type":"string"},"task_id":{"type":"string"},"error":{"type":"string"},"response":{},"token":{"type":"string"},"exit_code":{"type":"integer","minimum":0}}}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ederevx/agent-delegation-protocol/agents/contracts/receipt-v2.schema.json",
+  "title": "Delegation receipt v2",
+  "type": "object",
+  "required": ["schema_version", "status", "classification"],
+  "properties": {
+    "schema_version": {"const": 2},
+    "status": {"enum": ["native_required", "ready", "yielded", "permission_required", "completed", "failed", "cancelled"]},
+    "classification": {"type": "string", "minLength": 1},
+    "backend": {"type": "string"},
+    "task_id": {"type": "string"},
+    "task_ids": {"type": "array", "items": {"type": "string"}},
+    "error": {"type": "string"},
+    "response": {},
+    "results": {"type": "array", "items": {"type": "object"}},
+    "token": {"type": "string"},
+    "request": {"type": "object"}
+  }
+}
