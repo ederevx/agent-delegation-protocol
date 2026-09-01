@@ -16,11 +16,9 @@
     "validation": {"type": "array", "items": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}},
     "budgets": {
       "type": "object", "additionalProperties": false,
-      "required": ["timeout_seconds", "max_input_tokens", "max_output_tokens", "max_output_bytes", "max_steps"],
+      "required": ["timeout_seconds", "max_output_bytes", "max_steps"],
       "properties": {
         "timeout_seconds": {"type": "integer", "minimum": 1},
-        "max_input_tokens": {"type": ["integer", "null"], "minimum": 1},
-        "max_output_tokens": {"type": ["integer", "null"], "minimum": 1},
         "max_output_bytes": {"type": "integer", "minimum": 1},
         "max_steps": {"type": "integer", "minimum": 1}
       }

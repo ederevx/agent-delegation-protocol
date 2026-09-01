@@ -65,9 +65,5 @@
     },
     "execution": {"type": "object", "additionalProperties": false, "required": ["workspace_engine", "evidence", "permission_policy"], "properties": {"workspace_engine": {"type": "string", "minLength": 1}, "evidence": {"type": "string", "minLength": 1}, "permission_policy": {"type": "string", "minLength": 1}}}
   },
-  "allOf": [
-    {"if": {"properties": {"selector": {"properties": {"tier": {"const": "balanced"}}}}}, "then": {"properties": {"inference": {"properties": {"context_tokens": {"maximum": 200000}, "max_output_tokens": {"maximum": 16000}}}}}},
-    {"if": {"properties": {"selector": {"properties": {"tier": {"const": "parent"}}}}}, "then": {"properties": {"inference": {"properties": {"context_tokens": {"maximum": 100000}, "max_output_tokens": {"maximum": 8000}}}}}}
-  ],
   "$defs": {"stringSet": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}}
 }

@@ -767,9 +767,7 @@ def worker_runner(deployment: Mapping[str, Any], gateway_factory: object):
                     "max_dependency_seconds", 3600)))
             binding = register(
                 f"worker:{context['token']}:{context['step']}",
-                pid=os.getpid(), dependency_seconds=dependency,
-                max_input_tokens=task["budgets"]["max_input_tokens"],
-                max_output_tokens=task["budgets"]["max_output_tokens"])
+                pid=os.getpid(), dependency_seconds=dependency)
         try:
             permission_store = context.get("permissions")
             permission_path = getattr(permission_store, "path", None)
@@ -787,31 +785,6 @@ def worker_runner(deployment: Mapping[str, Any], gateway_factory: object):
                 "DELEGATION_ALLOWED_PATHS": json.dumps(
                     task.get("allowed_paths", []), separators=(",", ":")),
             })
-            budgets = _object(task.get("budgets", {}), "task.budgets")
-            input_limit = budgets.get("max_input_tokens")
-            output_token_limit = budgets.get("max_output_tokens")
-            if input_limit is not None:
-                input_limit = _positive_int(
-                    input_limit, "task.budgets.max_input_tokens", 1_000_000)
-            if output_token_limit is not None:
-                output_token_limit = _positive_int(
-                    output_token_limit, "task.budgets.max_output_tokens", 1,
-                    131_072)
-            deployment_input = _positive_int(
-                inference.get("context_tokens"),
-                "inference.context_tokens", 1_000_000)
-            deployment_output = _positive_int(
-                inference.get("max_output_tokens"),
-                "inference.max_output_tokens", 32_000, 131_072)
-            environment["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(
-                deployment_input if input_limit is None else
-                min(input_limit, deployment_input))
-            environment["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(
-                deployment_input if input_limit is None else
-                min(input_limit, deployment_input))
-            environment["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(
-                deployment_output if output_token_limit is None else
-                min(output_token_limit, deployment_output))
             effort = inference.get("worker_effort", "low")
             environment["CLAUDE_CODE_EFFORT_LEVEL"] = str(effort)
             thinking = _object(
@@ -862,18 +835,6 @@ def worker_runner(deployment: Mapping[str, Any], gateway_factory: object):
                 response = json.loads(stdout)
             except json.JSONDecodeError:
                 response = stdout
-            usage = response.get("usage", {}) if isinstance(response, dict) else {}
-            if not isinstance(usage, dict):
-                usage = {}
-            input_tokens = sum(
-                value for key in ("input_tokens", "cache_creation_input_tokens",
-                                  "cache_read_input_tokens")
-                if isinstance((value := usage.get(key)), int)
-                and not isinstance(value, bool) and value >= 0)
-            output_tokens = usage.get("output_tokens", 0)
-            if (not isinstance(output_tokens, int) or
-                    isinstance(output_tokens, bool) or output_tokens < 0):
-                output_tokens = 0
             pending = (permission_store.pending()
                        if permission_store is not None else None)
             turns = (response.get("num_turns", 1)
@@ -889,11 +850,6 @@ def worker_runner(deployment: Mapping[str, Any], gateway_factory: object):
                 classification, completed = "output_budget_exhausted", True
             elif process_result.get("timed_out"):
                 classification, completed = "timeout", True
-            elif input_limit is not None and input_tokens > input_limit:
-                classification, completed = "input_token_budget_exhausted", True
-            elif (output_token_limit is not None and
-                  output_tokens > output_token_limit):
-                classification, completed = "output_token_budget_exhausted", True
             elif pending is not None:
                 classification, completed = "permission_requested", False
             elif max_turns:

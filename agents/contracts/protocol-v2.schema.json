@@ -4,32 +4,15 @@
   "title": "Agent delegation protocol v2 catalog",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "tiers", "backends", "routes"],
+  "required": ["schema_version", "backends", "routes"],
   "properties": {
     "schema_version": {"const": 2},
-    "tiers": {
-      "type": "object", "additionalProperties": false,
-      "required": ["low", "balanced", "parent"],
-      "properties": {
-        "low": {"$ref": "#/$defs/tierLimits"},
-        "balanced": {"$ref": "#/$defs/tierLimits"},
-        "parent": {"$ref": "#/$defs/tierLimits"}
-      }
-    },
     "backends": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/backend"}},
     "routes": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}}},
     "includes": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
   },
   "$defs": {
     "stringSet": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
-    "tierLimits": {
-      "type": "object", "additionalProperties": false,
-      "required": ["max_input_tokens", "max_output_tokens"],
-      "properties": {
-        "max_input_tokens": {"type": ["integer", "null"], "minimum": 1},
-        "max_output_tokens": {"type": ["integer", "null"], "minimum": 1}
-      }
-    },
     "backend": {
       "type": "object", "additionalProperties": false,
       "required": ["id", "name", "kind", "tier", "selector", "availability", "execution"],

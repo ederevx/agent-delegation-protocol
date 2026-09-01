@@ -86,11 +86,6 @@ def main() -> None:
         catalog = root / "catalog.json"
         catalog.write_text(json.dumps({
             "schema_version": 2,
-            "tiers": {
-                "low": {"max_input_tokens": None, "max_output_tokens": None},
-                "balanced": {"max_input_tokens": 200000, "max_output_tokens": 16000},
-                "parent": {"max_input_tokens": 100000, "max_output_tokens": 8000},
-            },
             "backends": [{
                 "id": "managed-test", "name": "Managed test",
                 "kind": "session", "tier": "low",
@@ -115,8 +110,7 @@ def main() -> None:
                 "schema_version": 2, "id": "managed-run", "mode": "read",
                 "repo": str(ROOT), "prompt": "return ok", "allowed_paths": [],
                 "workspace": "shared", "validation": [], "budgets": {
-                    "timeout_seconds": 20, "max_input_tokens": None,
-                    "max_output_tokens": None, "max_output_bytes": 65536,
+                    "timeout_seconds": 20, "max_output_bytes": 65536,
                     "max_steps": 5,
                 },
             },

@@ -44,13 +44,6 @@ SECRET_FIELD_NAMES = frozenset({
     "bearer_token", "credential_value",
 })
 _DETACHED_CHILDREN: list[subprocess.Popen] = []
-TIER_TOKEN_LIMITS = {
-    "low": {"context_tokens": None, "max_output_tokens": None},
-    "balanced": {"context_tokens": 200_000, "max_output_tokens": 16_000},
-    "parent": {"context_tokens": 100_000, "max_output_tokens": 8_000},
-}
-
-
 def _finalize_detached_children() -> None:
     for child in _DETACHED_CHILDREN:
         child.poll()
@@ -192,8 +185,6 @@ class Registration:
     last_seen: float
     retained: bool = False
     retained_session_ids: set[str] | None = None
-    max_input_tokens: int | None = None
-    max_output_tokens: int | None = None
 
 
 def _exact(value: Any, required: set[str], optional: set[str], where: str) -> None:
@@ -394,11 +385,6 @@ def validate_deployment(value: Any) -> dict[str, Any]:
     _positive_int(inference["context_tokens"], "inference.context_tokens")
     _positive_int(inference["max_output_tokens"],
                   "inference.max_output_tokens", 131072)
-    tier_limits = TIER_TOKEN_LIMITS[selector["tier"]]
-    for field, maximum in tier_limits.items():
-        if maximum is not None and inference[field] > maximum:
-            raise DeploymentError(
-                f"inference.{field} exceeds {selector['tier']} tier limit")
     _scan_for_embedded_secrets(inference)
 
     execution = value["execution"]
@@ -902,18 +888,10 @@ class ClientRegistry:
                             for item in session_ids) or
                         len(session_ids) != len(set(session_ids))):
                     continue
-                max_input_tokens = value.get("max_input_tokens")
-                max_output_tokens = value.get("max_output_tokens")
-                if any(limit is not None and (
-                        isinstance(limit, bool) or not isinstance(limit, int) or
-                        limit < 1) for limit in (
-                            max_input_tokens, max_output_tokens)):
-                    continue
                 record = Registration(
                     registration_id, client_id, token, pid, identity, 0,
                     float(value.get("last_seen", 0)), retained,
-                    set(session_ids) if retained and session_ids is not None else None,
-                    max_input_tokens, max_output_tokens)
+                    set(session_ids) if retained and session_ids is not None else None)
             except (KeyError, TypeError, ValueError):
                 continue
             if (not record.registration_id or not record.client_id or not record.token
@@ -932,9 +910,7 @@ class ClientRegistry:
                    "last_seen": record.last_seen, "retained": record.retained,
                    "retained_session_ids": (
                        sorted(record.retained_session_ids)
-                       if record.retained_session_ids is not None else None),
-                   "max_input_tokens": record.max_input_tokens,
-                   "max_output_tokens": record.max_output_tokens}
+                       if record.retained_session_ids is not None else None)}
                   for record in self.records.values()]
         _atomic_json(self.state_file, values)
 
@@ -951,8 +927,7 @@ class ClientRegistry:
             self._persist()
 
     def register(self, client_id: str, pid: int | None,
-                 dependency_seconds: int, max_input_tokens: int | None = None,
-                 max_output_tokens: int | None = None) -> Registration | None:
+                 dependency_seconds: int) -> Registration | None:
         with self.lock:
             self._reap()
             if not self.accepting or len(self.records) >= self.maximum:
@@ -963,8 +938,6 @@ class ClientRegistry:
                 _process_identity(pid) if pid else None,
                 time.time() + min(dependency_seconds, self.max_dependency_seconds),
                 time.time(),
-                max_input_tokens=max_input_tokens,
-                max_output_tokens=max_output_tokens,
             )
             self.records[registration_id] = record
             self._persist()
@@ -1170,26 +1143,20 @@ class ManagedHandler(BaseHTTPRequestHandler):
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return
         if operation == "register":
-            if set(value) - {"client_id", "pid", "dependency_seconds",
-                             "max_input_tokens", "max_output_tokens"}:
+            if set(value) - {"client_id", "pid", "dependency_seconds"}:
                 self._error(400, b"invalid request\n")
                 return
             client_id = value.get("client_id")
             pid = value.get("pid")
             seconds = value.get("dependency_seconds", 0)
-            input_limit = value.get("max_input_tokens")
-            output_limit = value.get("max_output_tokens")
             if (not isinstance(client_id, str) or not client_id or
                     (pid is not None and (isinstance(pid, bool) or
                                           not isinstance(pid, int) or pid <= 1)) or
                     isinstance(seconds, bool) or not isinstance(seconds, int) or
-                    seconds < 0 or any(limit is not None and (
-                        isinstance(limit, bool) or not isinstance(limit, int) or
-                        limit < 1) for limit in (input_limit, output_limit))):
+                    seconds < 0):
                 self._error(400, b"invalid registration\n")
                 return
-            record = self.server.clients.register(
-                client_id, pid, seconds, input_limit, output_limit)
+            record = self.server.clients.register(client_id, pid, seconds)
             if record is None:
                 self._error(409, b"client limit reached\n")
                 return
@@ -1311,7 +1278,7 @@ class ManagedHandler(BaseHTTPRequestHandler):
         heartbeat.start()
         try:
             upstream_status, error_class = self._forward_acquired(
-                body, target, lost, record)
+                body, target, lost)
         finally:
             stop.set()
             heartbeat.join(timeout=1)
@@ -1328,8 +1295,7 @@ class ManagedHandler(BaseHTTPRequestHandler):
                     elapsed_seconds=time.monotonic() - started)
 
     def _forward_acquired(self, body: bytes, target: str,
-                          lost: threading.Event,
-                          record: Registration) -> tuple[int | None, str | None]:
+                          lost: threading.Event) -> tuple[int | None, str | None]:
         upstream = self.server.upstream
         timeout = self.server.deployment["gateway"]["timeout_seconds"]
         if upstream.scheme == "https":
@@ -1348,55 +1314,6 @@ class ManagedHandler(BaseHTTPRequestHandler):
         prefix = gateway["credential_scheme"]
         headers[gateway["credential_header"]] = (
             (prefix + " ") if prefix else "") + self.server.credential
-        if urlsplit(target).path == "/v1/messages" and (
-                record.max_input_tokens is not None or
-                record.max_output_tokens is not None):
-            try:
-                payload = json.loads(body)
-                if not isinstance(payload, dict):
-                    raise ValueError
-                requested_output = payload.get("max_tokens")
-                if (record.max_output_tokens is not None and
-                        (isinstance(requested_output, bool) or
-                         not isinstance(requested_output, int) or
-                         requested_output > record.max_output_tokens)):
-                    self._error(413, b"output token budget exceeded\n")
-                    connection.close()
-                    return 413, "output_token_budget_exhausted"
-                count_payload = dict(payload)
-                for field in ("max_tokens", "stream", "thinking"):
-                    count_payload.pop(field, None)
-                connection.request(
-                    "POST", upstream.prefix + "/v1/messages/count_tokens",
-                    body=json.dumps(count_payload, separators=(",", ":")).encode(),
-                    headers=headers)
-                counted = connection.getresponse()
-                counted_body = counted.read()
-                if counted.status >= 400:
-                    self._error(502, b"input token count failed\n")
-                    connection.close()
-                    return None, "input_token_count_failed"
-                count_value = json.loads(counted_body)
-                input_tokens = count_value.get("input_tokens")
-                if (not isinstance(input_tokens, int) or
-                        isinstance(input_tokens, bool) or input_tokens < 0):
-                    raise ValueError
-                if (record.max_input_tokens is not None and
-                        input_tokens > record.max_input_tokens):
-                    self._error(413, b"input token budget exceeded\n")
-                    connection.close()
-                    return 413, "input_token_budget_exhausted"
-                connection.close()
-                connection = (http.client.HTTPSConnection(
-                    upstream.host, upstream.port, timeout=timeout,
-                    context=self.server.ssl_context) if upstream.scheme == "https"
-                    else http.client.HTTPConnection(
-                        upstream.host, upstream.port, timeout=timeout))
-            except (OSError, ValueError, json.JSONDecodeError,
-                    http.client.HTTPException):
-                self._error(502, b"input token count failed\n")
-                connection.close()
-                return None, "input_token_count_failed"
         try:
             connection.request(self.command, upstream.prefix + target,
                                body=body, headers=headers)
@@ -1677,16 +1594,12 @@ class ServiceClient:
         raise DeploymentError("managed service did not stop")
 
     def register(self, client_id: str, pid: int | None = None,
-                 dependency_seconds: int = 0,
-                 max_input_tokens: int | None = None,
-                 max_output_tokens: int | None = None) -> "GatewayBinding":
+                 dependency_seconds: int = 0) -> "GatewayBinding":
         if pid is None:
             pid = os.getpid()
         answer = self._control("register", {
             "client_id": client_id, "pid": pid,
             "dependency_seconds": dependency_seconds,
-            "max_input_tokens": max_input_tokens,
-            "max_output_tokens": max_output_tokens,
         })
         return GatewayBinding(self, answer["registration_id"], answer["token"])
 

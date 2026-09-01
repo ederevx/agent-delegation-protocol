@@ -33,8 +33,6 @@ def task(task_id: str, prompt: str = "hello") -> dict:
         "validation": [],
         "budgets": {
             "timeout_seconds": 10,
-            "max_input_tokens": None,
-            "max_output_tokens": None,
             "max_output_bytes": 65536,
             "max_steps": 5,
         },
@@ -152,11 +150,6 @@ class ProtocolV2(unittest.TestCase):
     def external_catalog(self, kind: str = "session") -> Path:
         value = {
             "schema_version": 2,
-            "tiers": {
-                "low": {"max_input_tokens": None, "max_output_tokens": None},
-                "balanced": {"max_input_tokens": 200000, "max_output_tokens": 16000},
-                "parent": {"max_input_tokens": 100000, "max_output_tokens": 8000},
-            },
             "backends": [{
                 "id": "reference",
                 "name": "Reference",
@@ -220,26 +213,6 @@ class ProtocolV2(unittest.TestCase):
         path.write_text(json.dumps(value), encoding="utf-8")
         with self.assertRaisesRegex(ProtocolError, "scheduler lane"):
             load_catalog(path)
-
-    def test_catalog_requires_strictly_descending_token_pyramid(self) -> None:
-        value = json.loads(self.external_catalog().read_text())
-        value["tiers"]["balanced"]["max_input_tokens"] = 100000
-        path = self.root / "flat-pyramid.json"
-        path.write_text(json.dumps(value), encoding="utf-8")
-        with self.assertRaisesRegex(ProtocolError, "strictly descend"):
-            load_catalog(path)
-
-    def test_task_budget_cannot_exceed_selected_tier(self) -> None:
-        value = request("run", [task("over-budget")])
-        value["tier"] = "balanced"
-        value["task"]["budgets"]["max_input_tokens"] = 200001
-        value["task"]["budgets"]["max_output_tokens"] = 16000
-        result = self.runctl(
-            "run", "--request-file", str(self.write_request(value)),
-            catalog=self.native_catalog())
-        answer = json.loads(result.stdout)
-        self.assertEqual(answer["classification"], "configuration_error")
-        self.assertIn("exceeds balanced tier limit", answer["error"])
 
     def test_native_run_returns_handoff_without_starting_lane(self) -> None:
         value = request("run", [task("native")])

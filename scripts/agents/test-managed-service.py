@@ -53,16 +53,6 @@ class UpstreamHandler(BaseHTTPRequestHandler):
                 "path": self.path, "authorization": self.headers.get("Authorization"),
                 "api_key": self.headers.get("X-Api-Key"), "body": body,
             })
-            if self.path == "/v1/messages/count_tokens":
-                payload = json.dumps({
-                    "input_tokens": self.server.count_tokens,
-                }).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
-                return
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Transfer-Encoding", "chunked")
@@ -86,7 +76,6 @@ class UpstreamServer(ThreadingHTTPServer):
         self.active = 0
         self.maximum = 0
         self.received = []
-        self.count_tokens = 10
         super().__init__(("127.0.0.1", 0), UpstreamHandler)
 
 
@@ -256,11 +245,6 @@ class ManagedServiceTests(unittest.TestCase):
         changed["credential"] = {"kind": "protected_file", "reference": "/tmp/key"}
         with self.assertRaisesRegex(DeploymentError, "protocol_store"):
             validate_deployment(changed)
-        changed = copy.deepcopy(value)
-        changed["selector"]["tier"] = "balanced"
-        changed["inference"]["max_output_tokens"] = 16001
-        with self.assertRaisesRegex(DeploymentError, "exceeds balanced tier limit"):
-            validate_deployment(changed)
 
     def test_protected_credential_store(self):
         self.assertEqual(read_credential(credential_path("fake")),
@@ -417,37 +401,6 @@ class ManagedServiceTests(unittest.TestCase):
         connection.close()
         binding.close()
         self.assertTrue(answers[0].stop())
-
-    def test_gateway_enforces_hard_token_limits_before_provider_request(self):
-        client = ensure_service(self.deployment_path, self.state)
-        self.service_pids.add(client.pid)
-        binding = client.register(
-            "bounded-client", max_input_tokens=10, max_output_tokens=5)
-
-        def request(max_tokens: int) -> tuple[int, bytes]:
-            connection = http.client.HTTPConnection(client.host, client.port)
-            connection.request(
-                "POST", "/v1/messages",
-                body=json.dumps({"model": "fake", "messages": [],
-                                 "max_tokens": max_tokens}),
-                headers={"Authorization": "Bearer " + binding.token,
-                         "Content-Type": "application/json"})
-            response = connection.getresponse()
-            result = response.status, response.read()
-            connection.close()
-            return result
-
-        self.assertEqual(request(5), (200, b"firstsecond"))
-        self.assertEqual(
-            [item["path"] for item in self.upstream.received[-2:]],
-            ["/v1/messages/count_tokens", "/v1/messages"])
-        before = len(self.upstream.received)
-        self.assertEqual(request(6)[0], 413)
-        self.assertEqual(len(self.upstream.received), before)
-        self.upstream.count_tokens = 11
-        self.assertEqual(request(5)[0], 413)
-        self.assertEqual(self.upstream.received[-1]["path"],
-                         "/v1/messages/count_tokens")
 
     def test_gateway_audit_records_sanitized_transport_error(self):
         unused = socket.socket()

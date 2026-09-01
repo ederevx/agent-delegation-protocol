@@ -15,9 +15,10 @@ Handle a bounded delegated task that needs moderate reasoning while preserving t
 - Run the requested validation and report evidence, failures, assumptions, and uncertainty.
 - Escalate material architectural, security-sensitive, destructive, or deeply ambiguous decisions to the parent instead of guessing.
 - The parent owns cross-subsystem integration and final acceptance.
-- Stay within the balanced tier's hard 200,000-input-token and
-  16,000-output-token envelope. Do not route work through the low tier merely
-  to obtain its larger token allowance.
+- The balanced tier deliberately overlaps the low tier for routine bounded
+  work and the parent for harder investigation. Handle low-tier-shaped work
+  here when moderate reasoning is genuinely useful; escalate when parent-level
+  judgment is required.
 - Ask the parent before repository-wide version-control actions, another worker's files, dependency changes, branch or index changes, or anything leaving the machine. Use the collaboration channel available to the worker and wait for the answer; only the parent may take a question to the user.
 
 ## Lifecycle
