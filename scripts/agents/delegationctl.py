@@ -112,6 +112,7 @@ def _validate_backend(backend: Any) -> dict[str, Any]:
 
 
 def load_catalog(path: Path) -> dict[str, Any]:
+    path = path.resolve()
     value = _json(path)
     if not isinstance(value, dict) or value.get("schema_version") != 2:
         raise ProtocolError("catalog must declare schema_version 2")

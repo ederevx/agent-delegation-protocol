@@ -178,6 +178,8 @@ class LaneServer:
         self.endpoint_path = self.state_dir / "lane.json"
         self.registry = registry or LaneRegistry()
         self.secret = self._load_secret()
+        self.auth_lock = threading.Lock()
+        self.seen_nonces: dict[str, float] = {}
 
     def _load_secret(self) -> bytes:
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -195,8 +197,22 @@ class LaneServer:
         if not isinstance(request, dict):
             return {"status": "invalid_request", "error": "object required"}
         supplied = str(request.get("auth", ""))
-        if not hmac.compare_digest(supplied, _auth(self.secret, request)):
+        nonce = request.get("nonce")
+        timestamp = request.get("timestamp")
+        if (not hmac.compare_digest(supplied, _auth(self.secret, request)) or
+                not isinstance(nonce, str) or not nonce or
+                not isinstance(timestamp, (int, float)) or
+                abs(time.time() - timestamp) > 60):
             return {"status": "unauthorized"}
+        with self.auth_lock:
+            cutoff = time.time() - 60
+            self.seen_nonces = {
+                value: seen for value, seen in self.seen_nonces.items()
+                if seen >= cutoff
+            }
+            if nonce in self.seen_nonces:
+                return {"status": "unauthorized"}
+            self.seen_nonces[nonce] = time.time()
         try:
             operation = request.get("operation")
             if operation == "status":
@@ -311,7 +327,8 @@ class LaneClient:
 
     def request(self, operation: str, **fields: Any) -> dict[str, Any]:
         request = {"schema_version": PROTOCOL_VERSION,
-                   "operation": operation, **fields}
+                   "operation": operation, "timestamp": time.time(),
+                   "nonce": secrets.token_urlsafe(18), **fields}
         request["auth"] = _auth(self.secret, request)
         payload = (json.dumps(request, separators=(",", ":")) + "\n").encode()
         with socket.create_connection((self.host, self.port), self.timeout_seconds) as client:
