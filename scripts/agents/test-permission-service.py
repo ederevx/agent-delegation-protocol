@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from permission_service import (  # noqa: E402
+    PermissionError, PermissionStore, deterministic_decision,
+    permission_request, validate_resolution,
+)
+
+
+class PermissionServiceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        scratch = Path.home() / "tmp"
+        scratch.mkdir(exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(
+            prefix="delegation-permission-test-", dir=scratch,
+        )
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_policy_enforces_workspace_mode_scope_and_hard_denials(self) -> None:
+        read = permission_request("session", "read", {"path": "src/main.py"},
+                                  "read source", now=1)
+        self.assertEqual(deterministic_decision(
+            read, self.root, mode="read", allowed_paths=[],
+        )[0], "allow")
+        write = permission_request("session", "write", {"path": "docs/a.md"},
+                                   "write docs", now=1)
+        self.assertEqual(deterministic_decision(
+            write, self.root, mode="read", allowed_paths=[],
+        )[0], "deny")
+        self.assertEqual(deterministic_decision(
+            write, self.root, mode="edit", allowed_paths=["src"],
+        )[0], "deny")
+        secret = permission_request("session", "read", {"path": ".ssh/key"},
+                                    "read key", now=1)
+        self.assertEqual(deterministic_decision(
+            secret, self.root, mode="read", allowed_paths=[],
+        )[0], "deny")
+        shell = permission_request("session", "shell", {"command": "curl example.test"},
+                                   "network", now=1)
+        self.assertEqual(deterministic_decision(
+            shell, self.root, mode="edit", allowed_paths=[],
+        )[0], "deny")
+
+    def test_exact_grant_is_one_use_and_resolution_cannot_replay(self) -> None:
+        store = PermissionStore(self.root / "permissions.json", "session")
+        request = permission_request("session", "shell", {"command": "make test"},
+                                     "run tests", now=10)
+        store.issue(request)
+        answer = store.resolve({
+            "schema_version": 1, "request_id": request["request_id"],
+            "decision": "allow",
+        }, now=15)
+        self.assertEqual(answer["paused_seconds"], 5)
+        self.assertFalse(store.consume_grant("shell", {"command": "make tests"}))
+        self.assertTrue(store.consume_grant("shell", {"command": "make test"}))
+        self.assertFalse(store.consume_grant("shell", {"command": "make test"}))
+        with self.assertRaises(PermissionError):
+            store.resolve({
+                "schema_version": 1, "request_id": request["request_id"],
+                "decision": "allow",
+            })
+
+    def test_handled_results_are_bounded_and_exact(self) -> None:
+        with self.assertRaises(PermissionError):
+            validate_resolution({
+                "schema_version": 1, "request_id": "r", "decision": "allow",
+                "result": {},
+            })
+        with self.assertRaises(PermissionError):
+            validate_resolution({
+                "schema_version": 1, "request_id": "r", "decision": "handled",
+                "result": {"value": "x" * (64 * 1024)},
+            })
+
+    def test_state_file_contains_no_implicit_grants(self) -> None:
+        path = self.root / "permissions.json"
+        PermissionStore(path, "session")
+        state = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(state["grants"], [])
+        self.assertIsNone(state["pending"])
+
+
+if __name__ == "__main__":
+    unittest.main()
