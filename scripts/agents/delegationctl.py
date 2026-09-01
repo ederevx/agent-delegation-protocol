@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Provider-neutral v2 catalog validator and deterministic selector."""
 from __future__ import annotations
-import argparse, json, os, shutil, sys
+import argparse, json, os, shutil, subprocess, sys, tempfile, uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -19,7 +19,7 @@ def load(path: Path) -> dict:
     ids = set()
     for backend in backends:
         if not isinstance(backend, dict): raise ProtocolError("backend must be an object")
-        required = {"id","name","kind","provider","model","selector","execution","lane","priority"}
+        required = {"id","name","kind","selector","execution","lane","priority"}
         if set(backend) != required: raise ProtocolError(f"backend {backend.get('id','?')}: exact v2 fields required")
         ident = backend["id"]
         if not isinstance(ident, str) or ident in ids: raise ProtocolError("backend ids must be unique")
@@ -57,10 +57,30 @@ def select(catalog: dict, route: str, args: argparse.Namespace) -> dict:
 def main() -> int:
     p=argparse.ArgumentParser(); p.add_argument("--catalog",type=Path,default=CATALOG); sub=p.add_subparsers(dest="cmd",required=True)
     sub.add_parser("validate"); s=sub.add_parser("select"); s.add_argument("--route",required=True); s.add_argument("--runtime",required=True); s.add_argument("--platform",required=True); s.add_argument("--mode",required=True); s.add_argument("--workspace",required=True); s.add_argument("--function",required=True)
+    for name in ("run", "batch"):
+        x=sub.add_parser(name); x.add_argument("--route",required=True); x.add_argument("--runtime",required=True); x.add_argument("--platform",required=True); x.add_argument("--mode",required=True); x.add_argument("--workspace",required=True); x.add_argument("--function",required=True); x.add_argument("--input",type=Path,required=True)
+    x=sub.add_parser("resume"); x.add_argument("--state",type=Path,required=True)
+    x=sub.add_parser("lane"); x.add_argument("lane_command",choices=("serve","status")); x.add_argument("--socket",type=Path,required=True); x.add_argument("--secret",type=Path,required=True)
     a=p.parse_args()
     try:
         c=load(a.catalog)
-        out={"schema_version":2,"status":"success","classification":"success"} if a.cmd=="validate" else select(c,a.route,a)
+        if a.cmd=="validate": out={"schema_version":2,"status":"success","classification":"success"}
+        elif a.cmd=="select": out=select(c,a.route,a)
+        elif a.cmd in ("run","batch"):
+            backend=select(c,a.route,a); value=json.loads(a.input.read_text(encoding="utf-8")); tasks=value.get("tasks",[]) if a.cmd=="batch" else [value]
+            if not isinstance(tasks,list) or not tasks: raise ProtocolError("input tasks must be non-empty")
+            if backend["kind"]=="native": out={"schema_version":2,"status":"native_required","classification":"native_required","backend":backend["id"]}
+            else:
+                argv=backend["execution"].get("argv");
+                if not argv: raise ProtocolError("external backend has no execution argv")
+                proc=subprocess.run(argv,input=json.dumps({"schema_version":2,"operation":"batch","tasks":tasks} if a.cmd=="batch" else {"schema_version":2,"operation":"run","task":tasks[0]}),text=True,capture_output=True,timeout=backend["execution"].get("timeout_seconds",900)); out=json.loads(proc.stdout)
+        elif a.cmd=="resume":
+            state=json.loads(a.state.read_text(encoding="utf-8")); state["resumed"]=True; a.state.write_text(json.dumps(state),encoding="utf-8"); out={"schema_version":2,"status":"success","classification":"success","state":state}
+        else:
+            from lane_service import LaneServer
+            server=LaneServer(a.socket,a.secret)
+            if a.lane_command=="serve": server.serve_forever(); return 0
+            out={"schema_version":2,**server.lane.status()}
         print(json.dumps(out,sort_keys=True)); return 0
     except (OSError,ValueError,ProtocolError) as e:
         print(json.dumps({"schema_version":2,"status":"configuration_error" if not str(e)=="no_backend" else "no_backend","classification":"configuration_error" if not str(e)=="no_backend" else "no_backend","error":str(e)})); return 69 if str(e)=="no_backend" else 64

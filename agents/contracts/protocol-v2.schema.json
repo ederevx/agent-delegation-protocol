@@ -13,10 +13,10 @@
   "$defs": {
     "backend": {
       "type": "object", "additionalProperties": false,
-      "required": ["id", "name", "kind", "provider", "model", "selector", "execution", "lane", "priority"],
+      "required": ["id", "name", "kind", "selector", "execution", "lane", "priority"],
       "properties": {
         "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"},
-        "name": {"type": "string", "minLength": 1}, "provider": {"type": "string", "minLength": 1}, "model": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
         "kind": {"enum": ["native", "oneshot", "session"]},
         "priority": {"type": "integer", "minimum": 0, "maximum": 100},
         "selector": {"$ref": "#/$defs/selector"}, "execution": {"$ref": "#/$defs/execution"}, "lane": {"$ref": "#/$defs/lane"}
@@ -39,7 +39,7 @@
     },
     "lane": {
       "type": "object", "additionalProperties": false, "required": ["owner", "max_concurrency"],
-      "properties": {"owner": {"enum": ["scheduler", "backend"]}, "max_concurrency": {"type": "integer", "minimum": 1}, "lease_seconds": {"type": "integer", "minimum": 1}}
+      "properties": {"owner": {"const": "scheduler"}, "max_concurrency": {"type": "integer", "minimum": 1}, "lease_seconds": {"type": "integer", "minimum": 1}}
     }
   }
 }
