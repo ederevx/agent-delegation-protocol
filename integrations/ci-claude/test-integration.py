@@ -9,8 +9,12 @@ ctl = importlib.util.module_from_spec(spec); spec.loader.exec_module(ctl)
 def main():
   catalog = ctl.load_catalog(ROOT / "agents/protocol-v2.json")
   adapter = catalog["by_id"]["ci-claude-session-v2"]
+  windows = catalog["by_id"]["ci-claude-session-windows-v2"]
   assert adapter["kind"] == "session" and adapter["execution"]["argv"] == ["ci-claude-worker", "--v2"]
-  assert "provider" not in adapter and "model" not in adapter
+  assert windows["selector"]["platforms"] == ["windows"]
+  assert windows["execution"]["argv"] == ["python", "ci-claude-worker.py", "--v2"]
+  for backend in (adapter, windows):
+    assert "provider" not in backend and "model" not in backend
   request={"route":"bulk","runtime":"codex","platform":"linux","mode":"read","workspace":"shared","function":"audit"}
   selected=ctl.select_backend(catalog, request)
   if shutil.which("ci-claude-worker") is None:

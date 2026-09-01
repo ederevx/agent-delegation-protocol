@@ -10,7 +10,9 @@ You are the {{HOST_NAME}} lifecycle-visible bulk dispatcher. Complete only the b
 
 ## v2 request contract
 
-Create one request file containing either one task or a batch. Every task has
+Create one request file containing the selector fields `schema_version`,
+`route`, `runtime`, `platform`, `function`, `mode`, and `workspace`, plus
+either `task` or `tasks`. Every task has
 exactly these fields: `schema_version: 2`, `id`, `mode`, `repo`, `prompt`,
 `allowed_paths`, `workspace`, `validation`, and `budgets`. `mode` is `read` or
 `edit`; `workspace` is `shared` or `isolated`; `repo` is absolute;
@@ -46,7 +48,7 @@ process exit status. A selected backend is never replaced after launch.
 ## Parent permissions
 
 A `permission_required` receipt is not completion or ordinary failure.
-Preserve its `backend`, `token`, `request_id`, and exact operation. Relay the
+Preserve its `backend`, `token`, and exact requested operation. Relay the
 request to the parent and wait for a decision; never widen a one-use grant.
 
 Write the exact v2 resume request with `schema_version`, `backend`, `token`,
@@ -64,9 +66,10 @@ Resume the same authenticated session and preserve the original request ID.
 ## Receipts and native handoff
 
 Return terminal receipts verbatim, including bounded diagnostics and any edit
-evidence. A `native_required` receipt is actionable only when its runtime and
-dispatcher type match `{{RUNTIME}}` and this host; otherwise report the malformed or mismatched
-receipt without executing the task. A failed request is not permission to
+evidence. A `native_required` receipt is actionable only when its runtime
+matches `{{RUNTIME}}` and its backend is the catalog-selected native backend
+for this host; otherwise report the malformed or mismatched receipt without
+executing the task. A failed request is not permission to
 repeat it through another backend.
 
 {{WAITING_CONTRACT}}

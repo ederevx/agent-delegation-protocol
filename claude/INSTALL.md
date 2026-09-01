@@ -21,9 +21,9 @@ bash scripts/claude/install.sh
 .\scripts\claude\install.ps1
 ```
 
-Python 3 is required for the local hook and protocol client. The installer
-validates the Claude home, destination types, protocol metadata, and settings
-before mutation. Existing settings, rules, and unrelated handlers are
+Python 3.11 or newer is required for the local hook and protocol client. The
+installer validates the Claude home, destination types, protocol metadata, and
+settings before mutation. Existing settings, rules, and unrelated handlers are
 preserved; conflicts stop installation without partial activation.
 
 ## Installed surface
@@ -36,7 +36,11 @@ $CLAUDE_CONFIG_DIR/rules/delegation-protocol.md
 $CLAUDE_CONFIG_DIR/agents/bulk-worker.md
 $CLAUDE_CONFIG_DIR/hooks/delegation-enforcer.py
 $CLAUDE_CONFIG_DIR/.delegation-protocol/delegationctl.py
-$CLAUDE_CONFIG_DIR/.delegation-protocol/catalog
+$CLAUDE_CONFIG_DIR/.delegation-protocol/lane_service.py
+$CLAUDE_CONFIG_DIR/.delegation-protocol/protocol-v2.json
+$CLAUDE_CONFIG_DIR/.delegation-protocol/delegation-classifier.py
+$CLAUDE_CONFIG_DIR/.delegation-protocol/hook_adapter.py
+$CLAUDE_CONFIG_DIR/.delegation-protocol/lifecycle.py
 ```
 
 The worker sends file-backed v2 requests to `delegationctl run`, `batch`, or
@@ -61,7 +65,9 @@ action is reserved for a running background task that needs cancellation.
 
 ```bash
 python3 scripts/agents/render-bulk-workers.py --check
-python3 scripts/agents/test-delegation-core.py
+python3 scripts/agents/test-protocol-v2.py
+python3 scripts/hosts/test-install.py
+python3 scripts/hosts/test-lifecycle.py
 python3 scripts/claude/test-protocol.py
 ```
 

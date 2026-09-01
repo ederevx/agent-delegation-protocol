@@ -29,7 +29,7 @@ def task(task_id: str, prompt: str = "hello") -> dict:
         "prompt": prompt,
         "allowed_paths": [],
         "workspace": "shared",
-        "validation": [[sys.executable, "-V"]],
+        "validation": [],
         "budgets": {
             "timeout_seconds": 10,
             "max_output_bytes": 65536,
@@ -138,6 +138,18 @@ class ProtocolV2(unittest.TestCase):
         path.write_text(json.dumps(value), encoding="utf-8")
         return path
 
+    def native_catalog(self) -> Path:
+        value = json.loads(
+            (ROOT / "agents" / "protocol-v2.json").read_text(encoding="utf-8")
+        )
+        value["includes"] = []
+        value["routes"]["bulk"] = [
+            "native-codex-bulk", "native-claude-bulk",
+        ]
+        path = self.root / "native.json"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        return path
+
     def test_catalog_validate_list_and_select(self) -> None:
         self.assertEqual(self.runctl("validate").returncode, 0)
         listed = json.loads(self.runctl("list").stdout)
@@ -145,12 +157,16 @@ class ProtocolV2(unittest.TestCase):
         selected = self.runctl(
             "select", "--route", "bulk", "--runtime", "codex",
             "--platform", "linux", "--mode", "read", "--workspace",
-            "shared", "--function", "audit",
+            "shared", "--function", "audit", catalog=self.native_catalog(),
         )
         self.assertEqual(json.loads(selected.stdout)["id"], "native-codex-bulk")
 
     def test_catalog_rejects_backend_lane_ownership(self) -> None:
         value = json.loads((ROOT / "agents" / "protocol-v2.json").read_text())
+        value["includes"] = []
+        value["routes"]["bulk"] = [
+            "native-codex-bulk", "native-claude-bulk",
+        ]
         value["backends"][0]["lane"]["owner"] = "backend"
         path = self.root / "invalid.json"
         path.write_text(json.dumps(value), encoding="utf-8")
@@ -161,7 +177,9 @@ class ProtocolV2(unittest.TestCase):
         value = request("run", [task("native")])
         value["runtime"] = "codex"
         path = self.write_request(value)
-        result = self.runctl("run", "--request-file", str(path))
+        result = self.runctl(
+            "run", "--request-file", str(path), catalog=self.native_catalog()
+        )
         answer = json.loads(result.stdout)
         self.assertEqual(result.returncode, 69)
         self.assertEqual(answer["status"], "native_required")
