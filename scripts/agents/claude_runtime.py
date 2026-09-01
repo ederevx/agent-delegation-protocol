@@ -24,6 +24,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from execution_engine import spawn_owned_process
+
 
 CONTROL_COMMANDS = frozenset({"agents", "logs", "stop", "kill", "rm", "respawn"})
 RETIRED_HOOK_STATUS = frozenset({
@@ -563,7 +565,8 @@ def _binding_action(binding: object, name: str, *arguments: object) -> bool:
     return True
 
 
-def _wait(process: subprocess.Popen[Any], binding: object) -> int:
+def _wait(process: subprocess.Popen[Any], owner: object,
+          binding: object) -> int:
     while True:
         try:
             return process.wait(timeout=10)
@@ -571,15 +574,14 @@ def _wait(process: subprocess.Popen[Any], binding: object) -> int:
             _binding_action(binding, "heartbeat")
         except KeyboardInterrupt:
             if process.poll() is None:
-                process.send_signal(signal.SIGINT)
+                request = getattr(owner, "request_termination")
+                force = getattr(owner, "force_termination")
+                request()
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
+                    force()
+                    if process.poll() is None:
                         process.wait()
             return 130
 
@@ -590,6 +592,7 @@ def launch(deployment: Mapping[str, Any], arguments: Sequence[str], *,
     """Launch Claude with a protocol gateway binding and preserve its status."""
     retained = False
     process: subprocess.Popen[Any] | None = None
+    owner: object | None = None
     try:
         source = os.environ if environ is None else environ
         runtime = _runtime(deployment)
@@ -611,9 +614,9 @@ def launch(deployment: Mapping[str, Any], arguments: Sequence[str], *,
             deployment, session_dir, gateway=gateway, environ=source,
             control=True)
         if control:
-            return subprocess.run(
-                _command(executable, values), env=control_environment,
-                check=False).returncode
+            process, owner = spawn_owned_process(
+                _command(executable, values), env=control_environment)
+            return _wait(process, owner, None)
 
         environment = build_environment(
             deployment, session_dir, gateway=gateway, environ=source)
@@ -634,8 +637,9 @@ def launch(deployment: Mapping[str, Any], arguments: Sequence[str], *,
         values = ["--settings", str(overlay), *values]
 
         before = _background_ids(executable, control_environment)
-        process = subprocess.Popen(_command(executable, values), env=environment)
-        status = _wait(process, gateway)
+        process, owner = spawn_owned_process(
+            _command(executable, values), env=environment)
+        status = _wait(process, owner, gateway)
         after = _background_ids(executable, control_environment)
         if gateway is not None:
             if before is None or after is None:
@@ -647,8 +651,16 @@ def launch(deployment: Mapping[str, Any], arguments: Sequence[str], *,
         return status
     finally:
         if process is not None and process.poll() is None:
-            process.terminate()
-            process.wait()
+            assert owner is not None
+            getattr(owner, "request_termination")()
+            try:
+                process.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                getattr(owner, "force_termination")()
+                if process.poll() is None:
+                    process.wait()
+        if owner is not None:
+            getattr(owner, "close")()
         if gateway is not None and not retained:
             _binding_action(gateway, "close")
 
@@ -670,43 +682,6 @@ def _worker_prompt(task: Mapping[str, Any], context: Mapping[str, Any]) -> str:
         scope + "\n\nUse one deterministic command per shell call. External "
         "operations require parent authority. Stop early enough to return a "
         "final report within this slice.\n\nTASK:\n" + str(task["prompt"]) + resumed)
-
-
-def _worker_process(command: str | list[str], prompt: str, cwd: Path,
-                    environment: dict[str, str], timeout: float
-                    ) -> tuple[int, str, str, bool]:
-    options: dict[str, Any] = {}
-    if os.name == "nt":
-        options["creationflags"] = getattr(
-            subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    else:
-        options["start_new_session"] = True
-    process = subprocess.Popen(
-        command, cwd=cwd, env=environment, stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **options)
-    try:
-        stdout, stderr = process.communicate(prompt, timeout=max(0.01, timeout))
-        return process.returncode, stdout, stderr, False
-    except subprocess.TimeoutExpired:
-        if os.name == "nt":
-            process.terminate()
-        else:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-        try:
-            stdout, stderr = process.communicate(timeout=0.5)
-        except subprocess.TimeoutExpired:
-            if os.name == "nt":
-                process.kill()
-            else:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            stdout, stderr = process.communicate()
-        return 124, stdout, stderr, True
 
 
 def worker_runner(deployment: Mapping[str, Any], gateway_factory: object):
@@ -784,9 +759,19 @@ def worker_runner(deployment: Mapping[str, Any], gateway_factory: object):
                 "--tools", tools, "--settings",
                 str(provider_overlay(deployment, worker_session)),
             ])
-            returncode, stdout, stderr, timed_out = _worker_process(
-                _command(executable, arguments), _worker_prompt(task, context),
-                cwd, environment, float(context["remaining_seconds"]))
+            run_process = context.get("run_process")
+            if not callable(run_process):
+                raise RuntimeProfileError(
+                    "the execution engine process supervisor is unavailable")
+            process_result = run_process(
+                _command(executable, arguments), cwd,
+                float(context["remaining_seconds"]),
+                input_text=_worker_prompt(task, context),
+                max_output_bytes=int(task["budgets"]["max_output_bytes"]),
+                env=environment)
+            returncode = int(process_result["returncode"])
+            stdout = str(process_result["stdout"])
+            stderr = str(process_result["stderr"])
             try:
                 response = json.loads(stdout)
             except json.JSONDecodeError:
@@ -800,7 +785,11 @@ def worker_runner(deployment: Mapping[str, Any], gateway_factory: object):
             max_turns = isinstance(response, dict) and (
                 response.get("subtype") == "error_max_turns"
                 or response.get("stop_reason") == "max_turns")
-            if timed_out:
+            if process_result.get("cancelled"):
+                classification, completed = "cancelled", True
+            elif process_result.get("output_budget_exhausted"):
+                classification, completed = "output_budget_exhausted", True
+            elif process_result.get("timed_out"):
                 classification, completed = "timeout", True
             elif pending is not None:
                 classification, completed = "permission_requested", False

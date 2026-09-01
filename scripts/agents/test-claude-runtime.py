@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 
 from permission_service import PermissionStore
+from execution_engine import run_owned_process
 
 
 HERE = Path(__file__).resolve().parent
@@ -262,10 +263,17 @@ def test_worker_runner_uses_bounded_headless_contract(root: Path) -> None:
                     "max_steps": 5},
     }
     permissions = PermissionStore(root / "permissions.json", "session-1")
+    supervised: list[dict] = []
+
+    def supervise(argv, cwd, timeout_seconds, **kwargs):
+        supervised.append(dict(kwargs))
+        return run_owned_process(argv, cwd, timeout_seconds, **kwargs)
+
     context = {
         "token": "session-1", "step": 0, "remaining_seconds": 30.0,
         "remaining_steps": 5, "continuation": None,
         "permissions": permissions,
+        "run_process": supervise,
     }
     binding = Binding()
     configured = deployment(stub, root / "interactive-session")
@@ -296,6 +304,8 @@ def test_worker_runner_uses_bounded_headless_contract(root: Path) -> None:
     require(outcome["classification"] == "success" and outcome["completed"],
             f"worker outcome failed: {outcome}")
     require(outcome["steps_used"] == 2, "worker turn count was not normalized")
+    require(supervised and supervised[0]["max_output_bytes"] == 100000,
+            "worker output budget was not bound to process capture")
     seen = json.loads(record.read_text(encoding="utf-8"))
     require(seen["argv"][:5] == ["-p", "--output-format", "json",
                                   "--max-turns", "5"],
