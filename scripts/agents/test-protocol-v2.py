@@ -17,7 +17,7 @@ CTL = ROOT / "scripts" / "agents" / "delegationctl.py"
 ADAPTER = ROOT / "scripts" / "agents" / "reference-adapter.py"
 sys.path.insert(0, str(ROOT / "scripts" / "agents"))
 from delegationctl import ProtocolError, load_catalog  # noqa: E402
-from lane_service import Lane, LaneClient  # noqa: E402
+from lane_service import Lane, LaneClient, _auth  # noqa: E402
 
 
 def task(task_id: str, prompt: str = "hello") -> dict:
@@ -248,6 +248,22 @@ class ProtocolV2(unittest.TestCase):
             raw.sendall(b'{"operation":"status","auth":"wrong"}\n')
             response = raw.makefile("rb").readline()
         self.assertEqual(json.loads(response)["status"], "unauthorized")
+        replay = {
+            "schema_version": 2,
+            "operation": "status",
+            "timestamp": time.time(),
+            "nonce": "one-use-nonce",
+        }
+        secret = Path(descriptor["secret_file"]).read_bytes()
+        replay["auth"] = _auth(secret, replay)
+
+        def raw_request(value: dict) -> dict:
+            with socket.create_connection((descriptor["host"], descriptor["port"])) as raw:
+                raw.sendall((json.dumps(value) + "\n").encode())
+                return json.loads(raw.makefile("rb").readline())
+
+        self.assertEqual(raw_request(replay)["status"], "completed")
+        self.assertEqual(raw_request(replay)["status"], "unauthorized")
 
     def test_unavailable_backend_is_not_selected(self) -> None:
         catalog = json.loads(self.external_catalog().read_text())
