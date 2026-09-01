@@ -271,6 +271,12 @@ def validate_deployment(value: Any) -> dict[str, Any]:
     _exact(thinking, {"type"}, {"budget_tokens"}, "inference.thinking")
     if thinking["type"] not in {"adaptive", "enabled", "disabled"}:
         raise DeploymentError("inference.thinking.type is invalid")
+    if thinking["type"] == "enabled" and "budget_tokens" not in thinking:
+        raise DeploymentError(
+            "inference.thinking.budget_tokens is required when enabled")
+    if thinking["type"] != "enabled" and "budget_tokens" in thinking:
+        raise DeploymentError(
+            "inference.thinking.budget_tokens is valid only when enabled")
     if "budget_tokens" in thinking:
         _positive_int(thinking["budget_tokens"],
                       "inference.thinking.budget_tokens")
@@ -1189,6 +1195,17 @@ def _preferred_port(state: Path) -> int:
             return 0
 
 
+def _has_retained_registry(state: Path) -> bool:
+    try:
+        records = json.loads(
+            (state / "registrations.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    return isinstance(records, list) and any(
+        isinstance(record, dict) and record.get("retained") is True
+        for record in records)
+
+
 def _retained_sessions(deployment: dict[str, Any]) -> set[str] | None:
     if deployment["runtime"]["profile"] != "claude-code":
         return None
@@ -1218,6 +1235,9 @@ def serve(deployment_path: str | Path, state_dir: str | Path | None = None) -> i
                                    credential, admin_token,
                                    state / "registrations.json")
     except OSError:
+        if preferred and _has_retained_registry(state):
+            raise DeploymentError(
+                "preferred gateway port is unavailable for retained clients")
         server = ManagedHTTPServer(("127.0.0.1", 0), deployment, credential,
                                    admin_token, state / "registrations.json")
     _atomic_text(secret_file, admin_token + "\n")

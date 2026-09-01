@@ -114,7 +114,11 @@ def main() -> None:
         assert "lane" not in completed
         status = run(environment, "service", "status", "--deployment", "ci-claude")
         assert status["clients"] == []
-        run(environment, "deployment", "uninstall", "--deployment", "ci-claude")
+        removed = run(
+            environment, "deployment", "uninstall", "--deployment", "ci-claude")
+        assert removed["credential_removed"] is True
+        assert not (root / "xdg-config" / "agent-delegation-protocol" /
+                    "credentials" / "cheapestinference").exists()
         print("Managed controller tests: PASS")
 
 

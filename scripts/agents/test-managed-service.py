@@ -6,6 +6,7 @@ import http.client
 import json
 import os
 import signal
+import socket
 import sys
 import tempfile
 import threading
@@ -25,6 +26,7 @@ from managed_service import (  # noqa: E402
     load_deployment,
     read_credential,
     remove_credential,
+    serve,
     validate_deployment,
     write_credential,
 )
@@ -170,6 +172,14 @@ class ManagedServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(DeploymentError, "may not contain a secret"):
             validate_deployment(changed)
         changed = copy.deepcopy(value)
+        changed["inference"]["thinking"] = {"type": "enabled"}
+        with self.assertRaisesRegex(DeploymentError, "budget_tokens is required"):
+            validate_deployment(changed)
+        changed["inference"]["thinking"] = {
+            "type": "adaptive", "budget_tokens": 1024}
+        with self.assertRaisesRegex(DeploymentError, "valid only when enabled"):
+            validate_deployment(changed)
+        changed = copy.deepcopy(value)
         changed["credential"] = {"kind": "protected_file", "reference": "/tmp/key"}
         with self.assertRaisesRegex(DeploymentError, "protocol_store"):
             validate_deployment(changed)
@@ -182,6 +192,25 @@ class ManagedServiceTests(unittest.TestCase):
             read_credential(credential_path("fake"))
         with self.assertRaisesRegex(DeploymentError, "reference is invalid"):
             credential_path("../escape")
+
+    def test_retained_clients_fail_closed_when_preferred_port_is_occupied(self):
+        state = self.root / "occupied-state"
+        state.mkdir()
+        occupied = socket.socket()
+        occupied.bind(("127.0.0.1", 0))
+        try:
+            port = occupied.getsockname()[1]
+            (state / "service.port").write_text(f"{port}\n", encoding="ascii")
+            (state / "registrations.json").write_text(json.dumps([{
+                "registration_id": "retained", "client_id": "background",
+                "token": "dummy", "pid": None, "process_identity": None,
+                "last_seen": time.time(), "retained": True,
+            }]), encoding="utf-8")
+            with self.assertRaisesRegex(
+                    DeploymentError, "unavailable for retained clients"):
+                serve(self.deployment_path, state)
+        finally:
+            occupied.close()
         write_credential("rotated", "second-secret")
         self.assertEqual(read_credential(credential_path("rotated")),
                          "second-secret")

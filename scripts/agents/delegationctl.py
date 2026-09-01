@@ -715,6 +715,10 @@ def install_deployment(config: Path,
         item["path"]: item for item in (prior or {}).get("resources", [])
         if isinstance(item, dict) and isinstance(item.get("path"), str)
     }
+    planned_paths = {str(path) for path, _value, _mode in plan}
+    if prior is not None and set(old_by_path) != planned_paths:
+        raise ProtocolError(
+            "deployment launcher set changed; uninstall before reinstalling")
     for path, _value, _mode in plan:
         if path.exists():
             record = old_by_path.get(str(path))
@@ -747,7 +751,7 @@ def install_deployment(config: Path,
             "config": str(destination), "resources": resources}
 
 
-def uninstall_deployment(deployment_id: str) -> dict[str, Any]:
+def uninstall_deployment(deployment_id: str, *, keep_credential: bool) -> dict[str, Any]:
     path = resolve_deployment(deployment_id)
     deployment = load_deployment(path)
     service = ensure_service(path)
@@ -755,6 +759,10 @@ def uninstall_deployment(deployment_id: str) -> dict[str, Any]:
     if status.get("clients"):
         raise ProtocolError("deployment has active or retained clients")
     service.stop()
+    credential_removed = False
+    if not keep_credential:
+        credential_removed = remove_credential(
+            deployment["credential"]["reference"])
     manifest_path = _deployment_manifest(deployment["id"])
     manifest = _json(manifest_path)
     resources = manifest.get("resources") if isinstance(manifest, dict) else None
@@ -773,7 +781,8 @@ def uninstall_deployment(deployment_id: str) -> dict[str, Any]:
         resource.unlink()
         removed.append(str(resource))
     manifest_path.unlink()
-    return {"deployment_id": deployment["id"], "removed": removed}
+    return {"deployment_id": deployment["id"], "removed": removed,
+            "credential_removed": credential_removed}
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -806,6 +815,7 @@ def _parser() -> argparse.ArgumentParser:
     deployment_status.add_argument("--deployment", required=True)
     deployment_uninstall = deployment_commands.add_parser("uninstall")
     deployment_uninstall.add_argument("--deployment", required=True)
+    deployment_uninstall.add_argument("--keep-credential", action="store_true")
     credential = commands.add_parser("credential")
     credential_commands = credential.add_subparsers(
         dest="credential_command", required=True)
@@ -850,7 +860,8 @@ def main() -> int:
                 answer = receipt("completed", "deployment_installed",
                                  deployment_id=deployment["id"], path=str(path))
             else:
-                result = uninstall_deployment(args.deployment)
+                result = uninstall_deployment(
+                    args.deployment, keep_credential=args.keep_credential)
                 answer = receipt("completed", "deployment_uninstalled", **result)
             print(json.dumps(answer, sort_keys=True))
             return 0
