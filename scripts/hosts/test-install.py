@@ -34,6 +34,8 @@ def fixture(root: Path) -> Path:
         "claude/hooks/delegation-enforcer.py", "codex/AGENTS.md",
         "codex/agents/bulk_worker.toml", "codex/agents/balanced-worker.toml",
         "codex/hooks/delegation-enforcer.py", "scripts/agents/delegationctl.py",
+        "scripts/agents/delegationctl",
+        "scripts/agents/delegationctl.cmd.tmpl",
         "scripts/agents/lane_service.py", "scripts/agents/managed_service.py",
         "scripts/agents/execution_engine.py",
         "scripts/agents/permission_service.py",
@@ -46,7 +48,11 @@ def fixture(root: Path) -> Path:
     ):
         target = repo / path
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(path + "\n", encoding="utf-8")
+        target.write_text(
+            '@echo off\n"@PYTHON_EXECUTABLE@" "%~dp0delegationctl.py" %*\n'
+            if path.endswith(".cmd.tmpl") else path + "\n",
+            encoding="utf-8",
+        )
     return repo
 
 
@@ -77,10 +83,22 @@ def test_same_link_paths() -> None:
         )
 
 
+def test_launcher_rendering(root: Path) -> None:
+    template = root / "delegationctl.cmd.tmpl"
+    template.write_text(
+        '@echo off\n"@PYTHON_EXECUTABLE@" "%~dp0delegationctl.py" %*\n',
+        encoding="utf-8",
+    )
+    rendered = install.launcher_bytes(template, r"C:\Program Files\Python%3\python.exe")
+    assert b'"C:\\Program Files\\Python%%3\\python.exe"' in rendered
+    assert b'"%~dp0delegationctl.py" %*' in rendered
+
+
 def main() -> None:
     test_same_link_paths()
     with tempfile.TemporaryDirectory(prefix="protocol-hosts-") as raw:
         root, repo = Path(raw), None
+        test_launcher_rendering(root)
         repo = fixture(root)
         home = root / "claude-home"
         install.install(repo, home, "claude")
@@ -94,8 +112,28 @@ def main() -> None:
         codex = root / "codex-empty"
         install.install(repo, codex, "codex")
         assert (codex / "AGENTS.md").is_symlink()
+        launcher = codex / ".delegation-protocol" / (
+            "delegationctl.cmd" if install.os.name == "nt" else "delegationctl"
+        )
+        manifest = json.loads((
+            codex / ".delegation-protocol/manifest.json"
+        ).read_text())
+        launcher_resource = next(item for item in manifest["resources"]
+                                 if item["destination"] == str(launcher))
+        if install.os.name == "nt":
+            assert launcher.is_file()
+            assert str(Path(install.sys.executable)) in launcher.read_text()
+            assert launcher_resource["kind"] == "launcher"
+        else:
+            assert launcher.is_symlink()
+            assert launcher_resource["kind"] == "link"
+        cache = codex / ".delegation-protocol/__pycache__"
+        cache.mkdir()
+        (cache / "runtime.pyc").write_bytes(b"generated cache")
         install.uninstall(codex, "codex")
         assert not (codex / "AGENTS.md").exists()
+        assert not launcher.exists()
+        assert not (codex / ".delegation-protocol").exists()
 
         codex = root / "codex-agents"
         codex.mkdir()

@@ -19,12 +19,14 @@ evidence report. The parent is the integration authority.
 Workers use the common v2 task fields: `schema_version: 2`, `id`, `mode`,
 `repo`, `prompt`, `allowed_paths`, `workspace`, `validation`, and `budgets`.
 Budgets contain positive `timeout_seconds`, `max_output_bytes`, and
-`max_steps`. Requests are written to a file and executed only through:
+`max_steps`. Requests are written to a file and executed only through the
+absolute launcher under the active Codex home. Use `delegationctl` on POSIX or
+`delegationctl.cmd` on Windows:
 
 ```text
-delegationctl run --request-file <path>
-delegationctl batch --request-file <path>
-delegationctl resume --request-file <path>
+<active-Codex-home>/.delegation-protocol/delegationctl[.cmd] run --request-file <path>
+<active-Codex-home>/.delegation-protocol/delegationctl[.cmd] batch --request-file <path>
+<active-Codex-home>/.delegation-protocol/delegationctl[.cmd] resume --request-file <path>
 ```
 
 The scheduler authenticates the local session, owns the provider lane, and

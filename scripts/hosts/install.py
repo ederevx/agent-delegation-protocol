@@ -24,6 +24,7 @@ except ImportError:
     import settings
 
 VERSION = 2
+PYTHON_EXECUTABLE_TOKEN = "@PYTHON_EXECUTABLE@"
 
 
 def _strip_windows_extended_prefix(value: str) -> str:
@@ -60,6 +61,23 @@ def digest(path: Path) -> str:
                 entries.append(str(child.relative_to(path)) + "\0" + digest(child))
         return hashlib.sha256("\n".join(entries).encode()).hexdigest()
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def launcher_bytes(source: Path, python_executable: str) -> bytes:
+    """Render a Windows launcher bound to the trusted install interpreter."""
+    template = source.read_text(encoding="utf-8")
+    if template.count(PYTHON_EXECUTABLE_TOKEN) != 1:
+        raise SystemExit(f"invalid Windows launcher template: {source}")
+    if any(character in python_executable for character in '\"\r\n'):
+        raise SystemExit("Python executable path is unsafe for a Windows launcher")
+    escaped = python_executable.replace("%", "%%")
+    return template.replace(PYTHON_EXECUTABLE_TOKEN, escaped).encode("utf-8")
+
+
+def resource_digest(source: Path, kind: str) -> str:
+    if kind == "launcher":
+        return hashlib.sha256(launcher_bytes(source, sys.executable)).hexdigest()
+    return digest(source)
 
 
 def same_link(path: Path, source: Path) -> bool:
@@ -127,7 +145,13 @@ def acquire_lock(state: Path) -> Path:
 
 def resources(repo: Path, home: Path, host: str) -> list[tuple[Path, Path, str]]:
     state = home / ".delegation-protocol"
+    launcher = (
+        (repo / "scripts/agents/delegationctl.cmd.tmpl", state / "delegationctl.cmd", "launcher")
+        if os.name == "nt" else
+        (repo / "scripts/agents/delegationctl", state / "delegationctl", "link")
+    )
     common = [
+        launcher,
         (repo / "scripts/agents/delegationctl.py", state / "delegationctl.py", "link"),
         (repo / "scripts/agents/lane_service.py", state / "lane_service.py", "link"),
         (repo / "scripts/agents/managed_service.py", state / "managed_service.py", "link"),
@@ -311,7 +335,7 @@ def validate_destination(source: Path, destination: Path, kind: str, owned: bool
         return
     if kind == "link" and same_link(destination, source):
         return
-    if kind == "copy" and destination.is_file() and owned and recorded and digest(destination) == recorded:
+    if kind in {"copy", "launcher"} and destination.is_file() and owned and recorded and digest(destination) == recorded:
         return
     raise SystemExit(f"refusing to overwrite unowned destination: {destination}")
 
@@ -368,11 +392,15 @@ def install(repo: Path, home: Path, host: str) -> None:
                 changed.append((destination, None, destination.exists() or destination.is_symlink()))
                 destination.symlink_to(source, target_is_directory=source.is_dir())
             else:
-                if destination.exists() and digest(destination) == digest(source):
+                expected_digest = resource_digest(source, kind)
+                if destination.exists() and digest(destination) == expected_digest:
                     continue
                 prior = destination.read_bytes() if destination.exists() else None
                 changed.append((destination, prior, prior is not None))
-                shutil.copy2(source, destination)
+                if kind == "launcher":
+                    atomic_bytes(destination, launcher_bytes(source, sys.executable))
+                else:
+                    shutil.copy2(source, destination)
         policy = None
         if host == "codex":
             policy, rollback_policy = install_codex_policy(
@@ -389,7 +417,8 @@ def install(repo: Path, home: Path, host: str) -> None:
                     "owned": [str(destination) for _, destination, _ in items],
                     "resources": [{"source": str(source), "destination": str(destination), "kind": kind}
                                   for source, destination, kind in items],
-                    "hashes": {str(destination): digest(source) for source, destination, _ in items}}
+                    "hashes": {str(destination): resource_digest(source, kind)
+                               for source, destination, kind in items}}
         if policy is not None:
             manifest["policy"] = policy
         atomic_json(manifest_path, manifest)
@@ -443,7 +472,7 @@ def uninstall(home: Path, host: str) -> None:
             source = Path(resource.get("source", ""))
             owned_link = resource.get("kind") == "link" and same_link(path, source)
             owned_copy = (
-                resource.get("kind") == "copy" and path.is_file() and
+                resource.get("kind") in {"copy", "launcher"} and path.is_file() and
                 digest(path) == manifest.get("hashes", {}).get(name)
             )
             if owned_link or owned_copy:
@@ -452,6 +481,7 @@ def uninstall(home: Path, host: str) -> None:
         for backup in state.glob("*.before-first-install"):
             backup.unlink(missing_ok=True)
         shutil.rmtree(state / "hook-state", ignore_errors=True)
+        shutil.rmtree(state / "__pycache__", ignore_errors=True)
     finally:
         shutil.rmtree(lock, ignore_errors=True)
     try:
