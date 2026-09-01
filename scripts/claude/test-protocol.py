@@ -692,6 +692,23 @@ def test_relayed_message_continues_turn(home: Path) -> None:
     })
     require(still_allowed is None, "a relayed worker report revoked fan-out evidence and re-blocked integration")
 
+    # Claude feeds a blocking Stop hook result back as a synthetic prompt. It
+    # belongs to the same turn and must not erase worker evidence either.
+    call_hook(home, "prompt", {
+        "session_id": session,
+        "prompt": (
+            "Stop hook feedback:\n"
+            "Delegation protocol requires a subagent for this bulk/high-volume turn."
+        ),
+    })
+    still_allowed = call_hook(home, "pretool", {
+        "session_id": session,
+        "tool_name": "Write",
+        "tool_input": {"file_path": "integration.txt"},
+    })
+    require(still_allowed is None,
+            "Stop hook feedback revoked fan-out evidence and re-blocked integration")
+
     # A genuine user turn must still reclassify and gate normally.
     call_hook(home, "prompt", {
         "session_id": session,

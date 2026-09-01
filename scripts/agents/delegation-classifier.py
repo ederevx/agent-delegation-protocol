@@ -178,7 +178,7 @@ MUTATING_TOOL_NAME = re.compile(
 # classifying it would judge a report as if the user had typed it, and resetting
 # evidence would discard fan-out already performed for work still in progress.
 RELAYED_MESSAGE = re.compile(
-    r"\s*<(agent|teammate|cross-session)-message\b",
+    r"\s*(?:<(agent|teammate|cross-session)-message\b|Stop hook feedback:)",
     re.IGNORECASE,
 )
 
