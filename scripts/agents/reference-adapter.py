@@ -11,6 +11,10 @@ def main():
     if not isinstance(value,dict) or value.get("schema_version") != 2:
         print(json.dumps(receipt("unsupported_contract",error="schema_version 2 required"))); return 64
     op=value.get("operation","run")
+    if op=="batch":
+        tasks=value.get("tasks")
+        if not isinstance(tasks,list) or not tasks: print(json.dumps(receipt("invalid_request",error="tasks is required"))); return 64
+        print(json.dumps(receipt("success",response={"jobs":[{"status":"success","task_id":t.get("id")} for t in tasks]}))); return 0
     if op=="run":
         task=value.get("task")
         if not isinstance(task,dict) or not isinstance(task.get("prompt"),str) or not task["prompt"].strip():
