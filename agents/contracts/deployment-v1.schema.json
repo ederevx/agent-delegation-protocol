@@ -46,7 +46,18 @@
       "type": "object", "additionalProperties": false,
       "required": ["model", "thinking", "worker_effort", "interactive_effort", "context_tokens", "max_output_tokens"],
       "properties": {
-        "model": {"type": "string", "minLength": 1}, "thinking": {"type": "object", "additionalProperties": false, "required": ["type"], "properties": {"type": {"enum": ["adaptive", "enabled", "disabled"]}, "budget_tokens": {"type": "integer", "minimum": 1}}},
+        "model": {"type": "string", "minLength": 1},
+        "thinking": {
+          "type": "object", "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": {"enum": ["adaptive", "enabled", "disabled"]},
+            "budget_tokens": {"type": "integer", "minimum": 1}
+          },
+          "if": {"properties": {"type": {"const": "enabled"}}},
+          "then": {"required": ["type", "budget_tokens"]},
+          "else": {"not": {"required": ["budget_tokens"]}}
+        },
         "worker_effort": {"enum": ["low", "medium", "high", "xhigh", "max"]}, "interactive_effort": {"enum": ["unset", "auto", "low", "medium", "high", "xhigh", "max"]},
         "context_tokens": {"type": "integer", "minimum": 1}, "max_output_tokens": {"type": "integer", "minimum": 1, "maximum": 131072}
       }

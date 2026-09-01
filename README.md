@@ -138,9 +138,10 @@ delegationctl credential set --deployment ci-claude
 delegationctl launch --deployment ci-claude -- --help
 ```
 
-`deployment uninstall` and `credential remove` refuse active or retained
-clients. Installation and removal use digest-owned manifests and never remove
-modified or unrelated files.
+`deployment uninstall` refuses active or retained clients and removes its
+credential by default; `--keep-credential` preserves it for rollback.
+Installation and removal use digest-owned manifests and never remove modified
+or unrelated files.
 
 Codex uses `session_release`; a completed worker never creates an impossible
 dismissal warning. Claude uses `automatic_release`; a foreground result clears
