@@ -90,8 +90,9 @@ Read the structured receipt before reacting to a foreground timeout. If the oper
 
 ## Conflict boundary
 
-Workers share the parent's working tree but cannot see its uncommitted state.
-Ask before repository-wide version-control actions, another worker's files,
+Native shared-workspace workers can see current working-tree changes; isolated
+protocol workers cannot see uncommitted parent changes. Either kind must ask
+before repository-wide version-control actions, another worker's files,
 dependency changes, branch or index changes, or anything leaving the machine.
 Use `SendMessage` (use `ListAgents` to identify the parent) for that escalation.
 

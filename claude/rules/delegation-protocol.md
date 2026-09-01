@@ -29,10 +29,11 @@ backend, token, and operation; resume only after a parent decision.
 
 ## Conflict boundary
 
-Workers cannot see uncommitted parent changes. They ask through `SendMessage`
-before touching repository-wide version-control state, another worker's files,
-dependencies, branches, indexes, or external systems. The parent answers each
-request separately.
+Native shared-workspace workers can see current working-tree changes; isolated
+protocol workers cannot see uncommitted parent changes. Either kind asks
+through `SendMessage` before touching repository-wide version-control state,
+another worker's files, dependencies, branches, indexes, or external systems.
+The parent answers each request separately.
 
 ## Lifecycle
 

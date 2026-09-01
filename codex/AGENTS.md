@@ -36,10 +36,11 @@ preserve its exact request ID, backend, token, and operation for `resume`.
 
 ## Conflict boundary
 
-Workers share the working tree but cannot see uncommitted parent changes. A
-worker must ask the parent before repository-wide version-control actions,
-another worker's files, dependency changes, branch or index changes, or any
-operation leaving the machine. The parent decides each request separately.
+Native shared-workspace workers can see current working-tree changes; isolated
+protocol workers cannot see uncommitted parent changes. Either kind must ask
+the parent before repository-wide version-control actions, another worker's
+files, dependency changes, branch or index changes, or any operation leaving
+the machine. The parent decides each request separately.
 
 ## Lifecycle
 
