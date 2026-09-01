@@ -35,11 +35,16 @@ without partially enabling the protocol.
 The active home receives the Codex policy and worker plus protocol-owned links:
 
 ```text
-$CODEX_HOME/AGENTS.override.md
+$CODEX_HOME/AGENTS.md
 $CODEX_HOME/agents/bulk_worker.toml
+$CODEX_HOME/agents/balanced-worker.toml
+$CODEX_HOME/hooks/delegation-enforcer.py
 $CODEX_HOME/.delegation-protocol/delegationctl.py
-$CODEX_HOME/.delegation-protocol/catalog
-$CODEX_HOME/.delegation-protocol/hooks/delegation-enforcer.py
+$CODEX_HOME/.delegation-protocol/lane_service.py
+$CODEX_HOME/.delegation-protocol/protocol-v2.json
+$CODEX_HOME/.delegation-protocol/delegation-classifier.py
+$CODEX_HOME/.delegation-protocol/hook_adapter.py
+$CODEX_HOME/.delegation-protocol/lifecycle.py
 ```
 
 The worker is a managed regular-file copy because the Codex runtime requires
@@ -71,7 +76,9 @@ Run the checks from the repository:
 
 ```bash
 python3 scripts/agents/render-bulk-workers.py --check
-python3 scripts/agents/test-delegation-core.py
+python3 scripts/agents/test-protocol-v2.py
+python3 scripts/hosts/test-install.py
+python3 scripts/hosts/test-lifecycle.py
 python3 scripts/codex/test-protocol.py
 ```
 

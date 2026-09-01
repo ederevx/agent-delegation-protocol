@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from lane_service import LaneClient, LaneError, LaneServer
@@ -195,7 +195,16 @@ def validate_task(task: Any) -> dict[str, Any]:
     for field in ("id", "repo", "prompt"):
         if not isinstance(task[field], str) or not task[field].strip():
             raise ProtocolError(f"task.{field} is required")
+    if not Path(task["repo"]).is_absolute():
+        raise ProtocolError("task.repo must be absolute")
     _string_list(task["allowed_paths"], "task.allowed_paths", allow_empty=True)
+    for allowed_path in task["allowed_paths"]:
+        path = Path(allowed_path)
+        windows_path = PureWindowsPath(allowed_path)
+        parts = {part.lower() for part in windows_path.parts}
+        if (path.is_absolute() or windows_path.is_absolute() or ".." in parts or
+                ".git" in parts):
+            raise ProtocolError("task.allowed_paths must be safe relative paths")
     if task["workspace"] not in {"shared", "isolated"}:
         raise ProtocolError("task.workspace is invalid")
     validation = task["validation"]
@@ -204,6 +213,8 @@ def validate_task(task: Any) -> dict[str, Any]:
                 any(not isinstance(part, str) or not part for part in command)
                 for command in validation)):
         raise ProtocolError("task.validation must contain argv arrays")
+    if task["mode"] == "read" and validation:
+        raise ProtocolError("read tasks cannot declare validation commands")
     budgets = task["budgets"]
     if (not isinstance(budgets, dict) or set(budgets) != {
             "timeout_seconds", "max_output_bytes", "max_steps"} or
@@ -237,8 +248,9 @@ def validate_request(value: Any, operation: str) -> dict[str, Any]:
         if not isinstance(value[key], str) or not value[key]:
             raise ProtocolError(f"request.{key} is required")
     if operation == "batch":
-        if not isinstance(value["tasks"], list) or not value["tasks"]:
-            raise ProtocolError("batch tasks must be non-empty")
+        if (not isinstance(value["tasks"], list) or
+                not 1 <= len(value["tasks"]) <= 32):
+            raise ProtocolError("batch tasks must contain 1 to 32 entries")
         value["tasks"] = [validate_task(task) for task in value["tasks"]]
     else:
         value["task"] = validate_task(value["task"])
@@ -293,11 +305,13 @@ def ensure_lane_service(state_dir: Path) -> LaneClient:
 
 def _argv(backend: dict[str, Any]) -> list[str]:
     result = []
-    for item in backend["execution"]["argv"]:
+    for index, item in enumerate(backend["execution"]["argv"]):
         rendered = item.replace("{repo}", str(ROOT))
         path = Path(rendered)
         if not path.is_absolute() and ("/" in rendered or "\\" in rendered):
             rendered = str((ROOT / rendered).resolve())
+        elif index > 0 and rendered.lower().endswith(".py"):
+            rendered = shutil.which(rendered) or rendered
         result.append(rendered)
     return result
 
@@ -342,6 +356,8 @@ def invoke(
         **os.environ,
         "DELEGATION_LANE_ENDPOINT": str(lane_client.endpoint_path),
         "DELEGATION_LANE_ID": lane["id"],
+        "DELEGATION_LANE_CAPACITY": str(lane["max_concurrency"]),
+        "DELEGATION_LANE_LEASE_SECONDS": str(lane["lease_seconds"]),
         "DELEGATION_LANE_OWNER": owner,
         "DELEGATION_LANE_LEASE_TOKEN": lease_token,
     }
@@ -443,7 +459,8 @@ def run_operation(
     tasks = request["tasks"] if operation == "batch" else [request["task"]]
     if backend["kind"] == "native":
         return receipt("native_required", "native_required",
-                       backend=backend["id"], task_ids=[task["id"] for task in tasks])
+                       backend=backend["id"], runtime=request["runtime"],
+                       task_ids=[task["id"] for task in tasks])
     client = ensure_lane_service(_lane_state_dir())
     if backend["kind"] == "oneshot":
         envelope = {"schema_version": 2, "operation": operation}

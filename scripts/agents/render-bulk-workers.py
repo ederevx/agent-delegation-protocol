@@ -85,7 +85,7 @@ def render_codex(body: str, description: str, output: dict[str, Any]) -> str:
 def rendered_outputs() -> dict[Path, str]:
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
     source = json.loads(PROFILES_PATH.read_text(encoding="utf-8"))
-    if source.get("schema_version") != 1:
+    if source.get("schema_version") != 2:
         raise ValueError("unsupported bulk-worker profile schema")
     description = source["description"]
     outputs: dict[Path, str] = {}

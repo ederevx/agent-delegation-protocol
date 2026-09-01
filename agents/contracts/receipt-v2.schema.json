@@ -9,6 +9,7 @@
     "status": {"enum": ["native_required", "ready", "yielded", "permission_required", "completed", "failed", "cancelled"]},
     "classification": {"type": "string", "minLength": 1},
     "backend": {"type": "string"},
+    "runtime": {"type": "string"},
     "task_id": {"type": "string"},
     "task_ids": {"type": "array", "items": {"type": "string"}},
     "error": {"type": "string"},

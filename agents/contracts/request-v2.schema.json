@@ -32,7 +32,7 @@
       "unevaluatedProperties": false,
       "allOf": [
         {"$ref": "#/$defs/selector"},
-        {"type": "object", "required": ["tasks"], "properties": {"tasks": {"type": "array", "minItems": 1, "items": {"$ref": "task-v2.schema.json"}}}}
+        {"type": "object", "required": ["tasks"], "properties": {"tasks": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "task-v2.schema.json"}}}}
       ]
     },
     "resume": {

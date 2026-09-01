@@ -1,11 +1,11 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "description": "Lifecycle-visible dispatcher for bounded, low-risk work through the protocol-v2 scheduler.",
   "profiles": {
     "claude": {
       "host_name": "Claude",
       "runtime": "claude",
-      "config_home": "the active Claude config directory (normally `~/.claude`)",
+      "config_home": "<active-Claude-config-directory>",
       "parent_channel": "`SendMessage` (use `ListAgents` to identify the parent)",
       "task_transport_contract": [
         "Create one request JSON file under your scratchpad with `Write`, validate non-empty JSON, and retain its absolute path through any resume. Do not interpolate JSON through the shell or standard input. Remove only that worker-owned file after a terminal receipt or launch failure."
@@ -37,7 +37,7 @@
     "codex": {
       "host_name": "Codex",
       "runtime": "codex",
-      "config_home": "the active Codex home (normally `~/.codex`)",
+      "config_home": "<active-Codex-home>",
       "parent_channel": "the collaboration channel available to the worker",
       "task_transport_contract": [
         "Create a fresh worker-owned scratch directory under `~/tmp` with `mktemp -d`, write the request JSON to `request.json` there with `apply_patch`, validate non-empty JSON, and retain its absolute path through any resume. Do not interpolate JSON through the shell or standard input. Remove only that file and its exact empty directory after a terminal receipt or launch failure."
