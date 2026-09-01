@@ -27,14 +27,14 @@ def main() -> None:
     }
     assert "lane" not in backend
     assert "provider" not in backend and "model" not in backend
-    assert backend["selector"]["functions"] == ["compress"]
+    assert "compress" in backend["selector"]["functions"]
     request = {
         "route": "bulk", "tier": "low", "runtime": "codex", "platform": "linux",
         "mode": "read", "workspace": "shared", "function": "audit",
     }
     with mock.patch.object(CTL, "_available", return_value=True):
         selected = CTL.select_backend(catalog, request)
-    assert selected["kind"] == "native"
+    assert selected["id"] == "ci-claude-session-v2"
     request["runtime"] = "claude"
     request["function"] = "compress"
     with mock.patch.object(CTL, "_available", return_value=True):

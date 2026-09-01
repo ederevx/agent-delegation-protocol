@@ -1,10 +1,5 @@
 {
   "schema_version": 2,
-  "tiers": {
-    "low": {"max_input_tokens": null, "max_output_tokens": null},
-    "balanced": {"max_input_tokens": 200000, "max_output_tokens": 16000},
-    "parent": {"max_input_tokens": 100000, "max_output_tokens": 8000}
-  },
   "backends": [
     {
       "id": "native-codex-bulk",

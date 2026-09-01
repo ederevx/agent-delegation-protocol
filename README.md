@@ -37,12 +37,13 @@ An adapter may translate the common contract into deployment-specific API or
 model settings. Those details stay in the integration; they do not enter host
 policy, the core catalog schema, or task manifests.
 
-The generated cheap-tier workers accept only `compress` requests: read-only
-large-text triage that removes repetition and clearly nonsensical input while
-preserving unique relevant information. Debugging, edits, ambiguity, and
-integration do not enter that tier. Generated balanced workers handle bounded
-moderate-reasoning work for both hosts, while parent-level judgment remains
-with the frontier session.
+The generated low-tier workers handle bounded low-risk work that needs little
+interpretation, including mechanical edits, straightforward audits, extraction,
+repetitive processing, and text compression. Generated balanced workers handle
+the same bounded shapes when moderate reasoning is useful, plus more demanding
+local work. The balanced tier likewise overlaps the frontier parent at its upper
+edge. The parent chooses the lowest tier with enough reasoning ability and
+retains architecture, integration, conflict resolution, and final validation.
 
 ## Repository layout
 
@@ -81,13 +82,10 @@ crosses tiers.
 
 Every task contains exactly `schema_version`, `id`, `mode`, `repo`, `prompt`,
 `allowed_paths`, `workspace`, `validation`, and `budgets`. Budgets contain
-positive `timeout_seconds`, `max_input_tokens`, `max_output_tokens`,
-`max_output_bytes`, and `max_steps`. Low-tier input/output token budgets are
-`null` because the terminal tier is policy-unbounded; provider/model physical
-limits still apply. Balanced is capped at 200,000/16,000 and parent at
-100,000/8,000 input/output tokens. Validation is
-a list of exact argv arrays. Credentials and deployment settings are never task
-data.
+positive `timeout_seconds`, `max_output_bytes`, and `max_steps`. Tiers classify
+the judgment and cost appropriate to a task; they do not impose protocol token
+ceilings. Validation is a list of exact argv arrays. Credentials and deployment
+settings are never task data.
 
 `resume` accepts exactly `schema_version`, `backend`, `token`, and a bounded
 `resolution` object. It continues the selected session and never falls through
