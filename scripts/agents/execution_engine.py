@@ -2,6 +2,7 @@
 """Provider-neutral, resumable execution engine for protocol-v2 tasks."""
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
@@ -105,70 +106,246 @@ def validate_task(value: Any) -> dict[str, Any]:
     return task
 
 
-def _process_options() -> dict[str, Any]:
-    if os.name == "nt":
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
-    return {"start_new_session": True}
+class _ProcessOwner:
+    """Own a process tree until the caller has finished with its root."""
+
+    def __init__(self, process: subprocess.Popen[Any]) -> None:
+        self.process = process
+
+    def request_termination(self) -> None:
+        if self.process.poll() is not None:
+            return
+        try:
+            os.killpg(self.process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    def force_termination(self) -> None:
+        try:
+            os.killpg(self.process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    def close(self) -> None:
+        """Release ownership after the root exits; POSIX groups need no handle."""
 
 
-def _terminate_process_tree(process: subprocess.Popen[str], force: bool = False) -> None:
-    if process.poll() is not None:
-        return
+class _WindowsJobOwner(_ProcessOwner):
+    """Own a complete Windows child tree with a kill-on-close Job Object."""
+
+    def __init__(self, process: subprocess.Popen[Any]) -> None:
+        super().__init__(process)
+        from ctypes import wintypes
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_ulonglong) for name in (
+                "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+        class BasicLimits(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", ctypes.c_uint32),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", ctypes.c_uint32),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", ctypes.c_uint32),
+                ("SchedulingClass", ctypes.c_uint32),
+            ]
+
+        class ExtendedLimits(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", BasicLimits),
+                ("IoInfo", IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE,
+                                                       wintypes.HANDLE]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.CreateJobObjectW(None, None)
+        if not handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            limits = ExtendedLimits()
+            limits.BasicLimitInformation.LimitFlags = 0x2000
+            if not kernel32.SetInformationJobObject(
+                    handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if not kernel32.AssignProcessToJobObject(
+                    handle, wintypes.HANDLE(int(process._handle))):
+                raise ctypes.WinError(ctypes.get_last_error())
+        except BaseException:
+            kernel32.CloseHandle(handle)
+            raise
+        self._kernel32 = kernel32
+        self._handle: int | None = handle
+
+    def request_termination(self) -> None:
+        if self.process.poll() is not None:
+            return
+        try:
+            self.process.send_signal(signal.CTRL_BREAK_EVENT)
+        except (OSError, ValueError):
+            pass
+
+    def force_termination(self) -> None:
+        self.close()
+
+    def close(self) -> None:
+        handle, self._handle = self._handle, None
+        if handle is not None and not self._kernel32.CloseHandle(handle):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _resume_windows_process(process: subprocess.Popen[Any]) -> None:
+    from ctypes import wintypes
+    ntdll = ctypes.WinDLL("ntdll")
+    ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+    ntdll.NtResumeProcess.restype = wintypes.LONG
+    status = ntdll.NtResumeProcess(wintypes.HANDLE(int(process._handle)))
+    if status != 0:
+        raise OSError(
+            f"NtResumeProcess failed with NTSTATUS 0x{status & 0xffffffff:08x}")
+
+
+def spawn_owned_process(argv: list[str], **popen_kwargs: Any
+                        ) -> tuple[subprocess.Popen[Any], _ProcessOwner]:
+    """Spawn a child that cannot escape ownership before creating descendants."""
     if os.name == "nt":
-        if not force:
-            try:
-                process.send_signal(signal.CTRL_BREAK_EVENT)
-                return
-            except (OSError, ValueError):
-                pass
-        process.kill()
-        return
-    try:
-        os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
-    except ProcessLookupError:
-        pass
+        flags = popen_kwargs.pop("creationflags", 0)
+        flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        flags |= getattr(subprocess, "CREATE_SUSPENDED", 0x00000004)
+        process = subprocess.Popen(argv, creationflags=flags, **popen_kwargs)
+        owner: _ProcessOwner | None = None
+        try:
+            owner = _WindowsJobOwner(process)
+            _resume_windows_process(process)
+            return process, owner
+        except BaseException:
+            if owner is not None:
+                owner.close()
+            elif process.poll() is None:
+                process.kill()
+            process.wait()
+            raise
+    popen_kwargs["start_new_session"] = True
+    process = subprocess.Popen(argv, **popen_kwargs)
+    return process, _ProcessOwner(process)
 
 
 def run_owned_process(argv: list[str], cwd: Path, timeout_seconds: float,
-                      *, cancel: threading.Event | None = None,
-                      env: dict[str, str] | None = None) -> dict[str, Any]:
-    """Run an argv without a shell and terminate its owned process group."""
+                      *, cancel: Any | None = None,
+                      env: dict[str, str] | None = None,
+                      input_text: str | None = None,
+                      max_output_bytes: int | None = None) -> dict[str, Any]:
+    """Run an argv with bounded capture and terminate its complete child tree."""
+    if max_output_bytes is not None and max_output_bytes < 1:
+        raise ValueError("max_output_bytes must be positive")
     started = time.monotonic()
-    process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               text=True, env=env, **_process_options())
-    timed_out = cancelled = False
+    process, owner = spawn_owned_process(
+        argv, cwd=cwd, stdin=subprocess.PIPE if input_text is not None
+        else subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env,
+    )
+    streams: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+    seen = {"stdout": 0, "stderr": 0}
+    total = 0
+    capture_lock = threading.Lock()
+    output_exhausted = threading.Event()
+
+    def drain(name: str, stream: Any) -> None:
+        nonlocal total
+        for chunk in iter(lambda: stream.read(8192), b""):
+            with capture_lock:
+                total += len(chunk)
+                seen[name] += len(chunk)
+                combined = len(streams["stdout"]) + len(streams["stderr"])
+                combined_limit = (MAX_STREAM_BYTES * 2 if max_output_bytes is None
+                                  else max_output_bytes)
+                room = min(max(0, MAX_STREAM_BYTES - len(streams[name])),
+                           max(0, combined_limit - combined))
+                streams[name].extend(chunk[:room])
+                if max_output_bytes is not None and total > max_output_bytes:
+                    output_exhausted.set()
+
+    readers = [threading.Thread(target=drain, args=(name, stream), daemon=True)
+               for name, stream in (("stdout", process.stdout),
+                                    ("stderr", process.stderr))]
+    for reader in readers:
+        reader.start()
+    if input_text is not None:
+        assert process.stdin is not None
+        try:
+            process.stdin.write(input_text.encode("utf-8"))
+        except BrokenPipeError:
+            pass
+        try:
+            process.stdin.close()
+        except BrokenPipeError:
+            pass
+    timed_out = cancelled = termination_requested = False
     try:
-        while True:
+        while process.poll() is None:
             remaining = timeout_seconds - (time.monotonic() - started)
-            if remaining <= 0 or (cancel is not None and cancel.is_set()):
-                timed_out = remaining <= 0
-                cancelled = not timed_out
-                _terminate_process_tree(process)
+            timed_out = remaining <= 0
+            cancelled = cancel is not None and cancel.is_set()
+            if timed_out or cancelled or output_exhausted.is_set():
+                termination_requested = True
+                owner.request_termination()
                 try:
-                    stdout, stderr = process.communicate(timeout=0.5)
+                    process.wait(timeout=0.5)
                 except subprocess.TimeoutExpired:
-                    _terminate_process_tree(process, force=True)
-                    stdout, stderr = process.communicate()
+                    pass
+                owner.force_termination()
+                if process.poll() is None:
+                    process.wait()
                 break
             try:
-                stdout, stderr = process.communicate(timeout=min(remaining, 0.1))
-                break
+                process.wait(timeout=min(remaining, 0.1))
             except subprocess.TimeoutExpired:
-                continue
+                pass
     except BaseException:
-        _terminate_process_tree(process)
+        owner.request_termination()
         try:
-            process.communicate(timeout=0.5)
+            process.wait(timeout=0.5)
         except subprocess.TimeoutExpired:
-            _terminate_process_tree(process, force=True)
-            process.communicate()
+            pass
+        owner.force_termination()
+        if process.poll() is None:
+            process.wait()
         raise
-    stdout, stdout_cut = _clip(stdout, MAX_STREAM_BYTES)
-    stderr, stderr_cut = _clip(stderr, MAX_STREAM_BYTES)
+    finally:
+        owner.close()
+        for reader in readers:
+            reader.join()
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+    stdout_raw, stderr_raw = bytes(streams["stdout"]), bytes(streams["stderr"])
+    stdout = stdout_raw.decode("utf-8", "replace")
+    stderr = stderr_raw.decode("utf-8", "replace")
+    stdout_cut = seen["stdout"] > len(stdout_raw)
+    stderr_cut = seen["stderr"] > len(stderr_raw)
     return {
         "argv": argv, "returncode": 124 if timed_out else process.returncode,
         "timed_out": timed_out, "cancelled": cancelled,
+        "output_budget_exhausted": output_exhausted.is_set(),
+        "terminated": termination_requested,
         "duration_seconds": round(time.monotonic() - started, 3),
         "stdout": stdout, "stdout_truncated": stdout_cut,
         "stderr": stderr, "stderr_truncated": stderr_cut,
@@ -278,6 +455,20 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
             os.unlink(temporary)
         except FileNotFoundError:
             pass
+
+
+class _CancellationMarker:
+    """A cross-thread/process cancellation signal stored with session state."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def set(self) -> None:
+        descriptor = os.open(self.path, os.O_CREAT | os.O_WRONLY, 0o600)
+        os.close(descriptor)
+
+    def is_set(self) -> bool:
+        return self.path.exists()
 
 
 class ExecutionEngine:
@@ -431,15 +622,30 @@ class ExecutionEngine:
             if state["steps_used"] >= task["budgets"]["max_steps"]:
                 return self._finish(path, state, {"classification": "step_budget_exhausted"},
                                     "step_budget_exhausted")
+            cancellation = _CancellationMarker(path / "cancel.requested")
+
+            def run_step_process(argv: list[str], cwd: Path,
+                                 timeout_seconds: float,
+                                 **kwargs: Any) -> dict[str, Any]:
+                kwargs["cancel"] = cancellation
+                return run_owned_process(argv, cwd, timeout_seconds, **kwargs)
+
             context = {
                 "token": token, "step": state["steps_used"],
                 "remaining_seconds": max(0.0, state["deadline"] - time.time()),
                 "remaining_steps": task["budgets"]["max_steps"] - state["steps_used"],
                 "continuation": state.pop("continuation", None),
-                "run_process": run_owned_process,
+                "run_process": run_step_process,
+                "cancel": cancellation,
                 "permissions": permissions,
             }
             outcome = self.runner(task, Path(state["cwd"]), context)
+            if cancellation.is_set():
+                error = self._cleanup(path, state)
+                if error:
+                    return receipt("failed", "cleanup_failed", token=token,
+                                   error=error)
+                return receipt("cancelled", "cancelled", token=token)
             if not isinstance(outcome, dict):
                 raise ExecutionError("runner must return an object")
             encoded = json.dumps(outcome, sort_keys=True, ensure_ascii=False)
@@ -496,7 +702,13 @@ class ExecutionEngine:
         path, state = self._read(token)
         descriptor = self._lock(path)
         if descriptor is None:
-            return receipt("yielded", "task_busy", token=token,
+            _CancellationMarker(path / "cancel.requested").set()
+            deadline = time.monotonic() + 5.0
+            while path.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if not path.exists():
+                return receipt("cancelled", "cancelled", token=token)
+            return receipt("yielded", "cancellation_requested", token=token,
                            retry_after_seconds=0.1)
         error = self._cleanup(path, state)
         os.close(descriptor)
