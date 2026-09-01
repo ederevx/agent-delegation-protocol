@@ -850,16 +850,15 @@ def test_worker_dismissal(home: Path) -> None:
     require("FINAL_ANSWER" in lifecycle_context and "before doing more work" in lifecycle_context,
             "parent policy does not prioritize dismissal immediately after result collection")
 
-    # Test 1: finished worker with NO dismissal tool observed -> stop does NOT block
+    # Test 1: without a dismissal primitive, finished workers create no warning
+    # or block because the lifecycle debt cannot be discharged in this build.
     call_hook(home, "prompt", {"session_id": session, "turn_id": "t1", "prompt": "Create a bulk task."})
     call_hook(home, "subagent-start", {"session_id": session, "turn_id": "t1", "agent_id": "w1@session", "agent_type": "bulk_worker"})
     call_hook(home, "subagent-stop", {"session_id": session, "turn_id": "t1", "agent_id": "w1@session"})
     # Worker w1 is now finished but not dismissed, and no dismissal tool has been observed yet
     result = call_hook(home, "stop", {"session_id": session, "turn_id": "t1", "stop_hook_active": False})
-    require(result is not None and isinstance(result.get("systemMessage"), str),
-            "stop did not emit a schema-valid warning without a dismissal-tool marker")
-    require("hookSpecificOutput" not in result, "stop warning used unsupported hookSpecificOutput")
-    require("w1" in result["systemMessage"], "stop warning did not identify the held worker")
+    require(result is None,
+            "stop warned about a finished worker when no dismissal tool exists")
 
     # Test 2: after dismissal-shaped tool call is observed, finished worker DOES cause stop to block
     call_hook(home, "pretool", {"session_id": session, "turn_id": "t1", "tool_name": "TaskStop", "tool_input": {"task_id": "dummy"}})
@@ -876,11 +875,16 @@ def test_worker_dismissal(home: Path) -> None:
     require(result is None, "stop still blocked after worker was dismissed")
 
     # Test 4: a runtime id (`a<name>-<hex>`) is cleared by a dismissal on the bare name
-    call_hook(home, "subagent-start", {"session_id": session, "turn_id": "t1", "agent_id": "aworker-one-353c3b7231845f11", "agent_type": "bulk_worker"})
-    call_hook(home, "subagent-stop", {"session_id": session, "turn_id": "t1", "agent_id": "aworker-one-353c3b7231845f11"})
-    require(call_hook(home, "stop", {"session_id": session, "turn_id": "t1", "stop_hook_active": False}) is not None, "runtime-id worker was not held")
-    call_hook(home, "pretool", {"session_id": session, "turn_id": "t1", "tool_name": "TaskStop", "tool_input": {"task_id": "worker-one"}})
-    require(call_hook(home, "stop", {"session_id": session, "turn_id": "t1", "stop_hook_active": False}) is None, "bare-name dismissal did not clear a runtime-id worker")
+    runtime_session = "dismissal-runtime-id"
+    call_hook(home, "prompt", {"session_id": runtime_session, "turn_id": "t1", "prompt": "Create a bulk task."})
+    call_hook(home, "subagent-start", {"session_id": runtime_session, "turn_id": "t1", "agent_id": "aworker-one-353c3b7231845f11", "agent_type": "bulk_worker"})
+    call_hook(home, "subagent-stop", {"session_id": runtime_session, "turn_id": "t1", "agent_id": "aworker-one-353c3b7231845f11"})
+    require((home / ".delegation-protocol" / "hook-state" /
+             f"{runtime_session}.finished" /
+             "aworker-one-353c3b7231845f11").exists(),
+            "runtime-id worker was not held")
+    call_hook(home, "pretool", {"session_id": runtime_session, "turn_id": "t1", "tool_name": "TaskStop", "tool_input": {"task_id": "worker-one"}})
+    require(call_hook(home, "stop", {"session_id": runtime_session, "turn_id": "t1", "stop_hook_active": False}) is None, "bare-name dismissal did not clear a runtime-id worker")
 
     # Test 5: new prompt clears stale outstanding workers
     call_hook(home, "prompt", {"session_id": session, "turn_id": "t2", "prompt": "New turn."})
