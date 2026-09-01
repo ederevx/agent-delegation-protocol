@@ -129,6 +129,10 @@ class _ProcessOwner:
     def close(self) -> None:
         """Release ownership after the root exits; POSIX groups need no handle."""
 
+    def release_descendants(self) -> None:
+        """Relinquish descendants after a caller confirms a retained handoff."""
+        self.close()
+
 
 class _WindowsJobOwner(_ProcessOwner):
     """Own a complete Windows child tree with a kill-on-close Job Object."""
@@ -174,6 +178,8 @@ class _WindowsJobOwner(_ProcessOwner):
         kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE,
                                                        wintypes.HANDLE]
         kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateJobObject.restype = wintypes.BOOL
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         kernel32.CloseHandle.restype = wintypes.BOOL
         handle = kernel32.CreateJobObjectW(None, None)
@@ -192,6 +198,7 @@ class _WindowsJobOwner(_ProcessOwner):
             kernel32.CloseHandle(handle)
             raise
         self._kernel32 = kernel32
+        self._limits_type = ExtendedLimits
         self._handle: int | None = handle
 
     def request_termination(self) -> None:
@@ -203,6 +210,22 @@ class _WindowsJobOwner(_ProcessOwner):
             pass
 
     def force_termination(self) -> None:
+        handle = self._handle
+        if handle is not None:
+            if not self._kernel32.TerminateJobObject(handle, 1):
+                raise ctypes.WinError(ctypes.get_last_error())
+            self.close()
+
+    def release_descendants(self) -> None:
+        """Disable kill-on-close and close without terminating retained children."""
+        handle = self._handle
+        if handle is None:
+            return
+        limits = self._limits_type()
+        limits.BasicLimitInformation.LimitFlags = 0
+        if not self._kernel32.SetInformationJobObject(
+                handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+            raise ctypes.WinError(ctypes.get_last_error())
         self.close()
 
     def close(self) -> None:

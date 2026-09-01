@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import ctypes
 import os
 import subprocess
 import sys
@@ -216,6 +217,54 @@ class ExecutionEngineTests(unittest.TestCase):
         self.assertTrue(flags & 0x00000004)
         self.assertTrue(flags & 0x00000200)
         self.assertEqual(events[-1], "close")
+
+    def test_windows_owner_distinguishes_retention_from_termination(self) -> None:
+        events = []
+
+        class BasicLimits(ctypes.Structure):
+            _fields_ = [("LimitFlags", ctypes.c_uint32)]
+
+        class ExtendedLimits(ctypes.Structure):
+            _fields_ = [("BasicLimitInformation", BasicLimits)]
+
+        class Kernel:
+            def SetInformationJobObject(self, handle, info_class, limits, size):
+                events.append(("clear", handle, info_class,
+                               limits._obj.BasicLimitInformation.LimitFlags, size))
+                return True
+
+            def TerminateJobObject(self, handle, exit_code):
+                events.append(("terminate", handle, exit_code))
+                return True
+
+            def CloseHandle(self, handle):
+                events.append(("close", handle))
+                return True
+
+        def owner():
+            result = object.__new__(execution_engine._WindowsJobOwner)
+            result.process = mock.Mock()
+            result._kernel32 = Kernel()
+            result._limits_type = ExtendedLimits
+            result._handle = 41
+            return result
+
+        retained = owner()
+        retained.release_descendants()
+        self.assertEqual([event[0] for event in events], ["clear", "close"])
+        self.assertEqual(events[0][3], 0)
+        self.assertIsNone(retained._handle)
+
+        events.clear()
+        cancelled = owner()
+        cancelled.force_termination()
+        self.assertEqual(events, [("terminate", 41, 1), ("close", 41)])
+        self.assertIsNone(cancelled._handle)
+
+        events.clear()
+        failed = owner()
+        failed.close()
+        self.assertEqual(events, [("close", 41)])
 
     def test_concurrent_cancel_interrupts_owned_process_and_cleans_state(self) -> None:
         entered = threading.Event()
