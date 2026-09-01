@@ -1,45 +1,65 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ederevx/agent-delegation-protocol/agents/contracts/protocol-v2.schema.json",
-  "title": "Agent delegation protocol v2",
+  "title": "Agent delegation protocol v2 catalog",
   "type": "object",
-  "required": ["schema_version", "backends", "routes"],
   "additionalProperties": false,
+  "required": ["schema_version", "backends", "routes"],
   "properties": {
     "schema_version": {"const": 2},
     "backends": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/backend"}},
-    "routes": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "array", "minItems": 1, "items": {"type": "string"}}}
+    "routes": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}}},
+    "includes": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
   },
   "$defs": {
+    "stringSet": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
     "backend": {
       "type": "object", "additionalProperties": false,
-      "required": ["id", "name", "kind", "selector", "execution", "lane", "priority"],
+      "required": ["id", "name", "kind", "priority", "selector", "availability", "execution", "lane"],
       "properties": {
         "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"},
         "name": {"type": "string", "minLength": 1},
         "kind": {"enum": ["native", "oneshot", "session"]},
         "priority": {"type": "integer", "minimum": 0, "maximum": 100},
-        "selector": {"$ref": "#/$defs/selector"}, "execution": {"$ref": "#/$defs/execution"}, "lane": {"$ref": "#/$defs/lane"}
+        "selector": {
+          "type": "object", "additionalProperties": false,
+          "required": ["runtimes", "platforms", "modes", "workspaces", "functions"],
+          "properties": {
+            "runtimes": {"$ref": "#/$defs/stringSet"},
+            "platforms": {"$ref": "#/$defs/stringSet"},
+            "modes": {"$ref": "#/$defs/stringSet"},
+            "workspaces": {"$ref": "#/$defs/stringSet"},
+            "functions": {"$ref": "#/$defs/stringSet"}
+          }
+        },
+        "availability": {
+          "type": "object", "additionalProperties": false,
+          "required": ["commands", "environment"],
+          "properties": {
+            "commands": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+            "environment": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+          }
+        },
+        "execution": {
+          "type": "object", "additionalProperties": false,
+          "required": ["delivery"],
+          "properties": {
+            "delivery": {"enum": ["native", "json"]},
+            "argv": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+            "timeout_seconds": {"type": "integer", "minimum": 1},
+            "max_steps": {"type": "integer", "minimum": 1, "maximum": 10000}
+          }
+        },
+        "lane": {
+          "type": "object", "additionalProperties": false,
+          "required": ["id", "max_concurrency", "lease_seconds"],
+          "properties": {
+            "id": {"type": "string", "minLength": 1},
+            "max_concurrency": {"type": "integer", "minimum": 1},
+            "lease_seconds": {"type": "integer", "minimum": 1}
+          }
+        }
       }
-    },
-    "selector": {
-      "type": "object", "additionalProperties": false,
-      "required": ["runtimes", "platforms", "modes", "workspaces", "functions"],
-      "properties": {
-        "runtimes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
-        "platforms": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
-        "modes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
-        "workspaces": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
-        "functions": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}}
-      }
-    },
-    "execution": {
-      "type": "object", "additionalProperties": false, "required": ["delivery"],
-      "properties": {"delivery": {"enum": ["native", "json"]}, "argv": {"type": "array", "items": {"type": "string"}}, "timeout_seconds": {"type": "integer", "minimum": 1}}
-    },
-    "lane": {
-      "type": "object", "additionalProperties": false, "required": ["owner", "max_concurrency"],
-      "properties": {"owner": {"const": "scheduler"}, "max_concurrency": {"type": "integer", "minimum": 1}, "lease_seconds": {"type": "integer", "minimum": 1}}
     }
   }
 }

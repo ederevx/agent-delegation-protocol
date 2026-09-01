@@ -1,8 +1,39 @@
 {
   "schema_version": 2,
   "backends": [
-    {"id":"native-codex-bulk","name":"Native Codex bulk","kind":"native","priority":0,"selector":{"runtimes":["codex"],"platforms":["linux","darwin","windows"],"modes":["read","edit"],"workspaces":["shared","isolated"],"functions":["audit","edit","batch"]},"execution":{"delivery":"native"},"lane":{"owner":"scheduler","max_concurrency":4}},
-    {"id":"native-claude-bulk","name":"Native Claude bulk","kind":"native","priority":0,"selector":{"runtimes":["claude"],"platforms":["linux","darwin","windows"],"modes":["read","edit"],"workspaces":["shared","isolated"],"functions":["audit","edit","batch"]},"execution":{"delivery":"native"},"lane":{"owner":"scheduler","max_concurrency":4}}
+    {
+      "id": "native-codex-bulk",
+      "name": "Native Codex bulk",
+      "kind": "native",
+      "priority": 0,
+      "selector": {
+        "runtimes": ["codex"],
+        "platforms": ["linux", "darwin", "windows"],
+        "modes": ["read", "edit"],
+        "workspaces": ["shared", "isolated"],
+        "functions": ["audit", "edit", "batch"]
+      },
+      "availability": {"commands": [], "environment": []},
+      "execution": {"delivery": "native"},
+      "lane": {"id": "native-codex", "max_concurrency": 4, "lease_seconds": 120}
+    },
+    {
+      "id": "native-claude-bulk",
+      "name": "Native Claude bulk",
+      "kind": "native",
+      "priority": 0,
+      "selector": {
+        "runtimes": ["claude"],
+        "platforms": ["linux", "darwin", "windows"],
+        "modes": ["read", "edit"],
+        "workspaces": ["shared", "isolated"],
+        "functions": ["audit", "edit", "batch"]
+      },
+      "availability": {"commands": [], "environment": []},
+      "execution": {"delivery": "native"},
+      "lane": {"id": "native-claude", "max_concurrency": 4, "lease_seconds": 120}
+    }
   ],
-  "routes": {"bulk":["native-codex-bulk","native-claude-bulk"]}
+  "routes": {"bulk": ["native-codex-bulk", "native-claude-bulk"]},
+  "includes": []
 }
