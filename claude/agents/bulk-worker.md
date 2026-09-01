@@ -38,12 +38,13 @@ fields. Keep prompts self-contained and never put credentials in a request.
 
 ## Scheduler invocation
 
-Use the installed v2 `delegationctl` with `--request-file`; do not send request
-JSON through shell interpolation or standard input:
+Use the installed v2 launcher with `--request-file`; do not send request JSON
+through shell interpolation or standard input. Resolve the active host home,
+then use `delegationctl` on POSIX or `delegationctl.cmd` on Windows:
 
 ```text
-python3 <active-Claude-config-directory>/.delegation-protocol/delegationctl.py run --request-file <absolute-request-file>
-python3 <active-Claude-config-directory>/.delegation-protocol/delegationctl.py batch --request-file <absolute-request-file>
+<active-Claude-config-directory>/.delegation-protocol/delegationctl <run-or-batch> --request-file <absolute-request-file>
+<active-Claude-config-directory>/.delegation-protocol/delegationctl.cmd <run-or-batch> --request-file <absolute-request-file>
 ```
 
 The scheduler authenticates the local loopback session, owns the provider
@@ -55,7 +56,7 @@ process exit status. A selected backend is never replaced after launch.
 
 Create one request JSON file under your scratchpad with `Write`, validate non-empty JSON, and retain its absolute path through any resume. Do not interpolate JSON through the shell or standard input. Remove only that worker-owned file after a terminal receipt or launch failure.
 
-Invoke `delegationctl.py run` or `delegationctl.py batch` through `Bash` with `--request-file`. Capture the structured receipt under your scratchpad and use the host's bounded foreground or background execution facility; never start a second operation for the same request.
+Invoke the installed `delegationctl` launcher through `Bash` with `--request-file`. Capture the structured receipt under your scratchpad and use the host's bounded foreground or background execution facility; never start a second operation for the same request.
 
 ## Parent permissions
 
@@ -67,13 +68,14 @@ Write the exact v2 resume request with `schema_version`, `backend`, `token`,
 and `resolution`, then invoke:
 
 ```text
-python3 <active-Claude-config-directory>/.delegation-protocol/delegationctl.py resume --request-file <absolute-resume-file>
+<active-Claude-config-directory>/.delegation-protocol/delegationctl resume --request-file <absolute-resume-file>
+<active-Claude-config-directory>/.delegation-protocol/delegationctl.cmd resume --request-file <absolute-resume-file>
 ```
 
 `resolution` is `allow`, `deny`, or bounded parent-supplied `handled` data.
 Resume the same authenticated session and preserve the original request ID.
 
-Ask the parent through `SendMessage`, including the exact request and reason. After the decision, write a v2 resume request with `schema_version`, `backend`, `token`, and `resolution`, then invoke `delegationctl.py resume --request-file`.
+Ask the parent through `SendMessage`, including the exact request and reason. After the decision, write a v2 resume request with `schema_version`, `backend`, `token`, and `resolution`, then invoke the installed launcher's `resume --request-file` command.
 
 ## Receipts and native handoff
 

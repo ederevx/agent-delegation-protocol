@@ -45,6 +45,7 @@ The active home also receives the worker and protocol-owned links:
 $CODEX_HOME/agents/bulk_worker.toml
 $CODEX_HOME/agents/balanced-worker.toml
 $CODEX_HOME/hooks/delegation-enforcer.py
+$CODEX_HOME/.delegation-protocol/delegationctl[.cmd]
 $CODEX_HOME/.delegation-protocol/delegationctl.py
 $CODEX_HOME/.delegation-protocol/lane_service.py
 $CODEX_HOME/.delegation-protocol/protocol-v2.json
@@ -56,6 +57,12 @@ $CODEX_HOME/.delegation-protocol/lifecycle.py
 The worker is a managed regular-file copy because the Codex runtime requires
 no-follow loading for selected role files. The installer records its source
 revision and refreshes only an unmodified protocol-owned copy.
+
+On Windows, the controller launcher avoids a worker dependency on `python` or
+`python3` being discoverable through `PATH`. It records the trusted interpreter
+that ran the installer; workers invoke the absolute launcher under the active
+Codex home. Reinstall refreshes an unmodified launcher, and uninstall removes
+it through the ownership manifest.
 
 ## Lifecycle and trust
 

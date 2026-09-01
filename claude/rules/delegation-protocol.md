@@ -16,8 +16,10 @@ authority.
 Workers create file-backed v2 requests. Each task contains exactly
 `schema_version: 2`, `id`, `mode`, `repo`, `prompt`, `allowed_paths`,
 `workspace`, `validation`, and `budgets`; budgets contain positive timeout,
-output, and step limits. Use `delegationctl run`, `delegationctl batch`, and
-`delegationctl resume`, always with `--request-file`.
+output, and step limits. Resolve the active Claude config directory and invoke
+its absolute `.delegation-protocol/delegationctl` launcher on POSIX or
+`.delegation-protocol/delegationctl.cmd` on Windows. Use `run`, `batch`, or
+`resume`, always with `--request-file`.
 
 The scheduler authenticates the local loopback session, owns the provider lane,
 selects an available backend by declared capability and runtime, and returns

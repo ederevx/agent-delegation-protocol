@@ -119,7 +119,7 @@ def main() -> int:
                 stale.append(path)
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(expected, encoding="utf-8")
+            path.write_text(expected, encoding="utf-8", newline="\n")
             print(path.relative_to(REPO_ROOT))
     if stale:
         for path in stale:

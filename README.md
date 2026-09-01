@@ -128,14 +128,21 @@ mutation. It uses a lock, atomic settings writes, rollback, and a complete
 ownership manifest. Uninstall removes only unchanged protocol-owned resources
 and preserves unrelated configuration.
 
+Each host receives an absolute controller launcher under its active home at
+`.delegation-protocol/delegationctl` on POSIX or
+`.delegation-protocol/delegationctl.cmd` on Windows. The Windows launcher is
+bound to the trusted interpreter used for installation, so worker execution
+does not depend on `python` or `python3` being present on `PATH`.
+
 Install a deployment and its launch shim, then enroll its credential without
-placing the secret on an argument vector:
+placing the secret on an argument vector. Replace `delegationctl[.cmd]` below
+with the absolute platform launcher under the active host home:
 
 ```bash
-delegationctl deployment install --config deployment.json \
+delegationctl[.cmd] deployment install --config deployment.json \
   --launcher ci-claude.sh ci-claude
-delegationctl credential set --deployment ci-claude
-delegationctl launch --deployment ci-claude -- --help
+delegationctl[.cmd] credential set --deployment ci-claude
+delegationctl[.cmd] launch --deployment ci-claude -- --help
 ```
 
 `deployment uninstall` refuses active or retained clients and removes its

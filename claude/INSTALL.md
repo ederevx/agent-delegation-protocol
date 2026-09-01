@@ -35,6 +35,7 @@ links:
 $CLAUDE_CONFIG_DIR/rules/delegation-protocol.md
 $CLAUDE_CONFIG_DIR/agents/bulk-worker.md
 $CLAUDE_CONFIG_DIR/hooks/delegation-enforcer.py
+$CLAUDE_CONFIG_DIR/.delegation-protocol/delegationctl[.cmd]
 $CLAUDE_CONFIG_DIR/.delegation-protocol/delegationctl.py
 $CLAUDE_CONFIG_DIR/.delegation-protocol/lane_service.py
 $CLAUDE_CONFIG_DIR/.delegation-protocol/protocol-v2.json
@@ -43,10 +44,13 @@ $CLAUDE_CONFIG_DIR/.delegation-protocol/hook_adapter.py
 $CLAUDE_CONFIG_DIR/.delegation-protocol/lifecycle.py
 ```
 
-The worker sends file-backed v2 requests to `delegationctl run`, `batch`, or
-`resume`. The scheduler authenticates the local loopback session, owns the
-provider lane, and returns stable structured receipts. An accepted request is
-never silently retried under another backend.
+The worker sends file-backed v2 requests through the absolute platform
+launcher under the active Claude config directory. On Windows, the launcher
+records the trusted interpreter used for installation, so execution does not
+depend on `python` or `python3` being present on `PATH`. The scheduler
+authenticates the local loopback session, owns the provider lane, and returns
+stable structured receipts. An accepted request is never silently retried
+under another backend.
 
 ## Settings and lifecycle
 

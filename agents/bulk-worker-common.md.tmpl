@@ -26,12 +26,13 @@ fields. Keep prompts self-contained and never put credentials in a request.
 
 ## Scheduler invocation
 
-Use the installed v2 `delegationctl` with `--request-file`; do not send request
-JSON through shell interpolation or standard input:
+Use the installed v2 launcher with `--request-file`; do not send request JSON
+through shell interpolation or standard input. Resolve the active host home,
+then use `delegationctl` on POSIX or `delegationctl.cmd` on Windows:
 
 ```text
-python3 {{CONFIG_HOME}}/.delegation-protocol/delegationctl.py run --request-file <absolute-request-file>
-python3 {{CONFIG_HOME}}/.delegation-protocol/delegationctl.py batch --request-file <absolute-request-file>
+{{CONFIG_HOME}}/.delegation-protocol/delegationctl <run-or-batch> --request-file <absolute-request-file>
+{{CONFIG_HOME}}/.delegation-protocol/delegationctl.cmd <run-or-batch> --request-file <absolute-request-file>
 ```
 
 The scheduler authenticates the local loopback session, owns the provider
@@ -55,7 +56,8 @@ Write the exact v2 resume request with `schema_version`, `backend`, `token`,
 and `resolution`, then invoke:
 
 ```text
-python3 {{CONFIG_HOME}}/.delegation-protocol/delegationctl.py resume --request-file <absolute-resume-file>
+{{CONFIG_HOME}}/.delegation-protocol/delegationctl resume --request-file <absolute-resume-file>
+{{CONFIG_HOME}}/.delegation-protocol/delegationctl.cmd resume --request-file <absolute-resume-file>
 ```
 
 `resolution` is `allow`, `deny`, or bounded parent-supplied `handled` data.
