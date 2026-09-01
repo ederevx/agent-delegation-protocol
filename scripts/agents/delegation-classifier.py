@@ -28,18 +28,11 @@ from typing import Any
 # Hook state uses the protocol-v2 schema and is discarded on any mismatch.
 PROTOCOL_VERSION = 2
 
-# How long an untouched session's state may sit before a sweep removes it.
-# Turn state is written per session and was never reaped by anything -- not the
-# hooks, not the installers, not the uninstallers -- so a machine accumulated a
-# JSON file plus up to six marker directories for every session it ever ran.
+# How long an untouched v2 session JSON document may sit before a sweep removes
+# it. Host adapters own no sidecar marker directories.
 STATE_TTL_SECONDS = 7 * 24 * 3600
 
-STATE_ENTRY_SUFFIXES = (
-    ".json", ".active", ".finished", ".dismissed", ".known", ".nagged",
-    ".attempts", ".multi-attempts", ".delegated", ".fanout",
-    ".unavailable", ".multi-unavailable", ".dismissal-tool",
-    ".dismissal-nagged",
-)
+STATE_ENTRY_SUFFIXES = (".json",)
 
 BULK_WORDS = (
     "bulk", "batch", "high-volume", "high volume", "many files", "many modules",
@@ -185,13 +178,6 @@ SPAWN_UNAVAILABLE = re.compile(
     r"unsupported model|not permitted|permission denied|unknown agent)",
     re.IGNORECASE,
 )
-
-DISMISSAL_TOOL = re.compile(
-    r"(?:stop|kill|end|dismiss|terminate|cancel).*(?:task|agent|worker)"
-    r"|(?:task|agent|worker).*(?:stop|kill|end|dismiss|terminate|cancel)",
-    re.IGNORECASE,
-)
-
 
 def contains_any(text: str, words: tuple[str, ...]) -> bool:
     return any(word in text for word in words)
