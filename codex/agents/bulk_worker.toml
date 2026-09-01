@@ -85,8 +85,9 @@ If `exec_command` returns a session, preserve it and poll the same process with 
 
 ## Conflict boundary
 
-Workers share the parent's working tree but cannot see its uncommitted state.
-Ask before repository-wide version-control actions, another worker's files,
+Native shared-workspace workers can see current working-tree changes; isolated
+protocol workers cannot see uncommitted parent changes. Either kind must ask
+before repository-wide version-control actions, another worker's files,
 dependency changes, branch or index changes, or anything leaving the machine.
 Use the collaboration channel available to the worker for that escalation.
 
