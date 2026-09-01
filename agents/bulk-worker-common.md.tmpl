@@ -24,7 +24,7 @@ Follow the hook-selected queue strategy. For any delegation queue, use `queue` a
 
 {{TASK_TRANSPORT_CONTRACT}}
 
-Pass the resulting absolute task path to the installed `.delegation-protocol/mux-scheduler.py <run|queue> --task-file <absolute-task-path> --route bulk --runtime {{RUNTIME}}` using Python 3. Pass the matching `--mode read|edit`, `--workspace shared|isolated`, and `--require audit|edit` capability filters. The installed file is under {{CONFIG_HOME}}. The mux-scheduler selects an enabled backend by required capabilities and route priority; do not choose a provider yourself. Start it exactly once.
+Pass the resulting absolute task path to the installed `.delegation-protocol/mux-scheduler.py <run|queue> --task-file <absolute-task-path> --route bulk --runtime {{RUNTIME}}` using Python 3. Add the `--mode` filter set to the task's mode (`read` or `edit`) and the `--workspace` filter (`shared` or `isolated`). The `--require` filter is separate: it names a backend function capability, not a mode, and its only valid values here are `audit` and `edit`. For a `read`-mode task pass `--require audit` or omit `--require` entirely; for an `edit`-mode task pass `--require edit`. Never pass `--require read`: `read` is a mode, so no backend declares it as a function and the scheduler returns `no_backend`. The installed file is under {{CONFIG_HOME}}. The mux-scheduler selects an enabled backend by required capabilities and route priority; do not choose a provider yourself. Start it exactly once.
 
 {{LAUNCH_CONTRACT}}
 
