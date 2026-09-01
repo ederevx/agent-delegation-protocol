@@ -79,6 +79,8 @@ def resources(repo: Path, home: Path, host: str) -> list[tuple[Path, Path, str]]
         # The old mux-scheduler/catalog links are intentionally not migrated.
         (repo / "scripts/agents/delegationctl.py", state / "delegationctl.py", "link"),
         (repo / "agents/protocol-v2.json", state / "protocol-v2.json", "link"),
+        (repo / "scripts/hosts/hook_adapter.py", state / "hook_adapter.py", "link"),
+        (repo / "scripts/hosts/lifecycle.py", state / "lifecycle.py", "link"),
     ]
     if host == "claude":
         return [
