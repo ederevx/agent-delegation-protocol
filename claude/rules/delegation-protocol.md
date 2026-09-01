@@ -1,88 +1,44 @@
-# Delegation Protocol — Supporting Semantic Rule
+# Delegation Protocol v2
 
-## Status
+Claude Code keeps the strongest parent context for planning, ambiguity,
+architecture, difficult debugging, integration, conflict resolution, and final
+validation. Delegate bounded work to the lifecycle-visible bulk worker when
+the task is high-volume, has three or more distinct steps, or reaches 25% of
+the active context window.
 
-Claude Code delegation is **mechanically enforced by the installed hooks and settings** in this repository. This rule is a supplementary semantic layer for judgment calls the deterministic hook classifier cannot safely infer from one prompt.
+For independent workstreams, use concurrent workers when capacity permits.
+Give each worker exclusive ownership, acceptance criteria, validation commands,
+and a concise evidence report. The parent remains the single integration
+authority.
 
-Existing `CLAUDE.md`, `CLAUDE.local.md`, project rules, managed policy, permissions, and higher-priority instructions remain applicable.
+## v2 request contract
 
-## Required intent
+Workers create file-backed v2 requests. Each task contains exactly
+`schema_version: 2`, `id`, `mode`, `repo`, `prompt`, `allowed_paths`,
+`workspace`, `validation`, and `budgets`; budgets contain positive timeout,
+output, and step limits. Use `delegationctl run`, `delegationctl batch`, and
+`delegationctl resume`, always with `--request-file`.
 
-Preserve the strongest parent model for planning, ambiguity, architecture, difficult debugging, integration, conflict resolution, and final validation. Delegate bounded repetitive or high-volume work to the cheapest suitable supported subagent.
+The scheduler authenticates the local loopback session, owns the provider lane,
+selects an available backend by declared capability and runtime, and returns
+stable receipts. A selected request is never silently retried elsewhere.
+Relay `permission_required` receipts to the parent with their exact request ID,
+backend, token, and operation; resume only after a parent decision.
 
-## Mandatory delegation thresholds
+## Conflict boundary
 
-Estimate the size and shape of a task before starting it, and delegate whenever
-either threshold is met — the hook classifier is a floor, not the whole test:
+Workers cannot see uncommitted parent changes. They ask through `SendMessage`
+before touching repository-wide version-control state, another worker's files,
+dependencies, branches, indexes, or external systems. The parent answers each
+request separately.
 
-- **Size.** Any task estimated at **25% or more of one auto-compact window** in
-  reading, output, and tool traffic (about 50k tokens at a 200k window; the
-  hook scales the number with the configured window). Estimate honestly: file
-  count times file size, plus the output and command traffic the work implies.
-- **Steps.** Any task that runs to **three or more distinct steps**, whether the
-  user enumerated them or the plan did. Sequential steps still delegate — as one
-  worker per step where they are independent, or one dispatcher batch where they
-  must stay in order.
+## Lifecycle
 
-Re-estimate mid-task. Work that turns out larger or longer than it looked
-crosses the threshold at the moment you notice, not at the next turn: stop,
-partition what remains, and delegate it.
+Claude automatically releases a foreground Agent when its result returns.
+Collect and integrate the report normally; do not issue a stop operation for a
+completed foreground worker. Use a stop operation only for a running
+background task that requires cancellation.
 
-The parent keeps planning, estimation, ambiguity, architecture, difficult
-debugging, integration, conflict resolution, and final validation regardless of
-size. What is delegated is execution. Genuinely small, single-step, or tightly
-coupled work stays in the parent; do not split something whose parts cannot be
-verified separately just to clear a threshold.
-
-Prefer `bulk-worker` for low-risk mechanical work. It is a lifecycle-visible dispatcher that submits a bounded task to the installed agent mux-scheduler, then returns the external receipt or executes natively only when the selected native backend requests it. Escalate a delegated unit when the selected backend's declared capabilities are insufficient.
-
-The mux-scheduler is agent-agnostic. Each backend has one metadata document declaring a common capability interface, availability checks, limits, numeric priority, and either a native runtime binding or a custom command/API adapter. Its top-level `native` boolean distinguishes those bindings. Routes are backend membership lists with no scheduling order. Selection filters by required capabilities, runtime, and availability before taking the highest-priority tier; equal priorities are equivalent and may be resolved by caller judgment without changing route order.
-
-Never silently retry an external task on the native model after it launches. Native execution is valid only when the mux-scheduler selects the matching native backend before launch and returns its documented native-required receipt.
-
-## Parallel fan-out
-
-When an eligible task contains two or more independent subsystems, services, modules, packages, directories, test groups, data partitions, or other safely separable workstreams, use multiple subagents concurrently when runtime capacity permits it. A selected delegation queue is the exception: use one lifecycle-visible bulk dispatcher and one mux-scheduler `queue` batch. A FIFO backend preserves order; a round-robin backend treats batch items as virtual agents inside that singular scheduler process, interleaves them on the physical provider lane, and owns their concurrent command jobs up to its configured limits.
-
-For cooperative backends, the mux-scheduler owns authorized command execution. A command-waiting virtual agent releases the provider lane while bounded command jobs run concurrently; only deterministic or exact preapproved requests are automatic, and all others remain parent permission requests.
-
-Do not serialize naturally parallel work through one worker merely for convenience. Give workers non-overlapping primary ownership, explicit boundaries, acceptance criteria, and validation commands. Use worktree/equivalent isolation when parallel write-heavy work would otherwise conflict.
-
-The parent remains the single integration authority and must reconcile interfaces, review consequential output, and run repository-wide validation after combining results.
-
-## Worker lifecycle
-
-Claude Code releases a foreground `Agent` when its result returns. Collect and integrate that result normally; do not call `TaskStop` with the completed Agent ID, because `TaskStop` addresses live background-task IDs. Use `TaskStop` only when a running background task actually needs cancellation. A completed foreground worker must not block a later Agent wave or the end of the turn.
-
-## Local changes belong in this repository
-
-The installed hooks, agent definitions, and rules are symlinks back into this repository, so editing an installed file edits the repository. Any procedural change to delegation behavior — hook logic, gating conditions, worker definitions, installer or settings-merge behavior — must be made in this repository and committed here, not patched in place in an agent's configuration directory.
-
-Ad-hoc local edits are lost on reinstall, diverge silently between machines, and leave the other agent's half inconsistent. If a change is worth making locally, it is worth committing and pushing here.
-
-## Worker conflict escalation
-
-Workers share the parent's working tree and cannot see its uncommitted state, so they are required to ask before acting outside their assigned ownership — repository-wide version-control state, another worker's files, the parent's uncommitted work, dependency changes, or anything that leaves the machine. Workers ask over `SendMessage`; the parent is addressable by the name `ListAgents` reports.
-
-The parent must answer those requests rather than let a worker stall or guess, and is the only party that may escalate the question to the user. Granting permission for one action does not grant it for the next.
-
-Reduce the need for these requests up front: commit or set aside uncommitted work before delegating into a dirty tree, give each worker explicit ownership boundaries, and keep repository-wide state out of worker briefs.
-
-## Hook interaction
-
-The installed Claude hook may:
-
-- classify a clear bulk/sharded prompt, a prompt whose stated token budget
-  reaches the size threshold, or a multi-step prompt as delegation-required;
-- inject the delegation/fan-out policy into the current context;
-- deny parent mutation until required delegation evidence exists;
-- select delegation queue only through the installed mux-scheduler for a validated available single-stream backend, require one lifecycle dispatcher for any selected queue, and require actual overlapping workers for ordinary native multi-subsystem fan-out;
-- block turn completion until the required delegation evidence exists;
-- track active worker overlap without treating completed foreground Agents as dismissal debt;
-- fail open only when the Agent runtime/model/concurrency path is observed to be unavailable.
-
-If the hook does not classify a task mechanically but this rule clearly applies, follow this rule proactively anyway.
-
-## Guardrails
-
-Do not maximize agent count blindly. Keep tightly coupled work together when splitting would increase coordination or merge risk. Do not use delegation to bypass safety, permissions, managed policy, or more-specific project instructions.
+Hooks enforce the deterministic delegation thresholds and request boundary.
+This rule supplies judgment for ambiguity and safety without duplicating
+provider or transport policy.

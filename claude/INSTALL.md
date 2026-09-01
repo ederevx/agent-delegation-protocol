@@ -1,181 +1,85 @@
-# Claude Code installation
+# Claude Code v2 installation
 
-Claude is installed independently from Codex. The Claude installer touches only the configured Claude home (normally `~/.claude`) and this cloned repository.
+Claude Code is installed independently from Codex. The wrapper
+`scripts/claude/install.sh` (or `install.ps1`) invokes the host installer and
+writes only protocol-owned state under the Claude home (normally `~/.claude`).
 
-## Migration from an older structure
+## Clean-break prerequisite
 
-If you are Claude Code upgrading a text-only, partially migrated, or legacy combined installation, you MUST follow [`MIGRATE.md`](MIGRATE.md) before improvising cleanup. The migration runbook is written directly for the agent and requires preflight inventory, preservation of existing configuration, independent Claude-only installation, verification, failure handling, and rollback.
+v2 is not an in-place upgrade. Preserve prior branch tips with annotated
+backup tags and keep their ancestry reachable before installing. Install from
+the rewritten v2 checkout only after its audit and verification pass. Do not
+combine v1 and v2 runtime assets or state in one home.
 
 ## Install
-
-macOS/Linux:
 
 ```bash
 bash scripts/claude/install.sh
 ```
 
-Windows PowerShell:
-
 ```powershell
 .\scripts\claude\install.ps1
 ```
 
-Python 3 is required for the local enforcement hook and agent mux-scheduler.
+Python 3 is required for the local hook and protocol client. The installer
+validates the Claude home, destination types, protocol metadata, and settings
+before mutation. Existing settings, rules, and unrelated handlers are
+preserved; conflicts stop installation without partial activation.
 
-## Installed symlinks
+## Installed surface
 
-The installer refuses to overwrite an unrelated file or symlink at any destination.
+The active home receives independent Claude policy, worker, hook, and client
+links:
 
 ```text
-~/.claude/rules/delegation-protocol.md
-  -> <clone>/claude/rules/delegation-protocol.md
-
-~/.claude/agents/bulk-worker.md
-  -> <clone>/claude/agents/bulk-worker.md
-
-~/.claude/hooks/delegation-enforcer.py
-  -> <clone>/claude/hooks/delegation-enforcer.py
-
-~/.claude/.delegation-protocol/mux-scheduler.py
-  -> <clone>/scripts/agents/mux-scheduler.py
-
-~/.claude/.delegation-protocol/delegation-classifier.py
-  -> <clone>/scripts/agents/delegation-classifier.py
-
-~/.claude/.delegation-protocol/delegation_queue.py
-  -> <clone>/scripts/agents/delegation_queue.py
-
-~/.claude/.delegation-protocol/catalog
-  -> <clone>/agents/catalog
-
-~/.claude/.delegation-protocol/mux-scheduler.json
-  -> <clone>/agents/mux-scheduler.json
+$CLAUDE_CONFIG_DIR/rules/delegation-protocol.md
+$CLAUDE_CONFIG_DIR/agents/bulk-worker.md
+$CLAUDE_CONFIG_DIR/hooks/delegation-enforcer.py
+$CLAUDE_CONFIG_DIR/.delegation-protocol/delegationctl.py
+$CLAUDE_CONFIG_DIR/.delegation-protocol/catalog
 ```
 
-With `CI_CLAUDE_FOREGROUND_ONLY=1`, the `bulk-worker.md` link instead targets
-`<clone>/claude/agents/ci-foreground-bulk-worker.md`.
+The worker sends file-backed v2 requests to `delegationctl run`, `batch`, or
+`resume`. The scheduler authenticates the local loopback session, owns the
+provider lane, and returns stable structured receipts. An accepted request is
+never silently retried under another backend.
 
-The Markdown rule is a semantic/supporting policy layer. Mechanical enforcement is performed by hooks and settings.
+## Settings and lifecycle
 
-## Agent mux-scheduler
+Protocol-owned settings are merged into `settings.json` without replacing
+unrelated values. Existing environment overrides are retained; explicit
+disablement or organization-managed policy is reported rather than silently
+overridden.
 
-The bulk worker is a lifecycle-visible dispatcher. It submits one bounded common JSON task or ordered batch with:
-
-```bash
-python3 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.delegation-protocol/mux-scheduler.py" \
-  run --route bulk --runtime claude
-```
-
-The shared catalog gives every backend the same capability interface, numeric priority, and a top-level `native` boolean, followed by either a native Claude binding or a custom command/API adapter. Routes are backend membership lists with no scheduling order, so priority changes stay out of the Claude worker.
-
-A one-lane API is protected by the mux-scheduler lock. A backend advertising a round-robin `queue_policy` accepts one queue batch and interleaves its in-process virtual agents up to `virtual_slots` instead of serializing whole tasks. The lifecycle dispatcher executes natively only for a valid `native_required` receipt with exit status 69 selecting `native-claude-bulk`. An external launch is never silently retried with Haiku or another provider.
-
-The worker emits the adapter's exact task schema: `mode`, absolute `repo`, and non-empty `prompt` are required; `allowed_paths` are repository-relative; `validation` contains argv arrays only for edit tasks; and `preapproved_commands` contains bounded single-line command strings. It does not substitute similar-looking field names or representations.
-
-Submission is not always one round trip. A task may name up to 32 exact `preapproved_commands`; anything else the backend needs pauses it, and the mux-scheduler returns a `permission_required` receipt carrying the exact request and a resume `token` while the backend session and edit worktree stay retained. The dispatcher relays that request to the parent and resumes with the parent's decision:
-
-```bash
-python3 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.delegation-protocol/mux-scheduler.py" \
-  resume --route bulk --runtime claude --resolution-file resolution.json
-```
-
-`allow` grants the one exact command once, `deny` resumes without it, and `handled` passes back a bounded JSON `result` the parent produced itself. Waiting does not consume the task timeout.
-
-An external backend advertising isolated-patch delivery may run in a disposable detached worktree and return its edits only as `evidence.patch`. The dispatcher returns that patch for the parent to apply and review. Native execution instead follows the assigned shared-worktree ownership contract.
-
-## Hooks installed into settings.json
-
-The installer merges protocol-owned entries into `~/.claude/settings.json`; it does not replace unrelated settings or hooks.
-
-The hook participates in these lifecycle events:
-
-- `UserPromptSubmit` — conservatively classifies the turn and injects the mandatory delegation/fan-out policy into Claude's context. A relayed worker or peer message arrives on this event too, but continues the turn already in flight instead of reopening it: its text is a worker's words rather than the user's, so classifying it would judge a report as if the user had typed it, and clearing evidence would revoke fan-out the parent has already performed and demand more of it for the integration work that reading the report begins.
-- `SubagentStart` — records delegation, tracks active workers, and injects bounded-worker requirements into each spawned subagent.
-- `SubagentStop` — removes the worker from the active overlap set.
-- `PostToolUseFailure` for `Agent` — detects runtime/model/concurrency failures so enforcement can fail open only when delegation is actually unavailable.
-- `PreToolUse` for core mutation tools — denies parent mutation on an eligible
-  bulk task until required delegation has occurred. Agent launches supply
-  evidence through their dedicated lifecycle events and are not routed through
-  this mutation gate.
-- `Stop` — blocks the parent from ending an eligible turn until required delegation evidence exists.
-
-For multi-subsystem work, enforcement ordinarily requires overlapping lifecycle-visible subagents. A selected delegation queue is the exception: one lifecycle dispatcher submits one batch, and a round-robin one-lane backend interleaves its virtual agents up to the advertised slot limit. Atomic per-agent marker files avoid races between simultaneous lifecycle hook processes.
-
-## Settings configured
-
-When the following environment entries are absent from `settings.json`, the installer adds them:
-
-```json
-{
-  "env": {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
-    "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "3",
-    "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": "20"
-  }
-}
-```
-
-Existing values are preserved rather than overwritten; the installer warns when an existing value conflicts with the protocol default.
-
-The installer deliberately does **not** set `CLAUDE_CODE_SUBAGENT_MODEL`. That variable outranks per-invocation and agent-definition model selection, so globally pinning it to Haiku would prevent escalation. Instead, `bulk-worker.md` specifies `model: haiku` for the native binding, while the mux-scheduler may select an external backend and the parent remains free to choose a stronger model when necessary.
-
-Agent teams are optional. The mandatory baseline uses ordinary subagents because they are broadly available and directly observable through `SubagentStart`/`SubagentStop`. Teams may be used for complex independent subsystems that benefit from peer-to-peer coordination.
-
-## Existing Claude configuration
-
-The protocol is supplementary:
-
-- existing `~/.claude/CLAUDE.md`, project `CLAUDE.md`, `CLAUDE.local.md`, and unrelated rules are untouched;
-- existing hook groups are preserved and the protocol handlers are appended;
-- existing settings and environment overrides are preserved;
-- the installer saves a safety copy of the pre-install settings on the first install under `~/.claude/.delegation-protocol/`;
-- uninstall removes only hook handlers and settings values that this protocol added and that have not subsequently been changed by the user.
-
-If `disableAllHooks: true` is already configured, the installer does not silently override it and emits a warning. Managed organization policy can also prevent user-level hooks from running.
-
-## Enforcement scope
-
-The hook uses a conservative deterministic classifier. It mechanically gates clear bulk/high-volume or independently sharded implementation requests, while the Markdown rule supplies broader semantic guidance.
-
-The `PreToolUse` gate covers Claude Code's core file mutation tools and common mutating shell/PowerShell operations. The `Stop` gate is the backstop: an eligible turn cannot normally finish without the required delegation evidence even if a mutation path was not recognized by the pre-tool heuristic.
-
-Claude Code releases a foreground `Agent` when its result returns. Its returned Agent ID can be resumed with `SendMessage`, but it is not a live background-task ID accepted by `TaskStop`. The hook therefore removes the worker from overlap tracking at `SubagentStop` and creates no dismissal debt; completed workers cannot block later Agent waves or turn completion. `TaskStop` remains available to Claude Code for cancelling an actually running background task and is not intercepted by this protocol.
-
-A direct higher-priority user/system restriction against delegation, unavailable Agent tooling, managed policy, or runtime/model failure can supersede or prevent the protocol. The hook is an execution guardrail, not a security sandbox.
+Claude's lifecycle profile observes worker start and completion events and
+gates eligible parent mutation and turn completion on delegation evidence.
+Foreground Agent results automatically release the worker lifecycle. A
+completed foreground worker does not require a further stop action; a stop
+action is reserved for a running background task that needs cancellation.
 
 ## Verify
 
-First run the isolated self-test:
-
 ```bash
+python3 scripts/agents/render-bulk-workers.py --check
 python3 scripts/agents/test-delegation-core.py
 python3 scripts/claude/test-protocol.py
 ```
 
-These use temporary configuration directories and verify the shared classifier,
-non-destructive settings merge/unmerge, and single-worker and concurrent-fan-out
-gating.
-
-Then start a fresh Claude Code session and confirm:
-
-1. `~/.claude/settings.json` contains the protocol hook handlers alongside existing hooks.
-2. `bulk-worker` is visible as a custom subagent.
-3. A clearly bulk request triggers a required subagent before parent mutation.
-4. A request spanning independent frontend/backend/test work triggers concurrent lifecycle-visible fan-out, or one lifecycle dispatcher with a multi-item queue batch when a delegation queue is selected.
-5. `/context` still shows all pre-existing applicable instructions plus the supplementary rule.
+In a fresh session confirm that the worker is visible, settings contain the
+protocol handlers beside existing handlers, and a clearly eligible task cannot
+mutate parent-owned files before delegation evidence exists. Confirm that a
+foreground worker result permits another worker wave without lifecycle debt.
 
 ## Uninstall
-
-macOS/Linux:
 
 ```bash
 bash scripts/claude/uninstall.sh
 ```
 
-Windows PowerShell:
-
 ```powershell
 .\scripts\claude\uninstall.ps1
 ```
 
-Uninstall removes only protocol-owned links and known state files, including the whole `.delegation-protocol/sessions/` directory of accumulated per-turn state; unrelated files inside `.delegation-protocol` are preserved. It does not uninstall or modify Codex.
+Uninstall removes only protocol-owned handlers, links, state, and settings
+values that remain unchanged since installation. It preserves unrelated
+configuration and never modifies Codex.

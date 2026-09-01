@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Lifecycle-visible dispatcher for bounded, repetitive, low-risk bulk work. Routes through the installed agent mux-scheduler and runs natively only after a validated native handoff.",
+  "description": "Lifecycle-visible dispatcher for bounded, low-risk work through the protocol-v2 scheduler.",
   "profiles": {
     "claude": {
       "host_name": "Claude",
@@ -8,22 +8,22 @@
       "config_home": "the active Claude config directory (normally `~/.claude`)",
       "parent_channel": "`SendMessage` (use `ListAgents` to identify the parent)",
       "task_transport_contract": [
-        "Create one bounded task JSON file under your scratchpad with `Write`, validate that it is non-empty JSON, and keep its absolute path through any permission resume. Do not interpolate the task through the shell or send it on stdin. Remove only that worker-owned task file after a terminal receipt or launch failure."
+        "Create one request JSON file under your scratchpad with `Write`, validate non-empty JSON, and retain its absolute path through any resume. Do not interpolate JSON through the shell or standard input. Remove only that worker-owned file after a terminal receipt or launch failure."
       ],
       "launch_contract": [
-        "Invoke the mux-scheduler through `Bash`. Redirect stdout to a receipt file under your scratchpad and stderr beside it so output survives an expired foreground call. Pass `timeout: 600000` for a submission expected to finish within that ceiling; otherwise use `run_in_background: true` and wait for the completion notification. Never poll it with a sleep loop."
+        "Invoke `delegationctl.py run` or `delegationctl.py batch` through `Bash` with `--request-file`. Capture the structured receipt under your scratchpad and use the host's bounded foreground or background execution facility; never start a second operation for the same request."
       ],
       "permission_contract": [
-        "Ask the parent through `SendMessage`, including the request's `tool_name`, `tool_input`, and `reason` plus your recommendation. Wait for the answer, then write the exact resolution to a bounded JSON file and pass it with `--resolution-file`. Use `allow` for one exact single-use grant, `deny` to continue without the operation, or `handled` with a bounded JSON `result` when the parent performed it."
+        "Ask the parent through `SendMessage`, including the exact request and reason. After the decision, write a v2 resume request with `schema_version`, `backend`, `token`, and `resolution`, then invoke `delegationctl.py resume --request-file`."
       ],
       "waiting_contract": [
-        "Read the receipt capture before reacting to a foreground timeout. If it is empty and the background run remains alive, keep waiting. Never start a second mux-scheduler process for the same assignment."
+        "Read the structured receipt before reacting to a foreground timeout. If the operation remains active, continue waiting through the host lifecycle facility. Never replay an accepted request."
       ],
       "conflict_contract": [
-        "A backend permission request uses the same escalation path: relay it to the parent and never widen it into a standing grant."
+        "Use the same parent escalation path for an operation outside the assigned ownership; a single-use permission never becomes a standing grant."
       ],
       "lifecycle_contract": [
-        "Deliver the report through `SendMessage` when you are a named background teammate; an unnamed foreground worker returns its final-turn text through the Agent result. Claude Code releases a foreground Agent after that result, so the parent must not call `TaskStop` with the completed Agent ID."
+        "Return the evidence report through the foreground Agent result or `SendMessage` for a named background teammate. Claude automatically releases a foreground Agent when its result returns; do not issue a stop operation for that completed worker."
       ],
       "output": {
         "path": "claude/agents/bulk-worker.md",
@@ -40,22 +40,22 @@
       "config_home": "the active Codex home (normally `~/.codex`)",
       "parent_channel": "the collaboration channel available to the worker",
       "task_transport_contract": [
-        "`exec_command` cannot attach an stdin payload. Create a fresh worker-owned scratch directory under `~/tmp` with `mktemp -d`, write the bounded JSON to `task.json` there with `apply_patch`, validate that it is non-empty JSON, and keep its absolute path through any permission resume. Do not interpolate the task through the shell or send it on stdin. After a terminal receipt or launch failure, delete only that task file with `apply_patch` and remove the exact empty scratch directory with `rmdir`."
+        "Create a fresh worker-owned scratch directory under `~/tmp` with `mktemp -d`, write the request JSON to `request.json` there with `apply_patch`, validate non-empty JSON, and retain its absolute path through any resume. Do not interpolate JSON through the shell or standard input. Remove only that file and its exact empty directory after a terminal receipt or launch failure."
       ],
       "launch_contract": [
-        "Invoke this one trusted mux-scheduler command through `exec_command` with `sandbox_permissions: \"require_escalated\"`, `login: true`, `yield_time_ms: 30000`, and the justification `Allow the trusted DeepSeek mux-scheduler to use its global coordination state and provider network for this delegated task?`. Do not try it sandboxed first, do not request a reusable prefix rule, do not background or redirect the command, and do not invoke a second mux-scheduler process for the same assignment. If escalation is denied or the command cannot be launched, report the exact failure without replaying the task."
+        "Invoke the trusted `delegationctl.py` command through `exec_command` with `sandbox_permissions: \"require_escalated\"`, `login: true`, `yield_time_ms: 30000`, and the host-approved provider-network justification. Do not background, redirect, or replay the command."
       ],
       "permission_contract": [
-        "Relay the receipt to the parent and stop for its decision. On a parent follow-up carrying an `allow`, `deny`, or `handled` resolution, submit that exact resolution to `mux-scheduler.py resume`."
+        "Relay the receipt to the parent and stop for its decision. On an allow, deny, or handled resolution, submit that exact v2 resume request with `delegationctl.py resume --request-file`."
       ],
       "waiting_contract": [
-        "In Codex, `yield_time_ms` is only a yield interval. If `exec_command` returns a `session_id`, preserve it and continue the same process with `write_stdin`, empty `chars`, and `yield_time_ms: 60000` until the tool returns an `exit_code`. Collect every output chunk. Do not redirect the receipt, background the shell command, or invoke a second mux-scheduler process."
+        "If `exec_command` returns a session, preserve it and poll the same process with empty input until completion. Collect every output chunk and classify the final receipt before interpreting the exit status."
       ],
       "conflict_contract": [
         "If no parent channel is available, stop and report instead of guessing."
       ],
       "lifecycle_contract": [
-        "Report and stop. You remain alive and hold a subagent slot after completion, so the parent dismisses you after reading the report."
+        "Return the evidence report and stop. The host session lifecycle releases the worker; no nonexistent post-result worker action is required."
       ],
       "output": {
         "path": "codex/agents/bulk_worker.toml",
