@@ -11,18 +11,28 @@ import argparse
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 
 CONTROL_COMMANDS = frozenset({"agents", "logs", "stop", "kill", "rm", "respawn"})
+RETIRED_HOOK_STATUS = frozenset({
+    "ci-claude: fast permission decision",
+    "ci-claude: enforce single API lane",
+    "ci-claude: enforce bulk-worker tool policy",
+    "ci-claude: open the lane turn",
+    "ci-claude: close the lane turn",
+})
 VALID_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max", "unset", "auto"})
 VALIDATION_ERROR = 64
 RUNTIME_ERROR = 78
@@ -176,9 +186,49 @@ def configure_session(deployment: Mapping[str, Any], session_dir: Path) -> Path:
         "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": str(maximum),
         "DELEGATION_MAX_AGENTS": str(maximum),
     })
-    managed_hooks = session.get("hooks")
-    if managed_hooks is not None:
-        settings["hooks"] = dict(_object(managed_hooks, "runtime.session.hooks"))
+    hooks = settings.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise RuntimeProfileError(f"{path} hooks must be an object")
+    command = [sys.executable, str(Path(__file__).resolve()), "hook"]
+    rendered = (subprocess.list2cmdline(command) if os.name == "nt" else
+                " ".join(shlex.quote(value) for value in command))
+    managed = {
+        "PermissionRequest": [{"matcher": "*", "hooks": [{
+            "type": "command", "command": rendered + " permission",
+            "timeout": 30, "statusMessage": "delegation: permission policy",
+        }]}],
+        "PreToolUse": [
+            {"matcher": "Agent", "hooks": [{
+                "type": "command", "command": rendered + " agent-preflight",
+                "timeout": 5, "statusMessage": "delegation: gateway preflight",
+            }]},
+            {"matcher": "*", "hooks": [{
+                "type": "command", "command": rendered + " permission",
+                "timeout": 5, "statusMessage": "delegation: tool policy",
+            }]},
+        ],
+    }
+    for event, groups in managed.items():
+        existing = hooks.get(event, [])
+        if not isinstance(existing, list):
+            raise RuntimeProfileError(f"{path} hooks.{event} must be an array")
+        statuses = RETIRED_HOOK_STATUS | {
+            handler.get("statusMessage")
+            for group in groups for handler in group["hooks"]
+        }
+        kept = []
+        for group in existing:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                kept.append(group)
+                continue
+            handlers = [handler for handler in group["hooks"]
+                        if not (isinstance(handler, dict)
+                                and handler.get("statusMessage") in statuses)]
+            if handlers:
+                replacement = dict(group)
+                replacement["hooks"] = handlers
+                kept.append(replacement)
+        hooks[event] = [*kept, *groups]
     _write_json_atomic(path, settings)
     return path
 
@@ -229,6 +279,13 @@ def build_environment(deployment: Mapping[str, Any], session_dir: Path,
                       control: bool = False) -> dict[str, str]:
     source = os.environ if environ is None else environ
     result = dict(source)
+    runtime = _runtime(deployment)
+    configured_environment = _object(
+        runtime.get("environment", {}), "runtime.environment")
+    if any(not isinstance(key, str) or not isinstance(value, str)
+           for key, value in configured_environment.items()):
+        raise RuntimeProfileError("runtime.environment must map strings to strings")
+    result.update(configured_environment)
     result.pop("ANTHROPIC_API_KEY", None)
     result.pop("CHEAPESTINFERENCE_API_KEY", None)
     result["CLAUDE_CONFIG_DIR"] = str(session_dir)
@@ -251,7 +308,6 @@ def build_environment(deployment: Mapping[str, Any], session_dir: Path,
                             "inference.context_tokens", 1_000_000)
     output = _positive_int(inference.get("max_output_tokens"),
                            "inference.max_output_tokens", 32_000, 131_072)
-    runtime = _runtime(deployment)
     session = _object(runtime.get("session", {}), "runtime.session")
     maximum = _positive_int(session.get("max_agents"),
                             "runtime.session.max_agents", 4)
@@ -271,6 +327,15 @@ def build_environment(deployment: Mapping[str, Any], session_dir: Path,
         "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": str(maximum),
         "DELEGATION_MAX_AGENTS": str(maximum),
     })
+    deployment_id = _gateway_value(
+        gateway, "deployment_id", source, "DELEGATION_GATEWAY_DEPLOYMENT_ID")
+    registration_id = _gateway_value(
+        gateway, "registration_id", source,
+        "DELEGATION_GATEWAY_REGISTRATION_ID")
+    if deployment_id:
+        result["DELEGATION_GATEWAY_DEPLOYMENT_ID"] = deployment_id
+    if registration_id:
+        result["DELEGATION_GATEWAY_REGISTRATION_ID"] = registration_id
     return result
 
 
@@ -312,11 +377,157 @@ def _background_ids(executable: str, environment: Mapping[str, str]) -> set[str]
     }
 
 
-def _binding_action(binding: object, name: str) -> bool:
+def background_session_ids(
+        deployment: Mapping[str, Any], *,
+        environ: Mapping[str, str] | None = None) -> set[str] | None:
+    """Return retained Claude session IDs, or None when the roster is unknown.
+
+    The managed service calls this profile probe after a launcher hands off a
+    registration.  Unknown is deliberately distinct from empty so a transient
+    daemon or filesystem failure cannot strand a live background session.
+    """
+    source = os.environ if environ is None else environ
+    runtime = _runtime(deployment)
+    executable = _resolve_executable(runtime, source)
+    session_dir = _session_dir(runtime, source)
+    environment = build_environment(
+        deployment, session_dir, environ=source, control=True)
+    return _background_ids(executable, environment)
+
+
+def _read_hook_event() -> dict[str, Any]:
+    try:
+        value = json.load(sys.stdin)
+    except (OSError, ValueError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _emit_hook(event: str, decision: str, reason: str) -> None:
+    if event == "PreToolUse":
+        specific = {
+            "hookEventName": event,
+            "permissionDecision": decision,
+            "permissionDecisionReason": reason,
+        }
+    else:
+        result: dict[str, str] = {"behavior": decision}
+        if decision == "deny":
+            result["message"] = reason
+        specific = {"hookEventName": "PermissionRequest", "decision": result}
+    print(json.dumps({"hookSpecificOutput": specific}, separators=(",", ":")))
+
+
+def _normalize_tool(event: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+    tool = event.get("tool_name")
+    tool_input = event.get("tool_input")
+    if not isinstance(tool, str) or not isinstance(tool_input, dict):
+        return "external", {"tool": str(tool), "input": {}}
+    path_fields = {
+        "Read": "file_path", "Edit": "file_path", "Write": "file_path",
+        "Glob": "path", "Grep": "path", "LS": "path",
+    }
+    if tool in path_fields:
+        operation = "write" if tool in {"Edit", "Write"} else "read"
+        return operation, {"path": tool_input.get(path_fields[tool], ".")}
+    if tool == "Bash":
+        return "shell", {"command": tool_input.get("command")}
+    if tool in {"WebFetch", "WebSearch"}:
+        return "network", {"tool": tool, **tool_input}
+    if tool == "Agent":
+        return "process", {"tool": tool, **tool_input}
+    return "external", {"tool": tool, "input": tool_input}
+
+
+def permission_hook() -> int:
+    """Translate Claude hooks into the normalized permission service."""
+    event = _read_hook_event()
+    hook_event = str(event.get("hook_event_name") or "PermissionRequest")
+    state_path = os.environ.get("DELEGATION_PERMISSION_STATE")
+    # Interactive PreToolUse keeps Claude's normal permission flow. The
+    # PermissionRequest event below may still apply deterministic safe/deny
+    # results without turning the runtime profile into an interactive judge.
+    if hook_event == "PreToolUse" and not state_path:
+        return 0
+    try:
+        from permission_service import (
+            PermissionError as ProtocolPermissionError,
+            PermissionStore, deterministic_decision, permission_request,
+        )
+        operation, arguments = _normalize_tool(event)
+        session_id = (os.environ.get("DELEGATION_TASK_ID") or
+                      str(event.get("session_id") or "interactive"))
+        request = permission_request(
+            session_id, operation, arguments,
+            f"Claude requested {event.get('tool_name', 'an unknown tool')}")
+        root = Path(os.environ.get("DELEGATION_WORKSPACE_ROOT") or
+                    str(event.get("cwd") or os.getcwd()))
+        mode = os.environ.get("DELEGATION_TASK_MODE", "edit")
+        try:
+            allowed = json.loads(os.environ.get("DELEGATION_ALLOWED_PATHS", "[]"))
+        except json.JSONDecodeError:
+            allowed = []
+        if not isinstance(allowed, list) or any(not isinstance(item, str) for item in allowed):
+            allowed = []
+        store = PermissionStore(Path(state_path), session_id) if state_path else None
+        if store is not None and store.consume_grant(operation, arguments):
+            decision, reason = "allow", "the exact one-use parent grant was consumed"
+        else:
+            decision, reason = deterministic_decision(
+                request, root, mode=mode, allowed_paths=allowed)
+        if decision == "ask":
+            if store is None:
+                return 0
+            try:
+                store.issue(request)
+            except ProtocolPermissionError:
+                # A prior request is already the authoritative parent pause.
+                pass
+            decision = "deny"
+            reason = "the operation is paused for a parent permission decision"
+        _emit_hook(hook_event, decision, reason)
+        return 0
+    except (OSError, ValueError) as error:
+        _emit_hook(hook_event, "deny", f"permission policy failed closed: {error}")
+        return 0
+
+
+def agent_preflight_hook() -> int:
+    """Allow Agent only when the gateway confirms this exact binding."""
+    event = _read_hook_event()
+    if (event.get("hook_event_name") != "PreToolUse" or
+            event.get("tool_name") != "Agent"):
+        return 0
+    base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
+    token = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+    deployment_id = os.environ.get("DELEGATION_GATEWAY_DEPLOYMENT_ID", "")
+    registration_id = os.environ.get("DELEGATION_GATEWAY_REGISTRATION_ID", "")
+    reason = "the protocol gateway binding could not be verified"
+    try:
+        request = urllib.request.Request(
+            base_url.rstrip("/") + "/_delegation/v1/binding",
+            headers={"Authorization": "Bearer " + token})
+        with urllib.request.urlopen(request, timeout=3) as response:
+            descriptor = json.loads(response.read())
+        valid = (
+            isinstance(descriptor, dict)
+            and descriptor.get("deployment_id") == deployment_id
+            and descriptor.get("registration_id") == registration_id
+            and bool(deployment_id) and bool(registration_id)
+        )
+    except (OSError, ValueError, urllib.error.URLError):
+        valid = False
+    _emit_hook(
+        "PreToolUse", "allow" if valid else "deny",
+        "the Agent call uses a verified protocol gateway binding" if valid else reason)
+    return 0
+
+
+def _binding_action(binding: object, name: str, *arguments: object) -> bool:
     method = getattr(binding, name, None)
     if not callable(method):
         return False
-    method()
+    method(*arguments)
     return True
 
 
@@ -348,7 +559,11 @@ def launch(deployment: Mapping[str, Any], arguments: Sequence[str], *,
     source = os.environ if environ is None else environ
     runtime = _runtime(deployment)
     executable = _resolve_executable(runtime, source)
-    values = list(arguments)
+    configured_arguments = runtime.get("arguments", [])
+    if (not isinstance(configured_arguments, list) or
+            any(not isinstance(value, str) for value in configured_arguments)):
+        raise RuntimeProfileError("runtime.arguments must contain strings")
+    values = [*configured_arguments, *arguments]
     control = bool(values and values[0] in CONTROL_COMMANDS)
     validate_arguments(values)
     session_dir = _session_dir(runtime, source)
@@ -395,6 +610,175 @@ def launch(deployment: Mapping[str, Any], arguments: Sequence[str], *,
             _binding_action(gateway, "close")
 
 
+def _worker_prompt(task: Mapping[str, Any], context: Mapping[str, Any]) -> str:
+    if task["mode"] == "read":
+        scope = (
+            "You are a read-only audit worker. Inspect only; do not create, "
+            "edit, delete, rename, commit, or push files. Return a concise "
+            "evidence-based report.")
+    else:
+        paths = task.get("allowed_paths") or ["any path in this isolated worktree"]
+        scope = (
+            "You are an isolated edit worker. Do not commit or push. Stay "
+            "inside this allowed path scope: " + ", ".join(paths) + ".")
+    continuation = context.get("continuation")
+    resumed = (f"\n\nPARENT CONTINUATION:\n{continuation}" if continuation else "")
+    return (
+        scope + "\n\nUse one deterministic command per shell call. External "
+        "operations require parent authority. Stop early enough to return a "
+        "final report within this slice.\n\nTASK:\n" + str(task["prompt"]) + resumed)
+
+
+def _worker_process(command: str | list[str], prompt: str, cwd: Path,
+                    environment: dict[str, str], timeout: float
+                    ) -> tuple[int, str, str, bool]:
+    options: dict[str, Any] = {}
+    if os.name == "nt":
+        options["creationflags"] = getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        options["start_new_session"] = True
+    process = subprocess.Popen(
+        command, cwd=cwd, env=environment, stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **options)
+    try:
+        stdout, stderr = process.communicate(prompt, timeout=max(0.01, timeout))
+        return process.returncode, stdout, stderr, False
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            process.terminate()
+        else:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        try:
+            stdout, stderr = process.communicate(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            if os.name == "nt":
+                process.kill()
+            else:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            stdout, stderr = process.communicate()
+        return 124, stdout, stderr, True
+
+
+def worker_runner(deployment: Mapping[str, Any], gateway_factory: object):
+    """Build an ExecutionEngine runner for headless Claude slices.
+
+    ``gateway_factory`` may be a ServiceClient or a callable accepting
+    ``(task, context)`` and returning a GatewayBinding. Each slice owns and
+    closes exactly one registration.
+    """
+    runtime = _runtime(deployment)
+    inference = _inference(deployment)
+
+    def runner(task: dict[str, Any], cwd: Path,
+               context: dict[str, Any]) -> dict[str, Any]:
+        if callable(gateway_factory):
+            binding = gateway_factory(task, context)
+        else:
+            register = getattr(gateway_factory, "register", None)
+            if not callable(register):
+                raise RuntimeProfileError("gateway_factory cannot register a client")
+            dependency = min(
+                int(max(1, context["remaining_seconds"])),
+                int(_object(deployment.get("service"), "service").get(
+                    "max_dependency_seconds", 3600)))
+            binding = register(
+                f"worker:{context['token']}:{context['step']}",
+                pid=os.getpid(), dependency_seconds=dependency)
+        permission_store = context.get("permissions")
+        permission_path = getattr(permission_store, "path", None)
+        if not isinstance(permission_path, Path):
+            permission_path = Path(str(permission_path))
+        worker_session = permission_path.parent / "claude-session"
+        configure_session(deployment, worker_session)
+        environment = build_environment(
+            deployment, worker_session, gateway=binding)
+        environment.update({
+            "DELEGATION_PERMISSION_STATE": str(permission_path),
+            "DELEGATION_TASK_ID": str(context["token"]),
+            "DELEGATION_WORKSPACE_ROOT": str(cwd),
+            "DELEGATION_TASK_MODE": str(task["mode"]),
+            "DELEGATION_ALLOWED_PATHS": json.dumps(
+                task.get("allowed_paths", []), separators=(",", ":")),
+        })
+        effort = inference.get("worker_effort", "low")
+        environment["CLAUDE_CODE_EFFORT_LEVEL"] = str(effort)
+        thinking = _object(inference.get("thinking", {}), "inference.thinking")
+        if thinking.get("type") == "disabled":
+            environment["MAX_THINKING_TOKENS"] = "0"
+        elif thinking.get("type") == "adaptive":
+            environment.pop("MAX_THINKING_TOKENS", None)
+        elif thinking.get("type") == "enabled":
+            environment["MAX_THINKING_TOKENS"] = str(_positive_int(
+                thinking.get("budget_tokens"), "inference.thinking.budget_tokens", 1))
+        else:
+            raise RuntimeProfileError("inference.thinking.type is invalid")
+        executable = _resolve_executable(runtime, environment)
+        maximum = max(1, int(context["remaining_steps"]))
+        arguments = [
+            "-p", "--output-format", "json", "--max-turns", str(maximum),
+        ]
+        if int(context.get("step", 0)):
+            arguments.extend(["--resume", str(context["token"])])
+        else:
+            arguments.extend(["--session-id", str(context["token"])])
+        tools = ("Read,Grep,Glob,Bash" if task["mode"] == "read" else
+                 "Read,Grep,Glob,Bash,Edit,Write")
+        arguments.extend([
+            "--effort", str(effort), "--disable-slash-commands",
+            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+            "--setting-sources", "user", "--permission-mode",
+            "dontAsk" if task["mode"] == "read" else "acceptEdits",
+            "--tools", tools, "--settings",
+            str(provider_overlay(deployment, worker_session)),
+        ])
+        try:
+            returncode, stdout, stderr, timed_out = _worker_process(
+                _command(executable, arguments), _worker_prompt(task, context),
+                cwd, environment, float(context["remaining_seconds"]))
+        finally:
+            _binding_action(binding, "close")
+        try:
+            response = json.loads(stdout)
+        except json.JSONDecodeError:
+            response = stdout
+        pending = permission_store.pending() if permission_store is not None else None
+        turns = response.get("num_turns", 1) if isinstance(response, dict) else 1
+        if not isinstance(turns, int) or isinstance(turns, bool) or turns < 1:
+            turns = 1
+        max_turns = isinstance(response, dict) and (
+            response.get("subtype") == "error_max_turns"
+            or response.get("stop_reason") == "max_turns")
+        if timed_out:
+            classification, completed = "timeout", True
+        elif pending is not None:
+            classification, completed = "permission_requested", False
+        elif max_turns:
+            classification, completed = "session_yielded", False
+        elif returncode:
+            classification, completed = (
+                "backend_missing" if returncode == 127 else "backend_error"), True
+        elif isinstance(response, dict) and response.get("is_error"):
+            classification, completed = "backend_reported_error", True
+        elif not isinstance(response, dict):
+            classification, completed = "invalid_backend_output", True
+        else:
+            classification, completed = "success", True
+        return {
+            "completed": completed, "classification": classification,
+            "steps_used": min(turns, maximum), "returncode": returncode,
+            "response": response, "stderr": stderr,
+        }
+
+    return runner
+
+
 def load_deployment(path: Path) -> Mapping[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -421,12 +805,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     launch_parser.add_argument("--deployment", type=Path, required=True)
     launch_parser.add_argument("--gateway-file", type=Path)
     launch_parser.add_argument("arguments", nargs=argparse.REMAINDER)
+    probe_parser = subparsers.add_parser("probe-background")
+    probe_parser.add_argument("--deployment", type=Path, required=True)
+    hook_parser = subparsers.add_parser("hook")
+    hook_parser.add_argument("codec", choices=("permission", "agent-preflight"))
     options = parser.parse_args(argv)
-    arguments = options.arguments
-    if arguments[:1] == ["--"]:
-        arguments = arguments[1:]
     try:
-        return launch(load_deployment(options.deployment), arguments,
+        if options.command == "hook":
+            return (permission_hook() if options.codec == "permission" else
+                    agent_preflight_hook())
+        deployment = load_deployment(options.deployment)
+        if options.command == "probe-background":
+            identifiers = background_session_ids(deployment)
+            if identifiers is None:
+                return 2
+            print(json.dumps(sorted(identifiers), separators=(",", ":")))
+            return 0 if identifiers else 1
+        arguments = options.arguments
+        if arguments[:1] == ["--"]:
+            arguments = arguments[1:]
+        return launch(deployment, arguments,
                       gateway=_load_gateway(options.gateway_file))
     except RuntimeProfileError as error:
         print(f"claude runtime: {error}", file=sys.stderr)
