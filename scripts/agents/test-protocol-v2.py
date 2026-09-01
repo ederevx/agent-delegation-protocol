@@ -11,13 +11,14 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 CTL = ROOT / "scripts" / "agents" / "delegationctl.py"
 ADAPTER = ROOT / "scripts" / "agents" / "reference-adapter.py"
 sys.path.insert(0, str(ROOT / "scripts" / "agents"))
 from delegationctl import ProtocolError, load_catalog  # noqa: E402
-from lane_service import Lane, LaneClient, _auth  # noqa: E402
+from lane_service import Lane, LaneClient, _atomic_json, _auth  # noqa: E402
 
 
 def task(task_id: str, prompt: str = "hello") -> dict:
@@ -52,6 +53,45 @@ def request(operation: str, tasks: list[dict]) -> dict:
         tasks if operation == "batch" else tasks[0]
     )
     return value
+
+
+class AtomicJsonTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_without_fchmod(self) -> None:
+        path = self.root / "atomic.json"
+        with mock.patch("lane_service.os.fchmod", None, create=True):
+            _atomic_json(path, {"status": "completed"}, 0o600)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")),
+                         {"status": "completed"})
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits are not portable")
+    def test_applies_posix_mode(self) -> None:
+        path = self.root / "atomic.json"
+        _atomic_json(path, {"status": "completed"}, 0o640)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+
+    def test_closes_fd_when_fchmod_fails(self) -> None:
+        descriptor: list[int] = []
+
+        def fail_fchmod(fd: int, _mode: int) -> None:
+            descriptor.append(fd)
+            raise PermissionError("fchmod failed")
+
+        path = self.root / "atomic.json"
+        with mock.patch("lane_service.os.fchmod", side_effect=fail_fchmod,
+                        create=True):
+            with self.assertRaisesRegex(PermissionError, "fchmod failed"):
+                _atomic_json(path, {"status": "completed"}, 0o600)
+        self.assertEqual(len(descriptor), 1)
+        with self.assertRaises(OSError):
+            os.fstat(descriptor[0])
+        self.assertFalse(path.exists())
 
 
 class ProtocolV2(unittest.TestCase):

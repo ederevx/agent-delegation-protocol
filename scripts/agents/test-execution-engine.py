@@ -58,6 +58,46 @@ class ExecutionEngineTests(unittest.TestCase):
                         "max_steps": max_steps},
         }
 
+    def test_atomic_state_write_is_windows_portable_and_posix_private(self) -> None:
+        windows_path = self.base / "windows-state.json"
+        with mock.patch.object(execution_engine.os, "name", "nt"), \
+                mock.patch.object(execution_engine.os, "fchmod", create=True,
+                                  side_effect=AssertionError("fchmod on Windows")):
+            execution_engine._atomic_json(windows_path, {"platform": "windows"})
+        self.assertEqual(windows_path.read_text(encoding="utf-8"),
+                         '{"platform": "windows"}')
+
+        posix_path = self.base / "posix-state.json"
+        with mock.patch.object(execution_engine.os, "name", "posix"), \
+                mock.patch.object(execution_engine.os, "fchmod", create=True) as chmod:
+            execution_engine._atomic_json(posix_path, {"platform": "posix"})
+        chmod.assert_called_once_with(mock.ANY, 0o600)
+
+    def test_atomic_state_write_closes_descriptor_and_preserves_primary_error(self) -> None:
+        descriptor, temporary = tempfile.mkstemp(dir=self.base)
+        real_close = os.close
+        closed: list[int] = []
+
+        def close(value: int) -> None:
+            closed.append(value)
+            real_close(value)
+
+        try:
+            with mock.patch.object(execution_engine.tempfile, "mkstemp",
+                                   return_value=(descriptor, temporary)), \
+                    mock.patch.object(execution_engine.os, "name", "posix"), \
+                    mock.patch.object(execution_engine.os, "fchmod", create=True,
+                                      side_effect=OSError("permission failure")), \
+                    mock.patch.object(execution_engine.os, "close", side_effect=close), \
+                    mock.patch.object(execution_engine.os, "unlink",
+                                      side_effect=OSError("cleanup failure")):
+                with self.assertRaisesRegex(OSError, "permission failure"):
+                    execution_engine._atomic_json(
+                        self.base / "failed-state.json", {"value": 1})
+            self.assertEqual(closed, [descriptor])
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+
     def test_isolated_edit_returns_evidence_and_leaves_source_untouched(self) -> None:
         def runner(_task, cwd, _context):
             (cwd / "src" / "main.txt").write_text("after\n", encoding="utf-8")

@@ -4,9 +4,27 @@ from __future__ import annotations
 
 import json
 import tempfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from unittest.mock import patch
 
 import install
+
+
+class FakeWindowsLink:
+    """Minimal path stand-in for testing Windows readlink spellings anywhere."""
+
+    def __init__(self, path: str) -> None:
+        self._path = PureWindowsPath(path)
+
+    @property
+    def parent(self) -> PureWindowsPath:
+        return self._path.parent
+
+    def is_symlink(self) -> bool:
+        return True
+
+    def __fspath__(self) -> str:
+        return str(self._path)
 
 
 def fixture(root: Path) -> Path:
@@ -32,7 +50,35 @@ def fixture(root: Path) -> Path:
     return repo
 
 
+def test_same_link_paths() -> None:
+    windows_link = FakeWindowsLink(r"C:\Users\tester\.codex\hooks\hook.py")
+    with patch.object(
+        install.os, "readlink",
+        return_value=r"\\?\C:\Users\tester\repo\hook.py",
+    ):
+        assert install.same_link(
+            windows_link, PureWindowsPath(r"C:\Users\tester\repo\hook.py")
+        )
+        assert not install.same_link(
+            windows_link, PureWindowsPath(r"C:\Users\tester\other\hook.py")
+        )
+    with patch.object(
+        install.os, "readlink", return_value=r"..\..\repo\hook.py"
+    ):
+        assert install.same_link(
+            windows_link, PureWindowsPath(r"C:\Users\tester\repo\hook.py")
+        )
+    with patch.object(
+        install.os, "readlink",
+        return_value=r"\\?\UNC\server\share\repo\hook.py",
+    ):
+        assert install.same_link(
+            windows_link, PureWindowsPath(r"\\server\share\repo\hook.py")
+        )
+
+
 def main() -> None:
+    test_same_link_paths()
     with tempfile.TemporaryDirectory(prefix="protocol-hosts-") as raw:
         root, repo = Path(raw), None
         repo = fixture(root)
