@@ -2,9 +2,10 @@
 
 Claude Code keeps the strongest parent context for planning, ambiguity,
 architecture, difficult debugging, integration, conflict resolution, and final
-validation. Delegate bounded work to the lifecycle-visible bulk worker when
-the task is high-volume, has three or more distinct steps, or reaches 25% of
-the active context window.
+validation. Route large-text triage and compression to `bulk-worker`. Route
+other bounded work that needs moderate reasoning to `balanced-worker` when the
+task has three or more distinct steps or reaches 25% of the active context
+window. Keep work that needs parent-level judgment with the parent.
 
 For independent workstreams, use concurrent workers when capacity permits.
 Give each worker exclusive ownership, acceptance criteria, validation commands,

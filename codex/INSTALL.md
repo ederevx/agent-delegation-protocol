@@ -54,7 +54,7 @@ $CODEX_HOME/.delegation-protocol/hook_adapter.py
 $CODEX_HOME/.delegation-protocol/lifecycle.py
 ```
 
-The worker is a managed regular-file copy because the Codex runtime requires
+The bulk worker is a managed regular-file copy because the Codex runtime requires
 no-follow loading for selected role files. The installer records its source
 revision and refreshes only an unmodified protocol-owned copy.
 

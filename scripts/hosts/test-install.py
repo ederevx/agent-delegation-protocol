@@ -31,6 +31,7 @@ def fixture(root: Path) -> Path:
     repo = root / "repo"
     for path in (
         "claude/rules/delegation-protocol.md", "claude/agents/bulk-worker.md",
+        "claude/agents/balanced-worker.md",
         "claude/hooks/delegation-enforcer.py", "codex/AGENTS.md",
         "codex/agents/bulk_worker.toml", "codex/agents/balanced-worker.toml",
         "codex/hooks/delegation-enforcer.py", "scripts/agents/delegationctl.py",

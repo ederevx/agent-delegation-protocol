@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "description": "Mid-tier worker for bounded work that needs moderate reasoning but not parent-level architecture or integration.",
+  "profiles": {
+    "claude": {
+      "host_name": "Claude",
+      "parent_channel": "`SendMessage` (use `ListAgents` to identify the parent)",
+      "lifecycle_contract": [
+        "Return the evidence report through the foreground Agent result or `SendMessage` for a named background teammate. Claude automatically releases a foreground Agent when its result returns; do not issue a stop operation for that completed worker."
+      ],
+      "output": {
+        "path": "claude/agents/balanced-worker.md",
+        "format": "claude-markdown",
+        "name": "balanced-worker",
+        "model": "sonnet",
+        "effort": "medium",
+        "max_turns": 30
+      }
+    },
+    "codex": {
+      "host_name": "Codex",
+      "parent_channel": "the collaboration channel available to the worker",
+      "lifecycle_contract": [
+        "Return the evidence report and stop. The host session lifecycle releases the worker; no nonexistent post-result worker action is required."
+      ],
+      "output": {
+        "path": "codex/agents/balanced-worker.toml",
+        "format": "codex-toml",
+        "name": "balanced_worker",
+        "model": "gpt-5.6-terra",
+        "reasoning_effort": "medium"
+      }
+    }
+  }
+}
