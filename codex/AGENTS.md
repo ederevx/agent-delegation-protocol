@@ -3,16 +3,19 @@
 ## Purpose
 
 Keep the frontier Codex session responsible for planning, ambiguity,
-architecture, integration, conflict resolution, and final validation. Delegate
-bounded, independently verifiable work to the lifecycle-visible bulk worker.
+architecture, integration, conflict resolution, and final validation. Route
+large-text triage and compression to `bulk_worker`; route other bounded work
+that needs moderate reasoning to `balanced_worker`.
 
 ## Required delegation
 
-Delegate work that is high-volume, has three or more distinct steps, or is
-estimated at 25% or more of the active context window. For independent
-workstreams, use concurrent workers when capacity permits. Give each worker
-exclusive ownership, acceptance criteria, validation commands, and a required
-evidence report. The parent is the integration authority.
+Delegate work that has three or more distinct steps or is estimated at 25% or
+more of the active context window. Use the cheap bulk tier only for large-text
+triage and compression; keep difficult debugging, ambiguity, architecture,
+integration, and final validation with the parent. For independent workstreams,
+use concurrent workers when capacity permits. Give each worker exclusive
+ownership, acceptance criteria, validation commands, and a required evidence
+report. The parent is the integration authority.
 
 ## v2 execution contract
 

@@ -37,6 +37,13 @@ An adapter may translate the common contract into deployment-specific API or
 model settings. Those details stay in the integration; they do not enter host
 policy, the core catalog schema, or task manifests.
 
+The generated cheap-tier workers accept only `compress` requests: read-only
+large-text triage that removes repetition and clearly nonsensical input while
+preserving unique relevant information. Debugging, edits, ambiguity, and
+integration do not enter that tier. Generated balanced workers handle bounded
+moderate-reasoning work for both hosts, while parent-level judgment remains
+with the frontier session.
+
 ## Repository layout
 
 ```text

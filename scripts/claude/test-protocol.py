@@ -13,6 +13,8 @@ def main():
     assert r.returncode==0,r.stderr
     m=json.loads((home/'.delegation-protocol/manifest.json').read_text()); assert m['version']==2 and m['release']=='automatic_release'
     assert (home/'.delegation-protocol/delegationctl.py').is_symlink()
+    assert (home/'agents/bulk-worker.md').is_symlink()
+    assert (home/'agents/balanced-worker.md').is_symlink()
     p=subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'s','prompt':'Update 12 files across independent modules.'}),env=env,capture_output=True,text=True)
     assert p.returncode==0,p.stderr
     assert 'hookSpecificOutput' in json.loads(p.stdout)
@@ -27,6 +29,8 @@ def main():
     assert old.returncode != 0 and 'tagged v1 uninstaller' in old.stderr
     (home/'.delegation-protocol/manifest.json').write_text(json.dumps(m))
     r=subprocess.run([sys.executable,str(ENGINE),"uninstall","--host","claude","--home",str(home),"--repo",str(ROOT)],env=env,capture_output=True,text=True); assert r.returncode==0,r.stderr
+    assert not (home/'agents/bulk-worker.md').exists()
+    assert not (home/'agents/balanced-worker.md').exists()
     # Settings manager preserves unrelated values and rejects invalid JSON
     # without replacing the user's file.
     spec=importlib.util.spec_from_file_location('settings', SETTINGS); mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)

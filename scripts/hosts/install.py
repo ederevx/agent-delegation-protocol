@@ -171,6 +171,7 @@ def resources(repo: Path, home: Path, host: str) -> list[tuple[Path, Path, str]]
         return [
             (repo / "claude/rules/delegation-protocol.md", home / "rules/delegation-protocol.md", "link"),
             (repo / "claude/agents/bulk-worker.md", home / "agents/bulk-worker.md", "link"),
+            (repo / "claude/agents/balanced-worker.md", home / "agents/balanced-worker.md", "link"),
             (repo / "claude/hooks/delegation-enforcer.py", home / "hooks/delegation-enforcer.py", "link"),
             *common,
         ]

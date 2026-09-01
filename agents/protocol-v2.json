@@ -11,7 +11,7 @@
         "platforms": ["linux", "darwin", "windows"],
         "modes": ["read", "edit"],
         "workspaces": ["shared", "isolated"],
-        "functions": ["audit", "edit", "batch"]
+        "functions": ["audit", "edit", "batch", "compress"]
       },
       "availability": {"commands": [], "environment": []},
       "execution": {"delivery": "native"},
@@ -27,7 +27,7 @@
         "platforms": ["linux", "darwin", "windows"],
         "modes": ["read", "edit"],
         "workspaces": ["shared", "isolated"],
-        "functions": ["audit", "edit", "batch"]
+        "functions": ["audit", "edit", "batch", "compress"]
       },
       "availability": {"commands": [], "environment": []},
       "execution": {"delivery": "native"},

@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
-import os
 import sys
-import tempfile
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts" / "agents"))
@@ -28,21 +27,19 @@ def main() -> None:
     }
     assert "lane" not in backend
     assert "provider" not in backend and "model" not in backend
+    assert backend["selector"]["functions"] == ["compress"]
     request = {
         "route": "bulk", "runtime": "codex", "platform": "linux",
         "mode": "read", "workspace": "shared", "function": "audit",
     }
-    with tempfile.TemporaryDirectory() as temporary:
-        prior = os.environ.get("DELEGATION_CONFIG_HOME")
-        os.environ["DELEGATION_CONFIG_HOME"] = temporary
-        try:
-            selected = CTL.select_backend(catalog, request)
-        finally:
-            if prior is None:
-                os.environ.pop("DELEGATION_CONFIG_HOME", None)
-            else:
-                os.environ["DELEGATION_CONFIG_HOME"] = prior
+    with mock.patch.object(CTL, "_available", return_value=True):
+        selected = CTL.select_backend(catalog, request)
     assert selected["kind"] == "native"
+    request["runtime"] = "claude"
+    request["function"] = "compress"
+    with mock.patch.object(CTL, "_available", return_value=True):
+        selected = CTL.select_backend(catalog, request)
+    assert selected["id"] == "ci-claude-session-v2"
     assert catalog["routes"]["bulk"][0] == "ci-claude-session-v2"
     print("ci-claude managed catalog tests: PASS")
 

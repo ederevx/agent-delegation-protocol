@@ -7,6 +7,9 @@
       "runtime": "claude",
       "config_home": "<active-Claude-config-directory>",
       "parent_channel": "`SendMessage` (use `ListAgents` to identify the parent)",
+      "scope_contract": [
+        "Accept only large-text triage and compression. Strictly preserve unique, relevant information while removing repeated entries and clearly nonsensical input. Do not debug, resolve ambiguity, make architectural or integration judgments, edit source files, or perform final validation. If the assignment crosses this boundary, return it to the parent without launching a request."
+      ],
       "task_transport_contract": [
         "Create one request JSON file under your scratchpad with `Write`, validate non-empty JSON, and retain its absolute path through any resume. Do not interpolate JSON through the shell or standard input. Remove only that worker-owned file after a terminal receipt or launch failure."
       ],
@@ -39,6 +42,9 @@
       "runtime": "codex",
       "config_home": "<active-Codex-home>",
       "parent_channel": "the collaboration channel available to the worker",
+      "scope_contract": [
+        "Accept only large-text triage and compression. Strictly preserve unique, relevant information while removing repeated entries and clearly nonsensical input. Do not debug, resolve ambiguity, make architectural or integration judgments, edit source files, or perform final validation. If the assignment crosses this boundary, return it to the parent without launching a request."
+      ],
       "task_transport_contract": [
         "Create a fresh worker-owned scratch directory under `~/tmp` with `mktemp -d`, write the request JSON to `request.json` there with `apply_patch`, validate non-empty JSON, and retain its absolute path through any resume. Do not interpolate JSON through the shell or standard input. Remove only that file and its exact empty directory after a terminal receipt or launch failure."
       ],

@@ -34,6 +34,7 @@ links:
 ```text
 $CLAUDE_CONFIG_DIR/rules/delegation-protocol.md
 $CLAUDE_CONFIG_DIR/agents/bulk-worker.md
+$CLAUDE_CONFIG_DIR/agents/balanced-worker.md
 $CLAUDE_CONFIG_DIR/hooks/delegation-enforcer.py
 $CLAUDE_CONFIG_DIR/.delegation-protocol/delegationctl[.cmd]
 $CLAUDE_CONFIG_DIR/.delegation-protocol/delegationctl.py
@@ -43,6 +44,10 @@ $CLAUDE_CONFIG_DIR/.delegation-protocol/delegation-classifier.py
 $CLAUDE_CONFIG_DIR/.delegation-protocol/hook_adapter.py
 $CLAUDE_CONFIG_DIR/.delegation-protocol/lifecycle.py
 ```
+
+The bulk worker is restricted to read-only large-text compression through the
+managed cheap tier. The balanced worker handles bounded work that needs
+moderate reasoning without taking over parent architecture or integration.
 
 The worker sends file-backed v2 requests through the absolute platform
 launcher under the active Claude config directory. On Windows, the launcher
