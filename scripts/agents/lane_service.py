@@ -60,3 +60,19 @@ class LaneServer:
             if op=="status": return {"status":"success",**self.lane.status()}
         except TimeoutError: return {"status":"timeout"}
         return {"status":"invalid_request"}
+
+    def serve_forever(self):
+        """Serve newline-delimited requests on a filesystem UNIX socket."""
+        if os.name == "nt": raise OSError("v2 lane service requires a loopback UNIX socket")
+        self.socket_path.parent.mkdir(parents=True, exist_ok=True)
+        try: self.socket_path.unlink()
+        except FileNotFoundError: pass
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind(str(self.socket_path)); os.chmod(self.socket_path,0o600); listener.listen(16)
+            while True:
+                conn,_=listener.accept()
+                with conn:
+                    for line in conn.makefile("rb"):
+                        try: request=json.loads(line); answer=self.dispatch(request)
+                        except Exception as error: answer={"status":"invalid_request","error":str(error)}
+                        conn.sendall((json.dumps(answer,separators=(",",":"))+"\n").encode())
