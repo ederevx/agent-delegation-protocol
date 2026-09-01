@@ -91,6 +91,31 @@ def _inference(deployment: Mapping[str, Any]) -> Mapping[str, Any]:
     return _object(deployment.get("inference"), "inference")
 
 
+def _expand_session_path(raw: str, environ: Mapping[str, str], *,
+                         windows: bool) -> Path:
+    if "\0" in raw or "\n" in raw or "\r" in raw:
+        raise RuntimeProfileError("runtime.session.config_dir is invalid")
+    if windows:
+        marker = "%LOCALAPPDATA%"
+        if marker.casefold() in raw.casefold():
+            local = environ.get("LOCALAPPDATA")
+            if not local:
+                raise RuntimeProfileError("LOCALAPPDATA is unavailable")
+            start = raw.casefold().index(marker.casefold())
+            raw = raw[:start] + local + raw[start + len(marker):]
+        if "%" in raw:
+            raise RuntimeProfileError(
+                "runtime.session.config_dir has an unknown Windows placeholder")
+        return Path(raw).resolve()
+    if raw == "~" or raw.startswith("~/"):
+        home = environ.get("HOME") or str(Path.home())
+        raw = home + raw[1:]
+    elif raw.startswith("~") or "$" in raw or "%" in raw:
+        raise RuntimeProfileError(
+            "runtime.session.config_dir has an unknown POSIX placeholder")
+    return Path(raw).resolve()
+
+
 def _session_dir(runtime: Mapping[str, Any], environ: Mapping[str, str]) -> Path:
     session = _object(runtime.get("session", {}), "runtime.session")
     override_name = session.get("environment", "DELEGATION_CLAUDE_CONFIG_DIR")
@@ -101,9 +126,16 @@ def _session_dir(runtime: Mapping[str, Any], environ: Mapping[str, str]) -> Path
     if raw is None:
         deployment_id = str(runtime.get("deployment_id", "default"))
         raw = str(Path.home() / ".config" / "delegation" / "sessions" / deployment_id)
+    if isinstance(raw, Mapping):
+        if set(raw) != {"posix", "windows"} or any(
+                not isinstance(value, str) or not value for value in raw.values()):
+            raise RuntimeProfileError(
+                "runtime.session.config_dir platform map is invalid")
+        raw = raw["windows" if os.name == "nt" else "posix"]
     if not isinstance(raw, str) or not raw:
-        raise RuntimeProfileError("runtime.session.config_dir must be a string")
-    return Path(os.path.expandvars(os.path.expanduser(raw))).resolve()
+        raise RuntimeProfileError(
+            "runtime.session.config_dir must be a string or platform map")
+    return _expand_session_path(raw, environ, windows=os.name == "nt")
 
 
 def _resolve_executable(runtime: Mapping[str, Any],
@@ -563,8 +595,9 @@ def launch(deployment: Mapping[str, Any], arguments: Sequence[str], *,
     if (not isinstance(configured_arguments, list) or
             any(not isinstance(value, str) for value in configured_arguments)):
         raise RuntimeProfileError("runtime.arguments must contain strings")
-    values = [*configured_arguments, *arguments]
-    control = bool(values and values[0] in CONTROL_COMMANDS)
+    caller_arguments = list(arguments)
+    control = bool(caller_arguments and caller_arguments[0] in CONTROL_COMMANDS)
+    values = caller_arguments if control else [*configured_arguments, *caller_arguments]
     validate_arguments(values)
     session_dir = _session_dir(runtime, source)
     configure_session(deployment, session_dir)

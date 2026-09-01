@@ -69,7 +69,10 @@ def deployment(executable: Path, session: Path) -> dict:
             "profile": "claude-code",
             "executable": {"command": str(executable),
                            "environment": "FIXTURE_CLAUDE_BIN"},
-            "session": {"config_dir": str(session), "max_agents": 3},
+            "session": {"config_dir": {"posix": str(session),
+                                         "windows": "%LOCALAPPDATA%/fixture"},
+                        "environment": "FIXTURE_SESSION", "max_agents": 3,
+                        "permission_mode": "auto"},
         },
         "inference": {
             "model": "fixture-model",
@@ -184,6 +187,17 @@ def test_validation(root: Path) -> None:
                 "missing gateway used the wrong status")
     else:
         raise AssertionError("launch without a gateway was accepted")
+    windows = runtime._expand_session_path(
+        "%LOCALAPPDATA%/ci-claude/session",
+        {"LOCALAPPDATA": str(root / "local")}, windows=True)
+    require(windows == (root / "local" / "ci-claude" / "session").resolve(),
+            "Windows session path did not expand exactly")
+    try:
+        runtime._expand_session_path("%APPDATA%/session", {}, windows=True)
+    except runtime.RuntimeProfileError:
+        pass
+    else:
+        raise AssertionError("unknown Windows placeholder was accepted")
 
 
 def test_worker_runner_uses_bounded_headless_contract(root: Path) -> None:
