@@ -165,6 +165,8 @@ def install(repo: Path, home: Path, host: str) -> None:
         manifest = {"version": VERSION, "host": host, "repo": str(repo),
                     "release": "automatic_release" if host == "claude" else "session_release",
                     "owned": [str(destination) for _, destination, _ in items],
+                    "resources": [{"source": str(source), "destination": str(destination), "kind": kind}
+                                  for source, destination, kind in items],
                     "hashes": {str(destination): digest(source) for source, destination, _ in items}}
         atomic_json(manifest_path, manifest)
     except Exception:
