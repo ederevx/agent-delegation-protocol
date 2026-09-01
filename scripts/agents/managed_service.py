@@ -173,7 +173,7 @@ def validate_deployment(value: Any) -> dict[str, Any]:
     gateway = value["gateway"]
     _exact(gateway, {"upstream", "allowed_methods", "allowed_paths",
                      "credential_header", "credential_scheme", "resource",
-                     "timeout_seconds"}, set(), "gateway")
+                     "timeout_seconds", "max_request_bytes"}, set(), "gateway")
     parse_upstream(gateway["upstream"])
     methods = gateway["allowed_methods"]
     if (not isinstance(methods, list) or not methods or
@@ -195,6 +195,8 @@ def validate_deployment(value: Any) -> dict[str, Any]:
     if not isinstance(gateway["resource"], str) or not gateway["resource"]:
         raise DeploymentError("gateway.resource is required")
     _positive_int(gateway["timeout_seconds"], "gateway.timeout_seconds", 3600)
+    _positive_int(gateway["max_request_bytes"],
+                  "gateway.max_request_bytes", 512 * 1024 * 1024)
 
     resources = value["resources"]
     if not isinstance(resources, list) or not resources:
@@ -679,6 +681,8 @@ def _process_identity(pid: int) -> str | None:
     if os.name != "nt":
         try:
             fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+            if fields[0] == "Z":
+                return None
             return f"{pid}:{fields[19]}"
         except (OSError, IndexError):
             ps = next((candidate for candidate in ("/bin/ps", "/usr/bin/ps")
@@ -727,6 +731,11 @@ def _process_identity(pid: int) -> str | None:
         return None
 
 
+def process_identity(pid: int) -> str | None:
+    """Return the platform process-start identity used by lifecycle clients."""
+    return _process_identity(pid)
+
+
 class ClientRegistry:
     def __init__(self, maximum: int, max_dependency_seconds: int,
                  state_file: Path) -> None:
@@ -734,6 +743,7 @@ class ClientRegistry:
         self.max_dependency_seconds = max_dependency_seconds
         self.state_file = state_file
         self.lock = threading.Lock()
+        self.accepting = True
         self.records: dict[str, Registration] = {}
         self._load()
 
@@ -776,6 +786,7 @@ class ClientRegistry:
             except (KeyError, TypeError, ValueError):
                 continue
             if (not record.registration_id or not record.client_id or not record.token
+                    or (record.retained and record.retained_session_ids is None)
                     or (not record.retained and
                         (record.pid is None or
                          _process_identity(record.pid) != record.process_identity))):
@@ -810,7 +821,7 @@ class ClientRegistry:
                  dependency_seconds: int) -> Registration | None:
         with self.lock:
             self._reap()
-            if len(self.records) >= self.maximum:
+            if not self.accepting or len(self.records) >= self.maximum:
                 return None
             registration_id = secrets.token_urlsafe(24)
             record = Registration(
@@ -850,11 +861,18 @@ class ClientRegistry:
                session_ids: set[str] | None = None) -> bool:
         with self.lock:
             record = self.records.get(registration_id)
-            if record is None:
+            if record is None or not session_ids:
+                return False
+            claimed = set().union(*(
+                item.retained_session_ids
+                for key, item in self.records.items()
+                if key != registration_id and item.retained
+                and item.retained_session_ids is not None
+            )) if len(self.records) > 1 else set()
+            if session_ids & claimed:
                 return False
             record.retained = True
-            record.retained_session_ids = (
-                set(session_ids) if session_ids is not None else None)
+            record.retained_session_ids = set(session_ids)
             record.pid = None
             record.process_identity = None
             self._persist()
@@ -864,24 +882,25 @@ class ClientRegistry:
         """Reconcile retained registrations against a successful roster probe."""
         with self.lock:
             changed = False
+            claimed: set[str] = set()
             for key, record in list(self.records.items()):
                 if not record.retained:
                     continue
                 owned = record.retained_session_ids
                 if owned is None:
-                    if session_ids:
-                        record.retained_session_ids = set(session_ids)
-                    else:
-                        self.records.pop(key, None)
+                    self.records.pop(key, None)
                     changed = True
                     continue
-                remaining = owned & session_ids
+                remaining = (owned & session_ids) - claimed
                 if not remaining:
                     self.records.pop(key, None)
                     changed = True
                 elif remaining != owned:
                     record.retained_session_ids = remaining
                     changed = True
+                    claimed.update(remaining)
+                else:
+                    claimed.update(owned)
             if changed:
                 self._persist()
 
@@ -906,6 +925,15 @@ class ClientRegistry:
 
     def active(self) -> bool:
         return bool(self.snapshot())
+
+    def drain(self) -> bool:
+        """Atomically prevent new registrations when no clients remain."""
+        with self.lock:
+            self._reap()
+            if self.records:
+                return False
+            self.accepting = False
+            return True
 
 
 class ManagedHTTPServer(ThreadingHTTPServer):
@@ -997,7 +1025,7 @@ class ManagedHandler(BaseHTTPRequestHandler):
                              "clients": self.server.clients.snapshot()})
             return
         if operation == "stop":
-            if self.server.clients.active():
+            if not self.server.clients.drain():
                 self._error(409, b"service has active clients\n")
                 return
             self._json(200, {"status": "completed"})
@@ -1036,8 +1064,7 @@ class ManagedHandler(BaseHTTPRequestHandler):
             ok = self.server.clients.heartbeat(registration_id, seconds)
         elif operation == "retain":
             session_ids = value.get("retained_session_ids")
-            if session_ids is not None and (
-                    not isinstance(session_ids, list) or not session_ids or
+            if (not isinstance(session_ids, list) or not session_ids or
                     any(not isinstance(item, str) or not item
                         for item in session_ids) or
                     len(session_ids) != len(set(session_ids))):
@@ -1045,7 +1072,7 @@ class ManagedHandler(BaseHTTPRequestHandler):
                 return
             ok = self.server.clients.retain(
                 registration_id,
-                set(session_ids) if session_ids is not None else None)
+                set(session_ids))
         else:
             ok = self.server.clients.unregister(registration_id)
         self._json(200, {"status": "completed" if ok else "not_found"})
@@ -1091,9 +1118,15 @@ class ManagedHandler(BaseHTTPRequestHandler):
             self._error(401, b"unauthorized\n")
             return
         try:
+            if self.headers.get("Transfer-Encoding"):
+                self._error(400, b"transfer encoding is unsupported\n")
+                return
             length = int(self.headers.get("Content-Length", "0"))
             if length < 0:
                 raise ValueError
+            if length > gateway["max_request_bytes"]:
+                self._error(413, b"request body is too large\n")
+                return
             body = self.rfile.read(length)
         except (OSError, ValueError):
             self._error(400, b"invalid content length\n")
@@ -1364,6 +1397,8 @@ class ServiceClient:
         self.host = descriptor["host"]
         self.port = int(descriptor["port"])
         self.base_url = f"http://{self.host}:{self.port}"
+        self.pid = int(descriptor["pid"])
+        self.process_identity = descriptor.get("process_identity")
         self.admin_token = Path(descriptor["secret_file"]).read_text(
             encoding="ascii").strip()
 
@@ -1388,7 +1423,14 @@ class ServiceClient:
         return self._control("status", {})
 
     def stop(self) -> bool:
-        return self._control("stop", {})["status"] == "completed"
+        if self._control("stop", {})["status"] != "completed":
+            return False
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if _process_identity(self.pid) != self.process_identity:
+                return True
+            time.sleep(0.05)
+        raise DeploymentError("managed service did not stop")
 
     def register(self, client_id: str, pid: int | None = None,
                  dependency_seconds: int = 0) -> "GatewayBinding":
@@ -1417,12 +1459,13 @@ class GatewayBinding:
         })
         return answer["status"] == "completed"
 
-    def retain(self, session_ids: set[str] | None = None,
+    def retain(self, session_ids: set[str],
                dependency_seconds: int | None = None) -> bool:
         del dependency_seconds
-        payload: dict[str, Any] = {"registration_id": self.registration_id}
-        if session_ids is not None:
-            payload["retained_session_ids"] = sorted(session_ids)
+        payload: dict[str, Any] = {
+            "registration_id": self.registration_id,
+            "retained_session_ids": sorted(session_ids),
+        }
         answer = self.client._control("retain", payload)
         return answer["status"] == "completed"
 
@@ -1510,6 +1553,33 @@ def ensure_service(deployment_path: str | Path,
         finally:
             lock_path.unlink(missing_ok=True)
     raise DeploymentError("managed service did not become ready")
+
+
+def existing_service(
+        deployment_path: str | Path,
+        state_dir: str | Path | None = None) -> ServiceClient | None:
+    """Return a running service without starting one or reading credentials."""
+    deployment_path = Path(deployment_path).resolve()
+    deployment = load_deployment(deployment_path)
+    state = (Path(state_dir) if state_dir else
+             _default_state_dir(deployment["id"]))
+    descriptor = _descriptor(
+        state, deployment["id"], _fingerprint(deployment))
+    if descriptor is None:
+        return None
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            client = ServiceClient(descriptor)
+            client.status()
+            return client
+        except (OSError, DeploymentError):
+            if (_process_identity(int(descriptor["pid"])) !=
+                    descriptor.get("process_identity")):
+                return None
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
 
 
 def main(argv: list[str] | None = None) -> int:

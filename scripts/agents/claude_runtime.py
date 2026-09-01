@@ -20,11 +20,12 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from execution_engine import spawn_owned_process
+from execution_engine import run_owned_process, spawn_owned_process
 
 
 CONTROL_COMMANDS = frozenset({"agents", "logs", "stop", "kill", "rm", "respawn"})
@@ -80,6 +81,50 @@ def validate_arguments(arguments: Sequence[str]) -> None:
             raise RuntimeProfileError(
                 "--settings is managed by the Claude runtime profile; put "
                 "custom settings in the isolated session or project settings")
+
+
+def _session_arguments(arguments: list[str]) -> tuple[list[str], str]:
+    """Give every launch an exact identity for background-session ownership."""
+    session_id = None
+    index = 0
+    ambiguous = {"-c", "--continue", "--fork-session", "--from-pr",
+                 "--teleport", "--cloud"}
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--":
+            break
+        if argument in ambiguous or any(
+                argument.startswith(name + "=") for name in ambiguous):
+            raise RuntimeProfileError(
+                f"{argument.split('=', 1)[0]} cannot provide an exact managed "
+                "session identity; use --resume <uuid> instead")
+        if argument in {"--session-id", "--resume", "-r"}:
+            if index + 1 >= len(arguments):
+                raise RuntimeProfileError(f"{argument} requires an explicit UUID")
+            candidate = arguments[index + 1]
+            index += 2
+        elif (argument.startswith("--session-id=") or
+              argument.startswith("--resume=")):
+            candidate = argument.split("=", 1)[1]
+            index += 1
+        else:
+            index += 1
+            continue
+        try:
+            parsed = str(uuid.UUID(candidate))
+        except (ValueError, AttributeError) as error:
+            raise RuntimeProfileError(
+                f"{argument.split('=', 1)[0]} must name an exact UUID") from error
+        if parsed != candidate:
+            raise RuntimeProfileError(
+                f"{argument.split('=', 1)[0]} must use canonical UUID form")
+        if session_id is not None and session_id != parsed:
+            raise RuntimeProfileError("managed session identity is ambiguous")
+        session_id = parsed
+    if session_id is None:
+        session_id = str(uuid.uuid4())
+        arguments = ["--session-id", session_id, *arguments]
+    return arguments, session_id
 
 
 def _runtime(deployment: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -392,23 +437,31 @@ def _command(executable: str, arguments: Sequence[str]) -> str | list[str]:
     return f'{prefix} "{rendered}"'
 
 
-def _background_ids(executable: str, environment: Mapping[str, str]) -> set[str] | None:
+def _background_sessions(
+        executable: str, environment: Mapping[str, str]
+        ) -> dict[str, str] | None:
     try:
-        result = subprocess.run(
-            _command(executable, ["agents", "--json"]), env=dict(environment),
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True, timeout=10, check=False)
-        payload = json.loads(result.stdout) if result.returncode == 0 else None
-    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        result = run_owned_process(
+            _command(executable, ["agents", "--json"]), Path.cwd(), 10,
+            env=dict(environment), max_output_bytes=1024 * 1024)
+        payload = (json.loads(result["stdout"])
+                   if result["returncode"] == 0
+                   and not result["output_budget_exhausted"] else None)
+    except (OSError, ValueError, json.JSONDecodeError):
         return None
     if not isinstance(payload, list):
         return None
     return {
-        str(entry.get("id"))
+        str(entry.get("id")): str(entry.get("sessionId"))
         for entry in payload
         if isinstance(entry, dict) and entry.get("kind") == "background"
-        and entry.get("id") is not None
+        and entry.get("id") is not None and entry.get("sessionId") is not None
     }
+
+
+def _background_ids(executable: str, environment: Mapping[str, str]) -> set[str] | None:
+    sessions = _background_sessions(executable, environment)
+    return None if sessions is None else set(sessions)
 
 
 def background_session_ids(
@@ -561,8 +614,7 @@ def _binding_action(binding: object, name: str, *arguments: object) -> bool:
     method = getattr(binding, name, None)
     if not callable(method):
         return False
-    method(*arguments)
-    return True
+    return method(*arguments) is not False
 
 
 def _wait(process: subprocess.Popen[Any], owner: object,
@@ -633,21 +685,25 @@ def launch(deployment: Mapping[str, Any], arguments: Sequence[str], *,
         else:
             environment.pop("CLAUDE_CODE_EFFORT_LEVEL", None)
             values = ["--effort", effort, *values]
+        values, session_id = _session_arguments(values)
         overlay = provider_overlay(deployment, session_dir)
         values = ["--settings", str(overlay), *values]
 
-        before = _background_ids(executable, control_environment)
         process, owner = spawn_owned_process(
             _command(executable, values), env=environment)
         status = _wait(process, owner, gateway)
-        after = _background_ids(executable, control_environment)
+        after = _background_sessions(executable, control_environment)
         if gateway is not None:
-            if before is None or after is None:
-                retained = _binding_action(gateway, "retain", None)
-            else:
-                created = after - before
-                if created:
-                    retained = _binding_action(gateway, "retain", created)
+            owned = ({identifier for identifier, exact in after.items()
+                      if exact == session_id} if after is not None else set())
+            if owned:
+                retained = _binding_action(gateway, "retain", owned)
+                if not retained:
+                    getattr(owner, "force_termination")()
+                    status = RUNTIME_ERROR
+            elif after is None:
+                getattr(owner, "force_termination")()
+                status = RUNTIME_ERROR
         return status
     finally:
         if process is not None and process.poll() is None:
@@ -660,7 +716,10 @@ def launch(deployment: Mapping[str, Any], arguments: Sequence[str], *,
                 if process.poll() is None:
                     process.wait()
         if owner is not None:
-            getattr(owner, "close")()
+            if retained:
+                getattr(owner, "release_descendants")()
+            else:
+                getattr(owner, "close")()
         if gateway is not None and not retained:
             _binding_action(gateway, "close")
 
@@ -809,6 +868,8 @@ def worker_runner(deployment: Mapping[str, Any], gateway_factory: object):
                 "completed": completed, "classification": classification,
                 "steps_used": min(turns, maximum), "returncode": returncode,
                 "response": response, "stderr": stderr,
+                **({"permission_request": pending}
+                   if pending is not None else {}),
             }
         finally:
             _binding_action(binding, "close")

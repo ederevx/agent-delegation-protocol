@@ -23,8 +23,9 @@ import claude_runtime
 from execution_engine import ExecutionEngine, ExecutionError
 from lane_service import LaneClient, LaneError, LaneServer
 from managed_service import (
-    DeploymentError, credential_path, ensure_service, load_deployment, read_credential,
-    remove_credential, write_credential,
+    DeploymentError, credential_path, ensure_service, existing_service,
+    load_deployment, process_identity, read_credential, remove_credential,
+    write_credential,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -706,50 +707,102 @@ def _deployment_manifest(deployment_id: str) -> Path:
 def _deployment_lock(deployment_id: str):
     lock = _config_root() / "locks" / f"{deployment_id}.lock"
     lock.parent.mkdir(parents=True, exist_ok=True)
+    claim = json.dumps({
+        "pid": os.getpid(), "process_identity": process_identity(os.getpid()),
+        "nonce": uuid.uuid4().hex,
+    }, sort_keys=True).encode("ascii") + b"\n"
     for attempt in range(2):
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{deployment_id}.", dir=lock.parent)
         try:
-            lock.mkdir()
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(claim)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.link(temporary, lock)
         except FileExistsError:
-            entries: list[Path] = []
             try:
-                entries = list(lock.iterdir())
-                pid = int((lock / "pid").read_text(encoding="ascii"))
-                os.kill(pid, 0)
-            except (FileNotFoundError, ProcessLookupError, ValueError):
-                if attempt or any(item.name != "pid" for item in entries):
-                    raise ProtocolError("deployment lock is corrupt")
-                (lock / "pid").unlink(missing_ok=True)
-                lock.rmdir()
+                owner = json.loads(lock.read_text(encoding="ascii"))
+                pid = int(owner["pid"])
+                identity = owner["process_identity"]
+                if (not isinstance(identity, str) or
+                        process_identity(pid) == identity):
+                    raise ProtocolError("deployment installation is active")
+            except FileNotFoundError:
+                if attempt:
+                    raise ProtocolError("deployment lock changed concurrently")
                 continue
-            except PermissionError as error:
-                raise ProtocolError("deployment installation is active") from error
-            raise ProtocolError("deployment installation is active")
-        (lock / "pid").write_text(f"{os.getpid()}\n", encoding="ascii")
+            except (ValueError, TypeError, json.JSONDecodeError, KeyError) as error:
+                raise ProtocolError("deployment lock is corrupt") from error
+            lock.unlink(missing_ok=True)
+            continue
+        finally:
+            Path(temporary).unlink(missing_ok=True)
         break
     else:
         raise ProtocolError("could not acquire deployment lock")
     try:
         yield
     finally:
-        (lock / "pid").unlink(missing_ok=True)
-        lock.rmdir()
+        try:
+            if lock.read_bytes() == claim:
+                lock.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def install_deployment(config: Path,
                        launchers: list[list[str]]) -> dict[str, Any]:
     deployment = load_deployment(config)
     with _deployment_lock(deployment["id"]):
+        _preflight_deployment_install(config, launchers)
         destination = (_config_root() / "deployments" /
                        f"{deployment['id']}.json")
         if (destination.is_file() and
                 destination.read_bytes() != config.read_bytes()):
-            service = ensure_service(destination)
-            if service.status().get("clients"):
+            service = existing_service(destination)
+            if (service is not None and
+                    service.status().get("clients")):
                 raise ProtocolError(
                     "cannot replace a deployment with active or retained clients")
-            if not service.stop():
+            if service is not None and not service.stop():
                 raise ProtocolError("managed service refused deployment update")
         return _install_deployment_locked(config, launchers)
+
+
+def _preflight_deployment_install(
+        config: Path, launchers: list[list[str]]) -> None:
+    deployment = load_deployment(config)
+    destination = (_config_root() / "deployments" /
+                   f"{deployment['id']}.json")
+    manifest_path = _deployment_manifest(deployment["id"])
+    prior = _json(manifest_path) if manifest_path.is_file() else None
+    if prior is not None and (not isinstance(prior, dict) or
+                              prior.get("schema_version") != 1):
+        raise ProtocolError("deployment ownership manifest is invalid")
+    plan = [destination]
+    for pair in launchers:
+        source, name = Path(pair[0]), pair[1]
+        if (not source.is_file() or not name or Path(name).name != name or
+                name in {".", ".."}):
+            raise ProtocolError("launcher must name a file and safe destination")
+        plan.append(_bin_root() / name)
+    if len({str(path) for path in plan}) != len(plan):
+        raise ProtocolError("deployment launcher destinations must be unique")
+    old_by_path = {
+        item["path"]: item for item in (prior or {}).get("resources", [])
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    if prior is not None and set(old_by_path) != {str(path) for path in plan}:
+        raise ProtocolError(
+            "deployment launcher set changed; uninstall before reinstalling")
+    for path in plan:
+        if path.exists():
+            record = old_by_path.get(str(path))
+            if (record is None or not path.is_file() or
+                    _digest(path.read_bytes()) != record.get("digest")):
+                raise ProtocolError(
+                    f"refusing to overwrite unowned deployment file: {path}")
 
 
 def _install_deployment_locked(config: Path,
@@ -852,11 +905,10 @@ def _uninstall_deployment_locked(
     credential_present = credential.exists() or credential.is_symlink()
     if not keep_credential and credential_present:
         read_credential(credential)
-    service = ensure_service(path)
-    status = service.status()
-    if status.get("clients"):
+    service = existing_service(path)
+    if service is not None and service.status().get("clients"):
         raise ProtocolError("deployment has active or retained clients")
-    if not service.stop():
+    if service is not None and not service.stop():
         raise ProtocolError("managed service refused to stop")
     removed: list[str] = []
     manifest_value = manifest_path.read_bytes()
@@ -981,11 +1033,12 @@ def main() -> int:
                 with _deployment_lock(deployment["id"]):
                     existing = credential_path(reference)
                     if existing.is_file():
-                        service = ensure_service(path)
-                        if service.status().get("clients"):
+                        service = existing_service(path)
+                        if (service is not None and
+                                service.status().get("clients")):
                             raise ProtocolError(
                                 "credential rotation requires a drained deployment")
-                        if not service.stop():
+                        if service is not None and not service.stop():
                             raise ProtocolError(
                                 "managed service refused credential rotation")
                     write_credential(reference, value)
@@ -995,11 +1048,12 @@ def main() -> int:
                 classification = "credential_ready"
             else:
                 with _deployment_lock(deployment["id"]):
-                    service = ensure_service(path)
-                    if service.status().get("clients"):
+                    service = existing_service(path)
+                    if (service is not None and
+                            service.status().get("clients")):
                         raise ProtocolError(
                             "deployment has active or retained clients")
-                    if not service.stop():
+                    if service is not None and not service.stop():
                         raise ProtocolError("managed service refused to stop")
                     remove_credential(reference)
                 classification = "credential_removed"
@@ -1009,14 +1063,18 @@ def main() -> int:
             return 0
         if args.command == "service":
             path = resolve_deployment(args.deployment)
-            client = ensure_service(path)
             if args.service_command == "stop":
-                if client.status().get("clients"):
+                client = existing_service(path)
+                if client is None:
+                    answer = {"status": "stopped"}
+                elif client.status().get("clients"):
                     raise ProtocolError("deployment has active or retained clients")
-                if not client.stop():
+                elif not client.stop():
                     raise ProtocolError("managed service refused to stop")
-                answer = {"status": "stopped"}
+                else:
+                    answer = {"status": "stopped"}
             else:
+                client = ensure_service(path)
                 answer = client.status()
             print(json.dumps(answer, sort_keys=True))
             return 0

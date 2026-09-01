@@ -34,6 +34,7 @@ def main() -> None:
             "import json, os, sys\n"
             "if 'agents' in sys.argv:\n"
             "    print('[]')\n"
+            "    raise SystemExit(0)\n"
             "else:\n"
             "    open(os.environ['FAKE_RECORD'], 'w').write(json.dumps({\n"
             "      'base': os.environ.get('ANTHROPIC_BASE_URL'),\n"
@@ -121,9 +122,39 @@ def main() -> None:
         assert "lane" not in completed
         status = run(environment, "service", "status", "--deployment", "ci-claude")
         assert status["clients"] == []
+        service_descriptor = (root / "xdg-state" /
+                              "agent-delegation-protocol" / "services" /
+                              "ci-claude" / "service.json")
+        old_pid = json.loads(
+            service_descriptor.read_text(encoding="utf-8"))["pid"]
+        rotated = root / "rotated-credential"
+        rotated.write_text("rotated-provider-secret\n", encoding="utf-8")
+        rotated.chmod(0o600)
+        run(environment, "credential", "set", "--deployment", "ci-claude",
+            "--from-file", str(rotated))
+        assert not service_descriptor.exists()
+        relaunched = subprocess.run(
+            [sys.executable, str(CTL), "launch", "--deployment", "ci-claude",
+             "--", "--print", "after rotation"], env=environment,
+            text=True, capture_output=True, timeout=30, check=False)
+        assert relaunched.returncode == 0, (relaunched.stdout, relaunched.stderr)
+        assert json.loads(service_descriptor.read_text(encoding="utf-8"))["pid"] != old_pid
         installed_launcher = root / "bin" / "ci-claude"
         original_launcher = installed_launcher.read_bytes()
         installed_launcher.write_bytes(original_launcher + b"# modified\n")
+        changed_config = root / "changed-deployment.json"
+        changed = json.loads(CI_DEPLOYMENT.read_text(encoding="utf-8"))
+        changed["inference"]["model"] = "changed-model"
+        changed_config.write_text(json.dumps(changed), encoding="utf-8")
+        refused_install = run(
+            environment, "deployment", "install", "--config",
+            str(changed_config), "--launcher",
+            str(ROOT.parent / "ci-claude" / "ci-claude"), "ci-claude",
+            expected=64)
+        assert refused_install["classification"] == "configuration_error"
+        assert run(
+            environment, "service", "status",
+            "--deployment", "ci-claude")["clients"] == []
         refused = run(
             environment, "deployment", "uninstall", "--deployment",
             "ci-claude", expected=64)
@@ -133,9 +164,16 @@ def main() -> None:
         assert credential.is_file()
         installed_launcher.write_bytes(original_launcher)
         installed_launcher.chmod(0o755)
+        removed_credential = run(
+            environment, "credential", "remove", "--deployment", "ci-claude")
+        assert removed_credential["classification"] == "credential_removed"
+        assert not credential.exists()
+        stopped = run(
+            environment, "service", "stop", "--deployment", "ci-claude")
+        assert stopped["status"] == "stopped"
         removed = run(
             environment, "deployment", "uninstall", "--deployment", "ci-claude")
-        assert removed["credential_removed"] is True
+        assert removed["credential_removed"] is False
         assert not credential.exists()
         print("Managed controller tests: PASS")
 
