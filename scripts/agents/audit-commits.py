@@ -13,7 +13,9 @@ TRAILER = re.compile(r"^(?P<key>[A-Za-z][A-Za-z0-9-]*): (?P<value>.+)$")
 FORBIDDEN = {"Co-authored-by", "Generated-by", "Reviewed-by"}
 AUTHOR = "Edrick Sinsuan <evcsinsuan@gmail.com>"
 SIGNOFF = "Edrick Sinsuan <evcsinsuan@gmail.com>"
-ASSISTANTS = {"Codex:gpt-5", "Claude-Code:claude-opus-5"}
+ASSISTANT_IDENTITY = re.compile(
+    r"^(?:Codex|Claude-Code):[A-Za-z0-9][A-Za-z0-9._-]*$"
+)
 
 
 def git(repo: Path, *args: str) -> str:
@@ -70,8 +72,15 @@ def inspect(repo: Path, oid: str) -> dict[str, Any]:
     if any(key in FORBIDDEN for key in keys):
         issues.append("forbidden-trailer")
     assistants = [value for key, value in trailers if key == "Assisted-by"]
-    if any(value not in ASSISTANTS for value in assistants):
+    if not assistants:
+        issues.append("missing-assistant")
+    if any(not ASSISTANT_IDENTITY.fullmatch(value) for value in assistants):
         issues.append("assistant-identity")
+    if len(assistants) != len(set(assistants)):
+        issues.append("duplicate-assistant")
+    signoffs = [value for key, value in trailers if key == "Signed-off-by"]
+    if len(signoffs) != len(set(signoffs)):
+        issues.append("duplicate-signoff")
     if "Assisted-by" in keys and keys[0:1] != ["Assisted-by"]:
         issues.append("trailer-order")
     if "Signed-off-by" in keys and keys[-1:] != ["Signed-off-by"]:

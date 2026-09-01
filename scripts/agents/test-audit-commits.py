@@ -49,7 +49,7 @@ class AuditCommitsTests(unittest.TestCase):
             root = Path(name)
             git(root, "init", "-q")
             self.commit(root, "First\n\nReason.\n\n"
-                        "Assisted-by: Codex:gpt-5.6-sol\n\n"
+                        "Assisted-by: Codex:gpt 5\n\n"
                         "Signed-off-by: Edrick Sinsuan <evcsinsuan@gmail.com>\n")
             self.commit(root, "Second\n\n"
                         "Assisted-by: Codex:gpt-5\n"
@@ -66,6 +66,30 @@ class AuditCommitsTests(unittest.TestCase):
             encoded = json.dumps(result, sort_keys=True)
             self.assertEqual(encoded, json.dumps(MODULE.audit(root, ["main"]),
                                                   sort_keys=True))
+
+    def test_accepts_actual_claude_model_id(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="audit-commits-test-") as name:
+            root = Path(name)
+            git(root, "init", "-q")
+            self.commit(root, "Claude change\n\nExplain the reason.\n\n"
+                        "Assisted-by: Claude-Code:claude-sonnet-4-20250514\n"
+                        "Signed-off-by: Edrick Sinsuan <evcsinsuan@gmail.com>\n")
+            self.assertEqual(MODULE.audit(root, ["main"])["issue_counts"], {})
+
+    def test_rejects_missing_and_duplicate_assistant_trailers(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="audit-commits-test-") as name:
+            root = Path(name)
+            git(root, "init", "-q")
+            self.commit(root, "Missing assistant\n\nExplain the reason.\n\n"
+                        "Signed-off-by: Edrick Sinsuan <evcsinsuan@gmail.com>\n")
+            self.commit(root, "Duplicate assistant\n\nExplain the reason.\n\n"
+                        "Assisted-by: Claude-Code:claude-opus-5\n"
+                        "Assisted-by: Claude-Code:claude-opus-5\n"
+                        "Signed-off-by: Edrick Sinsuan <evcsinsuan@gmail.com>\n")
+            self.assertEqual(MODULE.audit(root, ["main"])["issue_counts"], {
+                "duplicate-assistant": 1,
+                "missing-assistant": 1,
+            })
 
 
 if __name__ == "__main__":
