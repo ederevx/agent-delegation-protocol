@@ -833,6 +833,9 @@ def _process_identity(pid: int) -> str | None:
                                           ctypes.byref(kernel_time),
                                           ctypes.byref(user_time)):
                 return None
+            exit_stamp = (exited.dwHighDateTime << 32) | exited.dwLowDateTime
+            if exit_stamp:
+                return None
             stamp = (created.dwHighDateTime << 32) | created.dwLowDateTime
             return f"{pid}:{stamp}"
         finally:
@@ -1346,6 +1349,7 @@ class ManagedHandler(BaseHTTPRequestHandler):
 def _atomic_json(path: Path, value: Any, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary_path = type(path)(temporary)
     try:
         if os.name != "nt":
             os.fchmod(descriptor, mode)
@@ -1357,7 +1361,7 @@ def _atomic_json(path: Path, value: Any, mode: int = 0o600) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         if os.name == "nt":
-            _protect_windows_path(Path(temporary))
+            _protect_windows_path(temporary_path)
         os.replace(temporary, path)
     except BaseException:
         if descriptor >= 0:
@@ -1366,17 +1370,18 @@ def _atomic_json(path: Path, value: Any, mode: int = 0o600) -> None:
             except OSError:
                 pass
         try:
-            Path(temporary).unlink(missing_ok=True)
+            temporary_path.unlink(missing_ok=True)
         except OSError:
             pass
         raise
     else:
-        Path(temporary).unlink(missing_ok=True)
+        temporary_path.unlink(missing_ok=True)
 
 
 def _atomic_text(path: Path, value: str, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary_path = type(path)(temporary)
     try:
         if os.name != "nt":
             os.fchmod(descriptor, mode)
@@ -1387,7 +1392,7 @@ def _atomic_text(path: Path, value: str, mode: int = 0o600) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         if os.name == "nt":
-            _protect_windows_path(Path(temporary))
+            _protect_windows_path(temporary_path)
         os.replace(temporary, path)
     except BaseException:
         if descriptor >= 0:
@@ -1396,12 +1401,12 @@ def _atomic_text(path: Path, value: str, mode: int = 0o600) -> None:
             except OSError:
                 pass
         try:
-            Path(temporary).unlink(missing_ok=True)
+            temporary_path.unlink(missing_ok=True)
         except OSError:
             pass
         raise
     else:
-        Path(temporary).unlink(missing_ok=True)
+        temporary_path.unlink(missing_ok=True)
 
 
 def _default_state_dir(deployment_id: str) -> Path:
