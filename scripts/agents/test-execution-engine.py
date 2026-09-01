@@ -8,10 +8,12 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent))
+import execution_engine  # noqa: E402
 from execution_engine import (  # noqa: E402
-    ExecutionEngine, ExecutionError, run_owned_process,
+    ExecutionEngine, ExecutionError, run_owned_process, spawn_owned_process,
 )
 from permission_service import permission_request  # noqa: E402
 
@@ -154,6 +156,91 @@ class ExecutionEngineTests(unittest.TestCase):
         )
         self.assertTrue(result["cancelled"])
         self.assertIsNotNone(result["returncode"])
+
+    def test_owned_process_supports_stdin_and_bounded_output(self) -> None:
+        echoed = run_owned_process(
+            [sys.executable, "-c", "import sys; print(sys.stdin.read())"],
+            self.repo, 5, input_text="worker prompt",
+        )
+        self.assertEqual(echoed["stdout"], "worker prompt\n")
+        self.assertFalse(echoed["output_budget_exhausted"])
+
+        noisy = run_owned_process(
+            [sys.executable, "-c",
+             "import os; os.write(1, b'x' * 1048576)"],
+            self.repo, 5, max_output_bytes=1024,
+        )
+        self.assertTrue(noisy["output_budget_exhausted"])
+        self.assertTrue(noisy["stdout_truncated"])
+        self.assertLessEqual(
+            len(noisy["stdout"].encode()) + len(noisy["stderr"].encode()), 1024,
+        )
+
+    def test_windows_spawn_assigns_job_before_resuming(self) -> None:
+        events = []
+
+        class Process:
+            _handle = 123
+
+            def poll(self):
+                return None
+
+            def kill(self):
+                events.append("kill")
+
+            def wait(self):
+                events.append("wait")
+
+        class Owner:
+            def __init__(self, process):
+                self.process = process
+                events.append("assign")
+
+            def close(self):
+                events.append("close")
+
+        def popen(_argv, **kwargs):
+            events.append(("spawn", kwargs["creationflags"]))
+            return Process()
+
+        with mock.patch.object(execution_engine.os, "name", "nt"), \
+                mock.patch.object(execution_engine.subprocess, "Popen", popen), \
+                mock.patch.object(execution_engine, "_WindowsJobOwner", Owner), \
+                mock.patch.object(execution_engine, "_resume_windows_process",
+                                  side_effect=lambda _process: events.append("resume")):
+            _process, owner = spawn_owned_process(["worker"])
+            owner.close()
+
+        self.assertEqual(events[1:3], ["assign", "resume"])
+        flags = events[0][1]
+        self.assertTrue(flags & 0x00000004)
+        self.assertTrue(flags & 0x00000200)
+        self.assertEqual(events[-1], "close")
+
+    def test_concurrent_cancel_interrupts_owned_process_and_cleans_state(self) -> None:
+        entered = threading.Event()
+
+        def runner(_task, cwd, context):
+            entered.set()
+            return context["run_process"](
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                cwd, 30,
+            )
+
+        engine = ExecutionEngine(self.state, runner)
+        started = engine.start(self.task())
+        step_result = []
+        thread = threading.Thread(
+            target=lambda: step_result.append(engine.step(started["token"])),
+        )
+        thread.start()
+        self.assertTrue(entered.wait(2))
+        cancelled = engine.cancel(started["token"])
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertEqual(step_result[0]["status"], "cancelled")
+        self.assertFalse((self.state / started["token"]).exists())
 
     def test_gc_reclaims_a_provably_dead_owner_lock(self) -> None:
         engine = ExecutionEngine(self.state, lambda *_: {}, state_ttl_seconds=1)
