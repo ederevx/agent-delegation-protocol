@@ -3,18 +3,27 @@
 from __future__ import annotations
 
 import argparse
+import getpass
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 import uuid
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
+import claude_runtime
+from execution_engine import ExecutionEngine, ExecutionError
 from lane_service import LaneClient, LaneError, LaneServer
+from managed_service import (
+    DeploymentError, credential_path, ensure_service, load_deployment, read_credential,
+    remove_credential, write_credential,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CATALOG = ROOT / "agents" / "protocol-v2.json"
@@ -36,6 +45,42 @@ def _json(path: Path) -> Any:
         raise ProtocolError(f"cannot read JSON {path}: {error}") from error
 
 
+def _config_root() -> Path:
+    configured = os.environ.get("DELEGATION_CONFIG_HOME")
+    if configured:
+        return Path(configured).expanduser()
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME",
+                                   str(Path.home() / ".config")))
+    return base / "agent-delegation-protocol"
+
+
+def _state_root() -> Path:
+    configured = os.environ.get("DELEGATION_STATE_HOME")
+    if configured:
+        return Path(configured).expanduser()
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
+    else:
+        base = Path(os.environ.get("XDG_STATE_HOME",
+                                   str(Path.home() / ".local" / "state")))
+    return base / "agent-delegation-protocol"
+
+
+def resolve_deployment(value: str | Path) -> Path:
+    candidate = Path(value).expanduser()
+    if candidate.is_file():
+        return candidate.resolve()
+    if candidate.is_absolute() or len(candidate.parts) > 1:
+        raise ProtocolError(f"deployment does not exist: {candidate}")
+    installed = _config_root() / "deployments" / f"{candidate}.json"
+    if not installed.is_file():
+        raise ProtocolError(f"deployment is not installed: {candidate}")
+    return installed.resolve()
+
+
 def _string_list(value: Any, field: str, *, allow_empty: bool = False) -> list[str]:
     if (not isinstance(value, list) or
             (not value and not allow_empty) or
@@ -50,9 +95,9 @@ def _validate_backend(backend: Any) -> dict[str, Any]:
         raise ProtocolError("backend must be an object")
     required = {
         "id", "name", "kind", "priority", "selector", "availability",
-        "execution", "lane",
+        "execution",
     }
-    if set(backend) != required:
+    if not required <= set(backend) <= required | {"lane"}:
         raise ProtocolError(f"backend {backend.get('id', '?')}: exact v2 fields required")
     backend_id = backend["id"]
     if not isinstance(backend_id, str) or not backend_id:
@@ -83,14 +128,28 @@ def _validate_backend(backend: Any) -> dict[str, Any]:
     execution = backend["execution"]
     if not isinstance(execution, dict):
         raise ProtocolError(f"{backend_id}: invalid execution")
-    allowed_execution = {"delivery", "argv", "timeout_seconds", "max_steps"}
+    allowed_execution = {
+        "delivery", "argv", "deployment", "timeout_seconds", "max_steps",
+    }
     if not set(execution) <= allowed_execution or "delivery" not in execution:
         raise ProtocolError(f"{backend_id}: invalid execution fields")
-    expected = "native" if backend["kind"] == "native" else "json"
-    if execution["delivery"] != expected:
+    delivery = execution["delivery"]
+    if ((backend["kind"] == "native" and delivery != "native") or
+            (backend["kind"] == "oneshot" and delivery != "json") or
+            (backend["kind"] == "session" and
+             delivery not in {"json", "managed"})):
         raise ProtocolError(f"{backend_id}: kind/delivery mismatch")
-    if expected == "json":
+    if delivery == "json":
         _string_list(execution.get("argv"), f"{backend_id}.execution.argv")
+        if "deployment" in execution:
+            raise ProtocolError(f"{backend_id}: json execution cannot name a deployment")
+    elif delivery == "managed":
+        deployment = execution.get("deployment")
+        if (not isinstance(deployment, str) or not deployment or
+                "argv" in execution):
+            raise ProtocolError(f"{backend_id}: invalid managed execution")
+    elif "argv" in execution or "deployment" in execution:
+        raise ProtocolError(f"{backend_id}: invalid native execution")
     if ("timeout_seconds" in execution and
             (not isinstance(execution["timeout_seconds"], int) or
              execution["timeout_seconds"] < 1)):
@@ -99,8 +158,12 @@ def _validate_backend(backend: Any) -> dict[str, Any]:
             (not isinstance(execution["max_steps"], int) or
              not 1 <= execution["max_steps"] <= 10_000)):
         raise ProtocolError(f"{backend_id}: invalid max_steps")
-    lane = backend["lane"]
-    if (not isinstance(lane, dict) or set(lane) != {
+    lane = backend.get("lane")
+    if delivery == "json" and lane is None:
+        raise ProtocolError(f"{backend_id}: json execution requires a scheduler lane")
+    if delivery == "managed" and lane is not None:
+        raise ProtocolError(f"{backend_id}: managed resources belong to the deployment")
+    if lane is not None and (not isinstance(lane, dict) or set(lane) != {
             "id", "max_concurrency", "lease_seconds"} or
             not isinstance(lane["id"], str) or not lane["id"] or
             not isinstance(lane["max_concurrency"], int) or
@@ -156,6 +219,20 @@ def _available(backend: dict[str, Any]) -> bool:
         return False
     if any(not os.environ.get(name) for name in checks["environment"]):
         return False
+    if backend["execution"]["delivery"] == "managed":
+        try:
+            deployment = load_deployment(resolve_deployment(
+                backend["execution"]["deployment"]))
+        except (ProtocolError, DeploymentError):
+            return False
+        profile = deployment["runtime"]["profile"]
+        if profile != "claude-code":
+            return False
+        command = deployment["runtime"]["executable"]["command"]
+        override = deployment["runtime"]["executable"]["environment"]
+        requested = os.environ.get(override) or command
+        if shutil.which(requested) is None and not Path(requested).is_file():
+            return False
     return True
 
 
@@ -413,13 +490,53 @@ def invoke(
         )
 
 
+def invoke_managed(
+    backend: dict[str, Any], envelope: dict[str, Any],
+) -> dict[str, Any]:
+    deployment_path = resolve_deployment(backend["execution"]["deployment"])
+    deployment = load_deployment(deployment_path)
+    service = ensure_service(deployment_path)
+    profile = deployment["runtime"]["profile"]
+    if profile != "claude-code":
+        raise ProtocolError(f"unsupported managed runtime profile: {profile}")
+    runner = claude_runtime.worker_runner(deployment, service)
+    engine = ExecutionEngine(
+        _state_root() / "executions" / deployment["id"], runner,
+    )
+    operation = envelope.get("operation")
+    if operation == "start":
+        return engine.start(envelope.get("task"))
+    token = envelope.get("token")
+    if not isinstance(token, str) or not token:
+        raise ProtocolError("managed session token is required")
+    if operation == "step":
+        return engine.step(token)
+    if operation == "resume":
+        return engine.resume(token, envelope.get("resolution"))
+    if operation == "cancel":
+        return engine.cancel(token)
+    raise ProtocolError(f"unsupported managed operation: {operation}")
+
+
+def invoke_backend(
+    backend: dict[str, Any], envelope: dict[str, Any],
+    lane_client: LaneClient | None,
+) -> dict[str, Any]:
+    if backend["execution"]["delivery"] == "managed":
+        return invoke_managed(backend, envelope)
+    if lane_client is None:
+        raise ProtocolError("external adapter lane is unavailable")
+    return invoke(backend, envelope, lane_client)
+
+
 def execute_session(
     backend: dict[str, Any],
     task: dict[str, Any],
-    client: LaneClient,
+    client: LaneClient | None,
 ) -> dict[str, Any]:
-    answer = invoke(backend, {"schema_version": 2, "operation": "start",
-                              "task": task}, client)
+    answer = invoke_backend(backend, {
+        "schema_version": 2, "operation": "start", "task": task,
+    }, client)
     steps = 0
     maximum = min(task["budgets"]["max_steps"],
                   backend["execution"].get("max_steps", 10_000))
@@ -428,12 +545,14 @@ def execute_session(
         if not isinstance(token, str) or not token:
             raise ProtocolError("session receipt omitted token")
         if steps >= maximum:
-            invoke(backend, {"schema_version": 2, "operation": "cancel",
-                             "token": token}, client)
+            invoke_backend(backend, {
+                "schema_version": 2, "operation": "cancel", "token": token,
+            }, client)
             return receipt("failed", "step_budget_exhausted",
                            backend=backend["id"], task_id=task["id"])
-        answer = invoke(backend, {"schema_version": 2, "operation": "step",
-                                  "token": token}, client)
+        answer = invoke_backend(backend, {
+            "schema_version": 2, "operation": "step", "token": token,
+        }, client)
         steps += 1
     return {**answer, "backend": backend["id"], "task_id": task["id"]}
 
@@ -447,8 +566,9 @@ def run_operation(
         backend = catalog["by_id"].get(request["backend"])
         if backend is None or backend["kind"] != "session" or not _available(backend):
             raise ProtocolError("resume backend is unavailable")
-        client = ensure_lane_service(_lane_state_dir())
-        answer = invoke(backend, {
+        client = (None if backend["execution"]["delivery"] == "managed" else
+                  ensure_lane_service(_lane_state_dir()))
+        answer = invoke_backend(backend, {
             "schema_version": 2,
             "operation": "resume",
             "token": request["token"],
@@ -461,13 +581,14 @@ def run_operation(
         return receipt("native_required", "native_required",
                        backend=backend["id"], runtime=request["runtime"],
                        task_ids=[task["id"] for task in tasks])
-    client = ensure_lane_service(_lane_state_dir())
+    client = (None if backend["execution"]["delivery"] == "managed" else
+              ensure_lane_service(_lane_state_dir()))
     if backend["kind"] == "oneshot":
         envelope = {"schema_version": 2, "operation": operation}
         envelope["tasks" if operation == "batch" else "task"] = (
             tasks if operation == "batch" else tasks[0]
         )
-        answer = invoke(backend, envelope, client)
+        answer = invoke_backend(backend, envelope, client)
         return {**answer, "backend": backend["id"]}
     if operation == "run":
         return execute_session(backend, tasks[0], client)
@@ -475,8 +596,9 @@ def run_operation(
     sessions: list[dict[str, Any]] = []
     completed: list[dict[str, Any]] = []
     for task in tasks:
-        answer = invoke(backend, {"schema_version": 2, "operation": "start",
-                                  "task": task}, client)
+        answer = invoke_backend(backend, {
+            "schema_version": 2, "operation": "start", "task": task,
+        }, client)
         sessions.append({"task": task, "answer": answer, "steps": 0})
     while sessions:
         session = sessions.pop(0)
@@ -491,12 +613,13 @@ def run_operation(
         if not isinstance(token, str) or not token:
             raise ProtocolError("session receipt omitted token")
         if session["steps"] >= maximum:
-            invoke(backend, {"schema_version": 2, "operation": "cancel",
-                             "token": token}, client)
+            invoke_backend(backend, {
+                "schema_version": 2, "operation": "cancel", "token": token,
+            }, client)
             completed.append(receipt("failed", "step_budget_exhausted",
                                      task_id=task["id"]))
             continue
-        session["answer"] = invoke(backend, {
+        session["answer"] = invoke_backend(backend, {
             "schema_version": 2, "operation": "step", "token": token,
         }, client)
         session["steps"] += 1
@@ -518,6 +641,141 @@ def _selector_from_args(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def launch_managed(deployment_value: str, arguments: list[str]) -> int:
+    deployment_path = resolve_deployment(deployment_value)
+    deployment = load_deployment(deployment_path)
+    if deployment["runtime"]["profile"] != "claude-code":
+        raise ProtocolError("deployment runtime profile is not launchable")
+    configured = deployment["runtime"].get("arguments", [])
+    values = [*configured, *arguments]
+    control = bool(values and values[0] in claude_runtime.CONTROL_COMMANDS)
+    if control:
+        return claude_runtime.launch(deployment, arguments)
+    service = ensure_service(deployment_path)
+    binding = service.register(
+        f"launcher:{os.getpid()}:{uuid.uuid4().hex}", pid=os.getpid(),
+        dependency_seconds=deployment["service"]["max_dependency_seconds"],
+    )
+    return claude_runtime.launch(deployment, arguments, gateway=binding)
+
+
+def _bin_root() -> Path:
+    configured = os.environ.get("DELEGATION_BIN_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    if os.name == "nt":
+        return (_config_root() / "bin").resolve()
+    return Path.home() / ".local" / "bin"
+
+
+def _digest(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _atomic_bytes(path: Path, value: bytes, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if os.name != "nt":
+            os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def _deployment_manifest(deployment_id: str) -> Path:
+    return _config_root() / "manifests" / f"{deployment_id}.json"
+
+
+def install_deployment(config: Path,
+                       launchers: list[list[str]]) -> dict[str, Any]:
+    deployment = load_deployment(config)
+    deployment_id = deployment["id"]
+    destination = _config_root() / "deployments" / f"{deployment_id}.json"
+    manifest_path = _deployment_manifest(deployment_id)
+    prior = _json(manifest_path) if manifest_path.is_file() else None
+    if prior is not None and (not isinstance(prior, dict) or
+                              prior.get("schema_version") != 1):
+        raise ProtocolError("deployment ownership manifest is invalid")
+    resources: list[dict[str, str]] = []
+    plan: list[tuple[Path, bytes, int]] = [
+        (destination, config.read_bytes(), 0o600),
+    ]
+    for pair in launchers:
+        source, name = Path(pair[0]), pair[1]
+        if (not source.is_file() or not name or Path(name).name != name or
+                name in {".", ".."}):
+            raise ProtocolError("launcher must name a file and safe destination")
+        plan.append((_bin_root() / name, source.read_bytes(), 0o755))
+    old_by_path = {
+        item["path"]: item for item in (prior or {}).get("resources", [])
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    for path, _value, _mode in plan:
+        if path.exists():
+            record = old_by_path.get(str(path))
+            if (record is None or not path.is_file() or
+                    _digest(path.read_bytes()) != record.get("digest")):
+                raise ProtocolError(f"refusing to overwrite unowned deployment file: {path}")
+    backups = {path: path.read_bytes() for path, _value, _mode in plan if path.exists()}
+    created: list[Path] = []
+    try:
+        for path, value, mode in plan:
+            if not path.exists():
+                created.append(path)
+            _atomic_bytes(path, value, mode)
+            resources.append({"path": str(path), "digest": _digest(value)})
+        manifest = {
+            "schema_version": 1, "deployment_id": deployment_id,
+            "resources": resources,
+        }
+        _atomic_bytes(
+            manifest_path,
+            (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode(),
+        )
+    except BaseException:
+        for path, value in backups.items():
+            _atomic_bytes(path, value, 0o755 if path.parent == _bin_root() else 0o600)
+        for path in created:
+            path.unlink(missing_ok=True)
+        raise
+    return {"deployment_id": deployment_id,
+            "config": str(destination), "resources": resources}
+
+
+def uninstall_deployment(deployment_id: str) -> dict[str, Any]:
+    path = resolve_deployment(deployment_id)
+    deployment = load_deployment(path)
+    service = ensure_service(path)
+    status = service.status()
+    if status.get("clients"):
+        raise ProtocolError("deployment has active or retained clients")
+    service.stop()
+    manifest_path = _deployment_manifest(deployment["id"])
+    manifest = _json(manifest_path)
+    resources = manifest.get("resources") if isinstance(manifest, dict) else None
+    if not isinstance(resources, list):
+        raise ProtocolError("deployment ownership manifest is invalid")
+    removed = []
+    for record in resources:
+        if not isinstance(record, dict):
+            raise ProtocolError("deployment ownership manifest is invalid")
+        resource = Path(record.get("path", ""))
+        if (not resource.is_file() or
+                _digest(resource.read_bytes()) != record.get("digest")):
+            raise ProtocolError(f"refusing to remove modified deployment file: {resource}")
+    for record in resources:
+        resource = Path(record["path"])
+        resource.unlink()
+        removed.append(str(resource))
+    manifest_path.unlink()
+    return {"deployment_id": deployment["id"], "removed": removed}
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
@@ -530,6 +788,37 @@ def _parser() -> argparse.ArgumentParser:
     for name in ("run", "batch", "resume"):
         command = commands.add_parser(name)
         command.add_argument("--request-file", type=Path, required=True)
+    launch = commands.add_parser("launch")
+    launch.add_argument("--deployment", required=True)
+    launch.add_argument("arguments", nargs=argparse.REMAINDER)
+    deployment = commands.add_parser("deployment")
+    deployment_commands = deployment.add_subparsers(
+        dest="deployment_command", required=True)
+    deployment_validate = deployment_commands.add_parser("validate")
+    deployment_validate.add_argument("--config", type=Path, required=True)
+    deployment_install = deployment_commands.add_parser("install")
+    deployment_install.add_argument("--config", type=Path, required=True)
+    deployment_install.add_argument(
+        "--launcher", nargs=2, action="append", default=[],
+        metavar=("SOURCE", "DESTINATION"),
+    )
+    deployment_status = deployment_commands.add_parser("status")
+    deployment_status.add_argument("--deployment", required=True)
+    deployment_uninstall = deployment_commands.add_parser("uninstall")
+    deployment_uninstall.add_argument("--deployment", required=True)
+    credential = commands.add_parser("credential")
+    credential_commands = credential.add_subparsers(
+        dest="credential_command", required=True)
+    for name in ("set", "status", "remove"):
+        item = credential_commands.add_parser(name)
+        item.add_argument("--deployment", required=True)
+    credential_set = credential_commands.choices["set"]
+    credential_set.add_argument("--from-file", type=Path)
+    service = commands.add_parser("service")
+    service_commands = service.add_subparsers(dest="service_command", required=True)
+    for name in ("ensure", "status", "stop"):
+        item = service_commands.add_parser(name)
+        item.add_argument("--deployment", required=True)
     lane = commands.add_parser("lane")
     lane_commands = lane.add_subparsers(dest="lane_command", required=True)
     serve = lane_commands.add_parser("serve")
@@ -544,6 +833,67 @@ def _parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = _parser().parse_args()
     try:
+        if args.command == "launch":
+            arguments = args.arguments[1:] if args.arguments[:1] == ["--"] else args.arguments
+            return launch_managed(args.deployment, arguments)
+        if args.command == "deployment":
+            if args.deployment_command == "validate":
+                deployment = load_deployment(args.config)
+                answer = receipt("completed", "deployment_valid",
+                                 deployment_id=deployment["id"])
+            elif args.deployment_command == "install":
+                result = install_deployment(args.config, args.launcher)
+                answer = receipt("completed", "deployment_installed", **result)
+            elif args.deployment_command == "status":
+                path = resolve_deployment(args.deployment)
+                deployment = load_deployment(path)
+                answer = receipt("completed", "deployment_installed",
+                                 deployment_id=deployment["id"], path=str(path))
+            else:
+                result = uninstall_deployment(args.deployment)
+                answer = receipt("completed", "deployment_uninstalled", **result)
+            print(json.dumps(answer, sort_keys=True))
+            return 0
+        if args.command == "credential":
+            path = resolve_deployment(args.deployment)
+            deployment = load_deployment(path)
+            reference = deployment["credential"]["reference"]
+            if args.credential_command == "set":
+                if args.from_file:
+                    value = read_credential(args.from_file)
+                elif sys.stdin.isatty():
+                    value = getpass.getpass("Provider credential: ")
+                else:
+                    value = sys.stdin.read().rstrip("\n")
+                write_credential(reference, value)
+                classification = "credential_stored"
+            elif args.credential_command == "status":
+                read_credential(credential_path(reference))
+                classification = "credential_ready"
+            else:
+                service = ensure_service(path)
+                if service.status().get("clients"):
+                    raise ProtocolError("deployment has active or retained clients")
+                service.stop()
+                remove_credential(reference)
+                classification = "credential_removed"
+            print(json.dumps(receipt("completed", classification,
+                                     deployment_id=deployment["id"]),
+                             sort_keys=True))
+            return 0
+        if args.command == "service":
+            path = resolve_deployment(args.deployment)
+            client = ensure_service(path)
+            if args.service_command == "stop":
+                if client.status().get("clients"):
+                    raise ProtocolError("deployment has active or retained clients")
+                if not client.stop():
+                    raise ProtocolError("managed service refused to stop")
+                answer = {"status": "stopped"}
+            else:
+                answer = client.status()
+            print(json.dumps(answer, sort_keys=True))
+            return 0
         if args.command == "lane":
             if args.lane_command == "serve":
                 LaneServer(args.state_dir).serve_forever(

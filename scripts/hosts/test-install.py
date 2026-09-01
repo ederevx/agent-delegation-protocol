@@ -16,10 +16,15 @@ def fixture(root: Path) -> Path:
         "claude/hooks/delegation-enforcer.py", "codex/AGENTS.md",
         "codex/agents/bulk_worker.toml", "codex/agents/balanced-worker.toml",
         "codex/hooks/delegation-enforcer.py", "scripts/agents/delegationctl.py",
-        "scripts/agents/lane_service.py",
+        "scripts/agents/lane_service.py", "scripts/agents/managed_service.py",
+        "scripts/agents/execution_engine.py",
+        "scripts/agents/permission_service.py",
+        "scripts/agents/claude_runtime.py",
         "scripts/hosts/hook_adapter.py", "scripts/hosts/lifecycle.py",
         "scripts/agents/delegation-classifier.py",
         "agents/protocol-v2.json",
+        "agents/contracts/deployment-v1.schema.json",
+        "agents/contracts/permission-v1.schema.json",
     ):
         target = repo / path
         target.parent.mkdir(parents=True, exist_ok=True)

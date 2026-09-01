@@ -3,58 +3,25 @@
   "backends": [
     {
       "id": "ci-claude-session-v2",
-      "name": "CI Claude session adapter",
+      "name": "CI Claude managed session",
       "kind": "session",
       "priority": 100,
       "selector": {
         "runtimes": ["codex", "claude"],
-        "platforms": ["linux", "darwin"],
+        "platforms": ["linux", "darwin", "windows"],
         "modes": ["read", "edit"],
         "workspaces": ["shared", "isolated"],
         "functions": ["audit", "edit", "batch"]
       },
       "availability": {
-        "commands": ["ci-claude-worker"],
+        "commands": ["claude"],
         "environment": []
       },
       "execution": {
-        "delivery": "json",
-        "argv": ["ci-claude-worker", "--v2"],
+        "delivery": "managed",
+        "deployment": "ci-claude",
         "timeout_seconds": 7200,
         "max_steps": 1000
-      },
-      "lane": {
-        "id": "ci-claude-session-v2",
-        "max_concurrency": 1,
-        "lease_seconds": 30
-      }
-    },
-    {
-      "id": "ci-claude-session-windows-v2",
-      "name": "CI Claude Windows session adapter",
-      "kind": "session",
-      "priority": 100,
-      "selector": {
-        "runtimes": ["codex", "claude"],
-        "platforms": ["windows"],
-        "modes": ["read", "edit"],
-        "workspaces": ["shared", "isolated"],
-        "functions": ["audit", "edit", "batch"]
-      },
-      "availability": {
-        "commands": ["python", "ci-claude-worker.py"],
-        "environment": []
-      },
-      "execution": {
-        "delivery": "json",
-        "argv": ["python", "ci-claude-worker.py", "--v2"],
-        "timeout_seconds": 7200,
-        "max_steps": 1000
-      },
-      "lane": {
-        "id": "ci-claude-session-v2",
-        "max_concurrency": 1,
-        "lease_seconds": 30
       }
     }
   ]

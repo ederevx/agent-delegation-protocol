@@ -17,20 +17,21 @@ frontier parent
 lifecycle-visible host worker
       │ run, batch, or resume
       ▼
-delegationctl ─── selected adapter ─── execution backend
-      │                 │
-      └──── authenticated TCP loopback lane ────┘
+delegationctl ─── selected adapter or managed execution engine
+      │
+      └── managed service ── authenticated gateway ── provider API
+                  └──────── named FIFO resource ──────┘
       │
       ▼
 structured receipt → parent integration and validation
 ```
 
-`delegationctl` validates catalogs and requests, selects an available backend
-by capability and numeric priority, and owns every provider-operation lease.
-The lane service is role-blind and scheduler-owned. It provides FIFO admission,
-bounded capacity, inherited-lease reentry, heartbeats, expiry after a client
-crash, idle shutdown, and authenticated one-use loopback requests. Permission
-work happens after the provider lease is released.
+`delegationctl` validates catalogs and requests and selects an available
+backend by capability and numeric priority. External JSON adapters use the
+role-blind scheduler lane. Managed deployments instead route interactive and
+delegated traffic through one authenticated gateway. That service owns FIFO
+admission for each actual provider request; runtimes receive only scoped dummy
+credentials and never receive or reenter a shared lane lease.
 
 An adapter may translate the common contract into deployment-specific API or
 model settings. Those details stay in the integration; they do not enter host
@@ -40,7 +41,7 @@ policy, the core catalog schema, or task manifests.
 
 ```text
 agents/                 v2 catalog, schemas, worker source and profiles
-scripts/agents/         delegationctl, lane service, adapter and tests
+scripts/agents/         controller, managed runtime, lane, adapter and tests
 scripts/hosts/          shared installer, settings and lifecycle engine
 scripts/codex/          thin Codex install/uninstall wrappers
 scripts/claude/         thin Claude install/uninstall wrappers
@@ -59,9 +60,11 @@ release modes.
 [`agents/protocol-v2.json`](agents/protocol-v2.json) contains native backends,
 route membership, and optional catalog includes. Each backend declares exactly
 one kind (`native`, `oneshot`, or `session`), selector capabilities,
-availability checks, JSON or native delivery, numeric priority, and a named
-scheduler lane. Route order has no selection meaning; highest priority wins
-after filtering, with backend ID as the deterministic tie break.
+availability checks, JSON, managed, or native delivery, and numeric priority.
+External JSON adapters declare a scheduler lane; managed backends name a
+separately installed deployment whose resource configuration is authoritative.
+Route order has no selection meaning; highest priority wins after filtering,
+with backend ID as the deterministic tie break.
 
 `run` and `batch` accept `--request-file`. Their top-level selector fields are:
 
@@ -89,19 +92,19 @@ Schemas live in [`agents/contracts`](agents/contracts). A runnable neutral
 adapter and conformance suite demonstrate one-shot, session, batch, pause,
 resume, cancellation, and lane behavior.
 
-## Optional external integration
+## Managed deployments
 
-[`integrations/ci-claude/catalog.json`](integrations/ci-claude/catalog.json)
-adds an available `ci-claude-worker --v2` session adapter without placing its
-provider, model, inference, or credential policy in this repository's core.
-When that command is unavailable, selector filtering leaves the applicable
-native backend as the fallback before launch.
+[`agents/contracts/deployment-v1.schema.json`](agents/contracts/deployment-v1.schema.json)
+defines provider-neutral gateway, resource, runtime, inference, execution, and
+credential-reference policy. Secret values live only in the protected protocol
+credential store. The managed service owns singleton election, client
+registration, credential injection, restart-safe background bindings, request
+admission, streaming, and idle retirement.
 
-The external deployment must use the lane descriptor passed in
-`DELEGATION_LANE_ENDPOINT`. A delegated request reenters the scheduler's lease;
-interactive traffic obtains its own lease from the same service. The proxy
-retains credential, session registration, capacity, and forwarding duties, but
-does not own a second FIFO or concurrency controller.
+The ci-claude catalog fragment names the `ci-claude` deployment. Its external
+repository contains only deployment JSON and launch shims; all operational
+management lives here. When the deployment or runtime executable is absent,
+selection falls back to the applicable native backend before launch.
 
 ## Install one host
 
@@ -125,6 +128,20 @@ mutation. It uses a lock, atomic settings writes, rollback, and a complete
 ownership manifest. Uninstall removes only unchanged protocol-owned resources
 and preserves unrelated configuration.
 
+Install a deployment and its launch shim, then enroll its credential without
+placing the secret on an argument vector:
+
+```bash
+delegationctl deployment install --config deployment.json \
+  --launcher ci-claude.sh ci-claude
+delegationctl credential set --deployment ci-claude
+delegationctl launch --deployment ci-claude -- --help
+```
+
+`deployment uninstall` and `credential remove` refuse active or retained
+clients. Installation and removal use digest-owned manifests and never remove
+modified or unrelated files.
+
 Codex uses `session_release`; a completed worker never creates an impossible
 dismissal warning. Claude uses `automatic_release`; a foreground result clears
 its lifecycle automatically. The hook classifier gates parent mutation and
@@ -137,6 +154,11 @@ These tests use disposable homes and do not change live configuration:
 ```bash
 python3 scripts/agents/render-bulk-workers.py --check
 python3 scripts/agents/test-protocol-v2.py
+python3 scripts/agents/test-managed-service.py
+python3 scripts/agents/test-managed-controller.py
+python3 scripts/agents/test-claude-runtime.py
+python3 scripts/agents/test-execution-engine.py
+python3 scripts/agents/test-permission-service.py
 python3 integrations/ci-claude/test-integration.py
 python3 scripts/hosts/test-install.py
 python3 scripts/hosts/test-lifecycle.py
@@ -145,8 +167,8 @@ python3 scripts/claude/test-protocol.py
 python3 scripts/agents/test-audit-commits.py
 ```
 
-The lane suite binds a local TCP port. Run it in an environment that permits
-loopback sockets.
+The lane, gateway, and managed-controller suites bind local TCP ports. Run them
+in an environment that permits loopback sockets.
 
 ## v1 boundary and rollback
 
@@ -156,6 +178,7 @@ This overhaul uses:
 ```text
 backup/pre-v2-overhaul-main-20260831
 backup/pre-v2-overhaul-ci-agents-20260831
+backup/pre-managed-runtime-v3-20260901
 ```
 
 An occupied non-v2 manifest is refused with instructions to run the uninstaller
