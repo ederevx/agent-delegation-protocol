@@ -21,6 +21,7 @@ from managed_service import (  # noqa: E402
     CONTROL_PREFIX,
     ClientRegistry,
     DeploymentError,
+    GatewayAuditLog,
     ServiceClient,
     credential_path,
     ensure_service,
@@ -188,6 +189,22 @@ class ManagedServiceTests(unittest.TestCase):
     def test_protected_credential_store(self):
         self.assertEqual(read_credential(credential_path("fake")),
                          "provider-secret")
+        with self.assertRaisesRegex(DeploymentError, "raw token"):
+            write_credential("assignment", "CHEAPESTINFERENCE_API_KEY=secret")
+        with self.assertRaisesRegex(DeploymentError, "raw token"):
+            write_credential("generic", "MY_PROVIDER_TOKEN=secret")
+        with self.assertRaisesRegex(DeploymentError, "raw token"):
+            write_credential("bare-name", "TOKEN=secret")
+        write_credential("padded", "opaque-token==")
+        self.assertEqual(read_credential(credential_path("padded")),
+                         "opaque-token==")
+        assignment = credential_path("read-assignment")
+        for value in ("CHEAPESTINFERENCE_API_KEY=secret",
+                      "MY_PROVIDER_SECRET=secret"):
+            assignment.write_text(value + "\n", encoding="utf-8")
+            os.chmod(assignment, 0o600)
+            with self.assertRaisesRegex(DeploymentError, "raw token"):
+                read_credential(assignment)
         os.chmod(credential_path("fake"), 0o644)
         with self.assertRaisesRegex(DeploymentError, "broader than 0600"):
             read_credential(credential_path("fake"))
@@ -223,6 +240,24 @@ class ManagedServiceTests(unittest.TestCase):
         self.assertTrue(registry.drain())
         self.assertIsNone(registry.register("late", os.getpid(), 0))
 
+    def test_gateway_audit_rotation_is_private_and_bounded(self):
+        path = self.root / "audit" / "gateway-audit.jsonl"
+        audit = GatewayAuditLog(path, maximum_bytes=300)
+        for index in range(12):
+            audit.append("test-provider", "/v1/messages",
+                         upstream_status=200 + index,
+                         elapsed_seconds=index / 1000)
+        self.assertTrue(audit.rotated_path.exists())
+        for candidate in (path, audit.rotated_path):
+            self.assertLessEqual(candidate.stat().st_size, 300)
+            if os.name != "nt":
+                self.assertEqual(candidate.stat().st_mode & 0o077, 0)
+            for line in candidate.read_text(encoding="utf-8").splitlines():
+                record = json.loads(line)
+                self.assertEqual(record["deployment_id"], "test-provider")
+                self.assertIn("elapsed_ms", record)
+                self.assertNotIn("error_class", record)
+
     def test_singleton_binding_auth_header_filtering_and_fifo(self):
         answers: list[ServiceClient] = []
         threads = [threading.Thread(
@@ -252,7 +287,8 @@ class ManagedServiceTests(unittest.TestCase):
         def request():
             client = http.client.HTTPConnection(binding.client.host,
                                                 binding.client.port, timeout=10)
-            client.request("POST", "/v1/messages", body=b"payload", headers={
+            client.request("POST", "/v1/messages?query-secret=hidden",
+                           body=b"payload", headers={
                 "Authorization": "Bearer " + binding.token,
                 "X-Api-Key": "attacker", "Content-Type": "application/json"})
             answer = client.getresponse()
@@ -268,6 +304,22 @@ class ManagedServiceTests(unittest.TestCase):
         self.assertTrue(all(item["authorization"] == "Bearer provider-secret"
                             and item["api_key"] is None
                             for item in self.upstream.received))
+        audit_text = (self.state / "gateway-audit.jsonl").read_text(
+            encoding="utf-8")
+        admin_token = (self.state / "service.secret").read_text(
+            encoding="ascii").strip()
+        for secret in ("provider-secret", binding.token, admin_token,
+                       "payload", "query-secret", "hidden", "attacker"):
+            self.assertNotIn(secret, audit_text)
+        audit_records = [json.loads(line) for line in audit_text.splitlines()]
+        self.assertEqual(len(audit_records), 2)
+        for record in audit_records:
+            self.assertEqual(record["deployment_id"], "test-provider")
+            self.assertEqual(record["path"], "/v1/messages")
+            self.assertEqual(record["upstream_status"], 200)
+            self.assertIsInstance(record["elapsed_ms"], (int, float))
+            self.assertGreaterEqual(record["elapsed_ms"], 0)
+            self.assertTrue(record["timestamp"].endswith("Z"))
         connection = http.client.HTTPConnection(
             binding.client.host, binding.client.port, timeout=10)
         connection.request(
@@ -279,6 +331,38 @@ class ManagedServiceTests(unittest.TestCase):
         connection.close()
         binding.close()
         self.assertTrue(answers[0].stop())
+
+    def test_gateway_audit_records_sanitized_transport_error(self):
+        unused = socket.socket()
+        unused.bind(("127.0.0.1", 0))
+        port = unused.getsockname()[1]
+        unused.close()
+        value = deployment(f"http://127.0.0.1:{port}")
+        path = self.root / "unavailable-deployment.json"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        state = self.root / "unavailable-state"
+        client = ensure_service(path, state)
+        descriptor = json.loads((state / "service.json").read_text())
+        self.service_pids.add(descriptor["pid"])
+        binding = client.register("unavailable-client")
+        connection = http.client.HTTPConnection(client.host, client.port, timeout=10)
+        connection.request("POST", "/v1/messages", body=b"private-body",
+                           headers={"Authorization": "Bearer " + binding.token})
+        response = connection.getresponse()
+        self.assertEqual((response.status, response.read()),
+                         (502, b"upstream unavailable\n"))
+        connection.close()
+        record = json.loads(
+            (state / "gateway-audit.jsonl").read_text(encoding="utf-8"))
+        self.assertEqual(record["error_class"], "transport_error")
+        self.assertNotIn("upstream_status", record)
+        self.assertEqual(record["path"], "/v1/messages")
+        self.assertIn("elapsed_ms", record)
+        raw = (state / "gateway-audit.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn("private-body", raw)
+        self.assertNotIn(binding.token, raw)
+        binding.close()
+        self.assertTrue(client.stop())
 
     @unittest.skipIf(os.name == "nt", "SIGKILL restart exercised on POSIX")
     def test_retained_binding_survives_service_restart_on_preferred_port(self):

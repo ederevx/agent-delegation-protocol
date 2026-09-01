@@ -22,6 +22,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PureWindowsPath
 from typing import Any, Iterator
@@ -32,6 +33,7 @@ from lane_service import Lane
 DEPLOYMENT_VERSION = 1
 MAX_CONTROL_BYTES = 256 * 1024
 MAX_HEADER_BYTES = 64 * 1024
+MAX_AUDIT_BYTES = 1024 * 1024
 CONTROL_PREFIX = "/_delegation/v1/"
 HOP_BY_HOP = frozenset({
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -69,6 +71,101 @@ WINDOWS_RESERVED_PARTS = {
 
 class DeploymentError(ValueError):
     """A stable managed-deployment validation error."""
+
+
+def _validate_credential_value(value: Any) -> str:
+    """Require a raw, single-line credential rather than an env assignment."""
+    if not isinstance(value, str) or not value or "\n" in value or "\r" in value:
+        raise DeploymentError("credential must contain exactly one non-empty line")
+    name, separator, _remainder = value.partition("=")
+    normalized = name.removeprefix("export ").strip()
+    folded = normalized.casefold()
+    secret_suffixes = (
+        "_api_key", "_access_key", "_token", "_secret", "_password",
+        "_credential",
+    )
+    secret_names = {
+        "api_key", "access_key", "token", "secret", "password", "credential",
+    }
+    likely_name = (
+        normalized and normalized[0].isalpha() and
+        all(character.isalnum() or character == "_" for character in normalized)
+    )
+    if (separator and likely_name and
+            (folded in secret_names or folded.endswith(secret_suffixes))):
+        raise DeploymentError(
+            "credential must be the raw token, not an environment assignment")
+    return value
+
+
+class GatewayAuditLog:
+    """Owner-private, bounded JSON-lines audit metadata for gateway requests."""
+
+    def __init__(self, path: Path, maximum_bytes: int = MAX_AUDIT_BYTES) -> None:
+        if maximum_bytes < 1:
+            raise ValueError("maximum_bytes must be positive")
+        self.path = path
+        self.maximum_bytes = maximum_bytes
+        self.rotated_path = path.with_name(path.name + ".1")
+        self.lock = threading.Lock()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_private_file()
+
+    def _ensure_private_file(self) -> None:
+        descriptor = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+                             0o600)
+        os.close(descriptor)
+        if os.name == "nt":
+            _protect_windows_path(self.path)
+        else:
+            os.chmod(self.path, 0o600)
+
+    def append(self, deployment_id: str, path: str, *,
+               upstream_status: int | None = None,
+               error_class: str | None = None,
+               elapsed_seconds: float) -> None:
+        if (upstream_status is None) == (error_class is None):
+            raise ValueError("audit outcome must have exactly one result")
+        value: dict[str, Any] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(
+                timespec="milliseconds").replace("+00:00", "Z"),
+            "deployment_id": deployment_id,
+            "path": path,
+            "elapsed_ms": round(max(0.0, elapsed_seconds) * 1000, 3),
+        }
+        if upstream_status is not None:
+            value["upstream_status"] = upstream_status
+        else:
+            value["error_class"] = error_class
+        line = (json.dumps(value, sort_keys=True, separators=(",", ":")) +
+                "\n").encode("utf-8")
+        if len(line) > self.maximum_bytes:
+            raise ValueError("audit record exceeds maximum size")
+        with self.lock:
+            try:
+                size = self.path.stat().st_size
+            except FileNotFoundError:
+                self._ensure_private_file()
+                size = 0
+            if size + len(line) > self.maximum_bytes:
+                try:
+                    os.replace(self.path, self.rotated_path)
+                except FileNotFoundError:
+                    pass
+                self._ensure_private_file()
+                if os.name == "nt" and self.rotated_path.exists():
+                    _protect_windows_path(self.rotated_path)
+                elif self.rotated_path.exists():
+                    os.chmod(self.rotated_path, 0o600)
+            descriptor = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+                                 0o600)
+            try:
+                with os.fdopen(descriptor, "ab") as handle:
+                    descriptor = -1
+                    handle.write(line)
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
 
 
 @dataclass(frozen=True)
@@ -590,8 +687,7 @@ def _protect_windows_path(path: Path) -> None:
 
 def write_credential(reference: str, value: str,
                      credential_root: str | Path | None = None) -> Path:
-    if not isinstance(value, str) or not value or "\n" in value or "\r" in value:
-        raise DeploymentError("credential must contain exactly one non-empty line")
+    value = _validate_credential_value(value)
     path = credential_path(reference, credential_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     if os.name == "nt":
@@ -670,9 +766,7 @@ def read_credential(reference: str | Path) -> str:
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-    if not value or "\n" in value or "\r" in value:
-        raise DeploymentError("credential must contain exactly one non-empty line")
-    return value
+    return _validate_credential_value(value)
 
 
 def _process_identity(pid: int) -> str | None:
@@ -941,7 +1035,8 @@ class ManagedHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
     def __init__(self, address: tuple[str, int], deployment: dict[str, Any],
-                 credential: str, admin_token: str, registry_file: Path):
+                 credential: str, admin_token: str, registry_file: Path,
+                 audit_file: Path):
         self.deployment = deployment
         self.upstream = parse_upstream(deployment["gateway"]["upstream"])
         self.credential = credential
@@ -950,6 +1045,7 @@ class ManagedHTTPServer(ThreadingHTTPServer):
         self.clients = ClientRegistry(service["max_clients"],
                                       service["max_dependency_seconds"],
                                       registry_file)
+        self.audit = GatewayAuditLog(audit_file)
         self.resources = {
             item["id"]: (Lane(item["capacity"], item["lease_seconds"]), item)
             for item in deployment["resources"]
@@ -1141,10 +1237,18 @@ class ManagedHandler(BaseHTTPRequestHandler):
         gateway = self.server.deployment["gateway"]
         lane, resource = self.server.resources[gateway["resource"]]
         owner = f"{self.server.deployment['id']}:{record.registration_id}"
+        started = time.monotonic()
+        audit_path = urlsplit(target).path
+        upstream_status: int | None = None
+        error_class: str | None = None
         try:
             token = lane.acquire(owner, timeout_seconds=resource["wait_seconds"])
         except TimeoutError:
             self._error(429, b"provider resource remained busy\n")
+            self.server.audit.append(
+                self.server.deployment["id"], audit_path,
+                error_class="resource_timeout",
+                elapsed_seconds=time.monotonic() - started)
             return
         stop = threading.Event()
         lost = threading.Event()
@@ -1158,14 +1262,25 @@ class ManagedHandler(BaseHTTPRequestHandler):
         heartbeat = threading.Thread(target=renew, daemon=True)
         heartbeat.start()
         try:
-            self._forward_acquired(body, target, lost)
+            upstream_status, error_class = self._forward_acquired(
+                body, target, lost)
         finally:
             stop.set()
             heartbeat.join(timeout=1)
             lane.release(owner, token)
+            if upstream_status is not None:
+                self.server.audit.append(
+                    self.server.deployment["id"], audit_path,
+                    upstream_status=upstream_status,
+                    elapsed_seconds=time.monotonic() - started)
+            else:
+                self.server.audit.append(
+                    self.server.deployment["id"], audit_path,
+                    error_class=error_class or "gateway_error",
+                    elapsed_seconds=time.monotonic() - started)
 
     def _forward_acquired(self, body: bytes, target: str,
-                          lost: threading.Event) -> None:
+                          lost: threading.Event) -> tuple[int | None, str | None]:
         upstream = self.server.upstream
         timeout = self.server.deployment["gateway"]["timeout_seconds"]
         if upstream.scheme == "https":
@@ -1191,7 +1306,7 @@ class ManagedHandler(BaseHTTPRequestHandler):
         except (OSError, http.client.HTTPException):
             self._error(502, b"upstream unavailable\n")
             connection.close()
-            return
+            return None, "transport_error"
         try:
             self.send_response(response.status, response.reason)
             for key, value in response.getheaders():
@@ -1209,6 +1324,7 @@ class ManagedHandler(BaseHTTPRequestHandler):
             pass
         finally:
             connection.close()
+        return response.status, None
 
 
 def _atomic_json(path: Path, value: Any, mode: int = 0o600) -> None:
@@ -1311,13 +1427,15 @@ def serve(deployment_path: str | Path, state_dir: str | Path | None = None) -> i
     try:
         server = ManagedHTTPServer(("127.0.0.1", preferred), deployment,
                                    credential, admin_token,
-                                   state / "registrations.json")
+                                   state / "registrations.json",
+                                   state / "gateway-audit.jsonl")
     except OSError:
         if preferred and _has_retained_registry(state):
             raise DeploymentError(
                 "preferred gateway port is unavailable for retained clients")
         server = ManagedHTTPServer(("127.0.0.1", 0), deployment, credential,
-                                   admin_token, state / "registrations.json")
+                                   admin_token, state / "registrations.json",
+                                   state / "gateway-audit.jsonl")
     _atomic_text(secret_file, admin_token + "\n")
     port_file = state / "service.port"
     _atomic_text(port_file, f"{server.server_address[1]}\n")
