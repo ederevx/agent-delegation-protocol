@@ -93,7 +93,7 @@ def deployment(upstream: str) -> dict:
             "allowed_paths": ["/v1/messages"],
             "credential_header": "Authorization",
             "credential_scheme": "Bearer", "resource": "provider",
-            "timeout_seconds": 10,
+            "timeout_seconds": 10, "max_request_bytes": 1048576,
         },
         "resources": [{"id": "provider", "capacity": 1,
                        "lease_seconds": 2, "wait_seconds": 5}],
@@ -218,6 +218,11 @@ class ManagedServiceTests(unittest.TestCase):
         self.assertTrue(remove_credential("rotated"))
         self.assertFalse(remove_credential("rotated"))
 
+    def test_draining_registry_rejects_late_registration(self):
+        registry = ClientRegistry(2, 60, self.root / "drain-registry.json")
+        self.assertTrue(registry.drain())
+        self.assertIsNone(registry.register("late", os.getpid(), 0))
+
     def test_singleton_binding_auth_header_filtering_and_fifo(self):
         answers: list[ServiceClient] = []
         threads = [threading.Thread(
@@ -263,6 +268,15 @@ class ManagedServiceTests(unittest.TestCase):
         self.assertTrue(all(item["authorization"] == "Bearer provider-secret"
                             and item["api_key"] is None
                             for item in self.upstream.received))
+        connection = http.client.HTTPConnection(
+            binding.client.host, binding.client.port, timeout=10)
+        connection.request(
+            "POST", "/v1/messages", body=b"x" * (1024 * 1024 + 1),
+            headers={"Authorization": "Bearer " + binding.token})
+        response = connection.getresponse()
+        self.assertEqual(response.status, 413)
+        response.read()
+        connection.close()
         binding.close()
         self.assertTrue(answers[0].stop())
 
@@ -293,24 +307,28 @@ class ManagedServiceTests(unittest.TestCase):
         state_file = self.root / "registry.json"
         registry = ClientRegistry(8, 60, state_file)
         first = registry.register("first", os.getpid(), 0)
-        wildcard = registry.register("wildcard", os.getpid(), 0)
+        second = registry.register("second", os.getpid(), 0)
+        waiting = registry.register("waiting", os.getpid(), 0)
         self.assertIsNotNone(first)
-        self.assertIsNotNone(wildcard)
-        assert first is not None and wildcard is not None
+        self.assertIsNotNone(second)
+        self.assertIsNotNone(waiting)
+        assert first is not None and second is not None and waiting is not None
         self.assertTrue(registry.retain(first.registration_id, {"bg-1", "bg-2"}))
-        self.assertTrue(registry.retain(wildcard.registration_id))
+        self.assertTrue(registry.retain(second.registration_id, {"bg-3"}))
+        self.assertFalse(registry.retain(waiting.registration_id, {"bg-3"}))
+        self.assertTrue(registry.unregister(waiting.registration_id))
 
         restarted = ClientRegistry(8, 60, state_file)
         restarted.reconcile_retained({"bg-2", "bg-3"})
         by_client = {item["client_id"]: item for item in restarted.snapshot()}
         self.assertEqual(by_client["first"]["retained_session_ids"], ["bg-2"])
-        self.assertEqual(by_client["wildcard"]["retained_session_ids"],
-                         ["bg-2", "bg-3"])
+        self.assertEqual(by_client["second"]["retained_session_ids"],
+                         ["bg-3"])
 
         restarted.reconcile_retained({"bg-3"})
         by_client = {item["client_id"]: item for item in restarted.snapshot()}
         self.assertNotIn("first", by_client)
-        self.assertEqual(by_client["wildcard"]["retained_session_ids"], ["bg-3"])
+        self.assertEqual(by_client["second"]["retained_session_ids"], ["bg-3"])
         restarted.reconcile_retained(set())
         self.assertEqual(restarted.snapshot(), [])
 

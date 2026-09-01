@@ -128,6 +128,21 @@ class ExecutionEngineTests(unittest.TestCase):
         })
         self.assertEqual(completed["status"], "completed")
 
+    def test_runner_may_report_an_already_persisted_permission(self) -> None:
+        def runner(_task, _cwd, context):
+            request = permission_request(
+                context["token"], "shell", {"command": "make test"},
+                "run validation")
+            context["permissions"].issue(request)
+            return {"completed": False, "classification": "permission_requested",
+                    "permission_request": request}
+
+        engine = ExecutionEngine(self.state, runner)
+        started = engine.start(self.task(max_steps=1))
+        paused = engine.step(started["token"])
+        self.assertEqual(paused["status"], "permission_required")
+        self.assertEqual(paused["request"]["operation"], "shell")
+
     def test_step_output_and_step_budgets_are_enforced(self) -> None:
         yielding = ExecutionEngine(self.state, lambda *_: {
             "classification": "success", "completed": False,
@@ -176,6 +191,11 @@ class ExecutionEngineTests(unittest.TestCase):
         self.assertLessEqual(
             len(noisy["stdout"].encode()) + len(noisy["stderr"].encode()), 1024,
         )
+        blocked_stdin = run_owned_process(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            self.repo, 0.2, input_text="x" * (1024 * 1024),
+        )
+        self.assertTrue(blocked_stdin["timed_out"])
 
     def test_windows_spawn_assigns_job_before_resuming(self) -> None:
         events = []

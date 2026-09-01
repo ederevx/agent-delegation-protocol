@@ -310,16 +310,23 @@ def run_owned_process(argv: list[str], cwd: Path, timeout_seconds: float,
                                     ("stderr", process.stderr))]
     for reader in readers:
         reader.start()
-    if input_text is not None:
-        assert process.stdin is not None
+
+    def feed_input() -> None:
+        assert process.stdin is not None and input_text is not None
         try:
             process.stdin.write(input_text.encode("utf-8"))
-        except BrokenPipeError:
+        except (BrokenPipeError, OSError):
             pass
-        try:
-            process.stdin.close()
-        except BrokenPipeError:
-            pass
+        finally:
+            try:
+                process.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
+
+    writer = None
+    if input_text is not None:
+        writer = threading.Thread(target=feed_input, daemon=True)
+        writer.start()
     timed_out = cancelled = termination_requested = False
     try:
         while process.poll() is None:
@@ -353,6 +360,8 @@ def run_owned_process(argv: list[str], cwd: Path, timeout_seconds: float,
         raise
     finally:
         owner.close()
+        if writer is not None:
+            writer.join()
         for reader in readers:
             reader.join()
         if process.stdout is not None:
@@ -687,7 +696,12 @@ class ExecutionEngine:
                 request = validate_request(request)
                 if request["session_id"] != token:
                     raise ExecutionError("runner permission request session_id does not match")
-                permissions.issue(request)
+                pending = permissions.pending()
+                if pending is None:
+                    permissions.issue(request)
+                elif pending != request:
+                    raise ExecutionError(
+                        "runner permission request differs from pending state")
                 self._save(path, state)
                 return receipt("permission_required", "parent_decision_required",
                                token=token, request=request,

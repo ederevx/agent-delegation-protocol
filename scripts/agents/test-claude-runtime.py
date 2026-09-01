@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 from permission_service import PermissionStore
@@ -23,10 +24,15 @@ SPEC.loader.exec_module(runtime)
 
 
 STUB = r'''#!/usr/bin/env python3
-import json, os, pathlib, sys
+import fcntl, json, os, pathlib, sys, time
 agents = pathlib.Path(os.environ["STUB_AGENTS"])
 if sys.argv[1:3] == ["agents", "--json"]:
-    print(agents.read_text() if agents.exists() else "[]")
+    if os.environ.get("STUB_AGENTS_INVALID"):
+        print("not-json")
+        raise SystemExit(0)
+    with open(str(agents) + ".lock", "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        print(agents.read_text() if agents.exists() else "[]")
     raise SystemExit(0)
 record = pathlib.Path(os.environ["STUB_RECORD"])
 record.write_text(json.dumps({
@@ -40,7 +46,15 @@ record.write_text(json.dumps({
     "api_key": os.environ.get("ANTHROPIC_API_KEY"),
 }))
 if os.environ.get("STUB_BACKGROUND"):
-    agents.write_text('[{"id":"bg-1","kind":"background"}]')
+    time.sleep(float(os.environ.get("STUB_DELAY", "0")))
+    index = sys.argv.index("--session-id")
+    session_id = sys.argv[index + 1]
+    with open(str(agents) + ".lock", "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        rows = json.loads(agents.read_text()) if agents.exists() else []
+        rows.append({"id": session_id[:8], "sessionId": session_id,
+                     "kind": "background"})
+        agents.write_text(json.dumps(rows))
 raise SystemExit(int(os.environ.get("STUB_EXIT", "0")))
 '''
 
@@ -61,6 +75,13 @@ class Binding:
 
     def close(self) -> None:
         self.actions.append("close")
+
+
+class RejectingBinding(Binding):
+    def retain(self, session_ids=None) -> bool:
+        owned = None if session_ids is None else tuple(sorted(session_ids))
+        self.actions.append(("retain", owned))
+        return False
 
 
 def deployment(executable: Path, session: Path) -> dict:
@@ -164,29 +185,91 @@ def test_background_handoff_retains_binding(root: Path) -> None:
     status = runtime.launch(deployment(stub, session), [], gateway=binding,
                             environ=environment)
     require(status == 0, f"background launch returned {status}")
-    require(binding.actions == [("retain", ("bg-1",))],
+    seen = json.loads(record.read_text(encoding="utf-8"))
+    session_id = seen["argv"][seen["argv"].index("--session-id") + 1]
+    require(binding.actions == [("retain", (session_id[:8],))],
             f"background binding was not retained: {binding.actions}")
     identifiers = runtime.background_session_ids(
         deployment(stub, session), environ=environment)
-    require(identifiers == {"bg-1"}, f"background probe failed: {identifiers}")
+    require(identifiers == {session_id[:8]},
+            f"background probe failed: {identifiers}")
 
 
-def test_unknown_background_roster_retains_wildcard(root: Path) -> None:
+def test_unknown_background_roster_fails_closed(root: Path) -> None:
     stub = root / "claude-unknown-background"
     stub.write_text(STUB, encoding="utf-8")
     stub.chmod(0o755)
     session = root / "unknown-background-session"
     record = root / "unknown-background.json"
     agents = root / "unknown-background-agents.json"
-    agents.write_text("not-json", encoding="utf-8")
+    agents.write_text("[]", encoding="utf-8")
     binding = Binding()
+    environment = dict(os.environ, STUB_RECORD=str(record),
+                       STUB_AGENTS=str(agents), STUB_BACKGROUND="1",
+                       STUB_AGENTS_INVALID="1")
+    status = runtime.launch(deployment(stub, session), [], gateway=binding,
+                            environ=environment)
+    require(status == runtime.RUNTIME_ERROR,
+            f"unknown-roster launch returned {status}")
+    require(binding.actions == ["close"],
+            f"unknown roster did not fail closed: {binding.actions}")
+
+
+def test_rejected_background_handoff_closes_binding(root: Path) -> None:
+    stub = root / "claude-rejected-background"
+    stub.write_text(STUB, encoding="utf-8")
+    stub.chmod(0o755)
+    session = root / "rejected-background-session"
+    record = root / "rejected-background.json"
+    agents = root / "rejected-background-agents.json"
+    agents.write_text("[]", encoding="utf-8")
+    binding = RejectingBinding()
     environment = dict(os.environ, STUB_RECORD=str(record),
                        STUB_AGENTS=str(agents), STUB_BACKGROUND="1")
     status = runtime.launch(deployment(stub, session), [], gateway=binding,
                             environ=environment)
-    require(status == 0, f"unknown-roster launch returned {status}")
-    require(binding.actions == [("retain", None)],
-            f"unknown roster did not fail closed: {binding.actions}")
+    require(status == runtime.RUNTIME_ERROR,
+            f"rejected background launch returned {status}")
+    seen = json.loads(record.read_text(encoding="utf-8"))
+    session_id = seen["argv"][seen["argv"].index("--session-id") + 1]
+    require(binding.actions == [("retain", (session_id[:8],)), "close"],
+            f"rejected retention leaked its binding: {binding.actions}")
+
+
+def test_concurrent_background_handoffs_keep_exact_ownership(root: Path) -> None:
+    stub = root / "claude-concurrent-background"
+    stub.write_text(STUB, encoding="utf-8")
+    stub.chmod(0o755)
+    agents = root / "concurrent-background-agents.json"
+    agents.write_text("[]", encoding="utf-8")
+    bindings = [Binding(), Binding()]
+    records = [root / "concurrent-0.json", root / "concurrent-1.json"]
+    statuses: list[int] = []
+
+    def launch_one(index: int) -> None:
+        environment = dict(
+            os.environ, STUB_RECORD=str(records[index]),
+            STUB_AGENTS=str(agents), STUB_BACKGROUND="1",
+            STUB_DELAY=str(0.05 * index))
+        statuses.append(runtime.launch(
+            deployment(stub, root / "concurrent-session"), [],
+            gateway=bindings[index], environ=environment))
+
+    threads = [threading.Thread(target=launch_one, args=(index,))
+               for index in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    require(statuses == [0, 0], f"concurrent statuses failed: {statuses}")
+    retained = [binding.actions[0][1] for binding in bindings]
+    require(all(len(ids) == 1 for ids in retained),
+            f"handoffs were not singular: {retained}")
+    require(retained[0] != retained[1],
+            f"handoffs overlapped ownership: {retained}")
+    require(all(binding.actions == [("retain", retained[index])]
+                for index, binding in enumerate(bindings)),
+            f"unexpected concurrent lifecycle: {[b.actions for b in bindings]}")
 
 
 def test_launch_setup_failure_closes_binding(root: Path) -> None:
@@ -239,6 +322,13 @@ def test_validation(root: Path) -> None:
         pass
     else:
         raise AssertionError("unknown Windows placeholder was accepted")
+    try:
+        runtime._session_arguments([
+            "--resume", "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"])
+    except runtime.RuntimeProfileError:
+        pass
+    else:
+        raise AssertionError("non-canonical managed session UUID was accepted")
 
 
 def test_worker_runner_uses_bounded_headless_contract(root: Path) -> None:
@@ -351,7 +441,9 @@ def main() -> int:
         tests = [test_launch_environment_and_arguments,
                  test_control_passthrough_needs_no_gateway,
                  test_background_handoff_retains_binding,
-                 test_unknown_background_roster_retains_wildcard,
+                 test_unknown_background_roster_fails_closed,
+                 test_rejected_background_handoff_closes_binding,
+                 test_concurrent_background_handoffs_keep_exact_ownership,
                  test_launch_setup_failure_closes_binding,
                  test_validation,
                  test_worker_runner_uses_bounded_headless_contract,
