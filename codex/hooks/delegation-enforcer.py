@@ -522,8 +522,9 @@ def handle_stop(event: dict[str, Any]) -> None:
 
     held = outstanding_workers(session)
     if held:
-        # Only hard-block once this build has been observed to expose a dismissal tool.
-        # Otherwise there is no way to satisfy the requirement, so warn instead of wedging.
+        # Only enforce once this build has been observed to expose a dismissal tool.
+        # Otherwise there is no actionable way to satisfy the requirement; warning
+        # about an unavailable primitive only creates permanent, false lifecycle debt.
         # Block at most once either way: a worker the runtime already tore down can
         # never be dismissed, so an unconditional block would loop the stop hook forever.
         nagged = marker(session, "dismissal-nagged")
@@ -534,15 +535,6 @@ def handle_stop(event: dict[str, Any]) -> None:
             emit({"decision": "block", "reason": f"{CONTINUATION_PREFIX} {dismissal_reason(held, 'before ending the turn')}"})
             return
 
-        # Warnings carry no way to discharge the debt, so surface each one once and
-        # then stay quiet; the spawn gate keeps holding the obligation regardless.
-        unreported = [w for w in held if not (nagged_dir(session) / w).exists()]
-        if not unreported:
-            return
-        for name in unreported:
-            touch(nagged_dir(session) / name)
-        emit({"systemMessage": dismissal_reason(
-            unreported, "when this build exposes a stop/dismiss call; otherwise they are released at session end")})
         return
 
     if state:
