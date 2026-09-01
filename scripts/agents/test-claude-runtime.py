@@ -54,8 +54,9 @@ class Binding:
     def heartbeat(self) -> None:
         self.actions.append("heartbeat")
 
-    def retain(self) -> None:
-        self.actions.append("retain")
+    def retain(self, session_ids=None) -> None:
+        owned = None if session_ids is None else tuple(sorted(session_ids))
+        self.actions.append(("retain", owned))
 
     def close(self) -> None:
         self.actions.append("close")
@@ -162,11 +163,50 @@ def test_background_handoff_retains_binding(root: Path) -> None:
     status = runtime.launch(deployment(stub, session), [], gateway=binding,
                             environ=environment)
     require(status == 0, f"background launch returned {status}")
-    require(binding.actions == ["retain"],
+    require(binding.actions == [("retain", ("bg-1",))],
             f"background binding was not retained: {binding.actions}")
     identifiers = runtime.background_session_ids(
         deployment(stub, session), environ=environment)
     require(identifiers == {"bg-1"}, f"background probe failed: {identifiers}")
+
+
+def test_unknown_background_roster_retains_wildcard(root: Path) -> None:
+    stub = root / "claude-unknown-background"
+    stub.write_text(STUB, encoding="utf-8")
+    stub.chmod(0o755)
+    session = root / "unknown-background-session"
+    record = root / "unknown-background.json"
+    agents = root / "unknown-background-agents.json"
+    agents.write_text("not-json", encoding="utf-8")
+    binding = Binding()
+    environment = dict(os.environ, STUB_RECORD=str(record),
+                       STUB_AGENTS=str(agents), STUB_BACKGROUND="1")
+    status = runtime.launch(deployment(stub, session), [], gateway=binding,
+                            environ=environment)
+    require(status == 0, f"unknown-roster launch returned {status}")
+    require(binding.actions == [("retain", None)],
+            f"unknown roster did not fail closed: {binding.actions}")
+
+
+def test_launch_setup_failure_closes_binding(root: Path) -> None:
+    stub = root / "claude-setup-failure"
+    stub.write_text(STUB, encoding="utf-8")
+    stub.chmod(0o755)
+    agents = root / "setup-failure-agents.json"
+    agents.write_text("[]", encoding="utf-8")
+    binding = Binding()
+    configured = deployment(stub, root / "setup-failure-session")
+    configured["inference"]["interactive_effort"] = "invalid"
+    environment = dict(os.environ, STUB_RECORD=str(root / "unused.json"),
+                       STUB_AGENTS=str(agents))
+    try:
+        runtime.launch(configured, [], gateway=binding, environ=environment)
+    except runtime.RuntimeProfileError:
+        pass
+    else:
+        raise AssertionError("invalid effort was accepted")
+    require(binding.actions == ["close"],
+            f"setup failure leaked binding: {binding.actions}")
 
 
 def test_validation(root: Path) -> None:
@@ -236,6 +276,18 @@ def test_worker_runner_uses_bounded_headless_contract(root: Path) -> None:
     try:
         outcome = runtime.worker_runner(
             configured, lambda _task, _context: binding)(task, root, context)
+        bad_binding = Binding()
+        configured["inference"]["thinking"] = {"type": "invalid"}
+        try:
+            runtime.worker_runner(
+                configured, lambda _task, _context: bad_binding)(
+                    task, root, context)
+        except runtime.RuntimeProfileError:
+            pass
+        else:
+            raise AssertionError("invalid worker thinking mode was accepted")
+        require(bad_binding.actions == ["close"],
+                f"worker setup failure leaked binding: {bad_binding.actions}")
     finally:
         if old is None:
             os.environ.pop("WORKER_RECORD", None)
@@ -289,6 +341,8 @@ def main() -> int:
         tests = [test_launch_environment_and_arguments,
                  test_control_passthrough_needs_no_gateway,
                  test_background_handoff_retains_binding,
+                 test_unknown_background_roster_retains_wildcard,
+                 test_launch_setup_failure_closes_binding,
                  test_validation,
                  test_worker_runner_uses_bounded_headless_contract,
                  test_permission_codec_issues_normalized_parent_request]

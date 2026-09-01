@@ -89,6 +89,7 @@ class Registration:
     dependency_until: float
     last_seen: float
     retained: bool = False
+    retained_session_ids: set[str] | None = None
 
 
 def _exact(value: Any, required: set[str], optional: set[str], where: str) -> None:
@@ -760,9 +761,18 @@ class ClientRegistry:
                           pid <= 1)) or
                         (identity is not None and not isinstance(identity, str))):
                     continue
+                retained = value.get("retained") is True
+                session_ids = value.get("retained_session_ids")
+                if session_ids is not None and (
+                        not isinstance(session_ids, list) or
+                        any(not isinstance(item, str) or not item
+                            for item in session_ids) or
+                        len(session_ids) != len(set(session_ids))):
+                    continue
                 record = Registration(
                     registration_id, client_id, token, pid, identity, 0,
-                    float(value.get("last_seen", 0)), value.get("retained") is True)
+                    float(value.get("last_seen", 0)), retained,
+                    set(session_ids) if retained and session_ids is not None else None)
             except (KeyError, TypeError, ValueError):
                 continue
             if (not record.registration_id or not record.client_id or not record.token
@@ -777,7 +787,10 @@ class ClientRegistry:
                    "client_id": record.client_id, "token": record.token,
                    "pid": record.pid,
                    "process_identity": record.process_identity,
-                   "last_seen": record.last_seen, "retained": record.retained}
+                   "last_seen": record.last_seen, "retained": record.retained,
+                   "retained_session_ids": (
+                       sorted(record.retained_session_ids)
+                       if record.retained_session_ids is not None else None)}
                   for record in self.records.values()]
         _atomic_json(self.state_file, values)
 
@@ -833,24 +846,43 @@ class ClientRegistry:
             self._persist()
             return True
 
-    def retain(self, registration_id: str) -> bool:
+    def retain(self, registration_id: str,
+               session_ids: set[str] | None = None) -> bool:
         with self.lock:
             record = self.records.get(registration_id)
             if record is None:
                 return False
             record.retained = True
+            record.retained_session_ids = (
+                set(session_ids) if session_ids is not None else None)
             record.pid = None
             record.process_identity = None
             self._persist()
             return True
 
-    def discard_retained(self) -> None:
+    def reconcile_retained(self, session_ids: set[str]) -> None:
+        """Reconcile retained registrations against a successful roster probe."""
         with self.lock:
-            retained = [key for key, record in self.records.items()
-                        if record.retained]
-            for key in retained:
-                self.records.pop(key, None)
-            if retained:
+            changed = False
+            for key, record in list(self.records.items()):
+                if not record.retained:
+                    continue
+                owned = record.retained_session_ids
+                if owned is None:
+                    if session_ids:
+                        record.retained_session_ids = set(session_ids)
+                    else:
+                        self.records.pop(key, None)
+                    changed = True
+                    continue
+                remaining = owned & session_ids
+                if not remaining:
+                    self.records.pop(key, None)
+                    changed = True
+                elif remaining != owned:
+                    record.retained_session_ids = remaining
+                    changed = True
+            if changed:
                 self._persist()
 
     def unregister(self, registration_id: str) -> bool:
@@ -866,7 +898,10 @@ class ClientRegistry:
             return [{"registration_id": record.registration_id,
                      "client_id": record.client_id, "pid": record.pid,
                      "dependency": record.dependency_until > time.time(),
-                     "retained": record.retained}
+                     "retained": record.retained,
+                     "retained_session_ids": (
+                         sorted(record.retained_session_ids)
+                         if record.retained_session_ids is not None else None)}
                     for record in self.records.values()]
 
     def active(self) -> bool:
@@ -1000,7 +1035,17 @@ class ManagedHandler(BaseHTTPRequestHandler):
                 return
             ok = self.server.clients.heartbeat(registration_id, seconds)
         elif operation == "retain":
-            ok = self.server.clients.retain(registration_id)
+            session_ids = value.get("retained_session_ids")
+            if session_ids is not None and (
+                    not isinstance(session_ids, list) or not session_ids or
+                    any(not isinstance(item, str) or not item
+                        for item in session_ids) or
+                    len(session_ids) != len(set(session_ids))):
+                self._error(400, b"invalid retained_session_ids\n")
+                return
+            ok = self.server.clients.retain(
+                registration_id,
+                set(session_ids) if session_ids is not None else None)
         else:
             ok = self.server.clients.unregister(registration_id)
         self._json(200, {"status": "completed" if ok else "not_found"})
@@ -1259,8 +1304,8 @@ def serve(deployment_path: str | Path, state_dir: str | Path | None = None) -> i
             now = time.monotonic()
             if now >= next_probe:
                 sessions = _retained_sessions(deployment)
-                if sessions == set():
-                    server.clients.discard_retained()
+                if sessions is not None:
+                    server.clients.reconcile_retained(sessions)
                 next_probe = now + deployment["service"]["retention_probe_seconds"]
             if server.idle():
                 threading.Thread(target=server.shutdown, daemon=True).start()
@@ -1372,11 +1417,13 @@ class GatewayBinding:
         })
         return answer["status"] == "completed"
 
-    def retain(self, dependency_seconds: int | None = None) -> bool:
+    def retain(self, session_ids: set[str] | None = None,
+               dependency_seconds: int | None = None) -> bool:
         del dependency_seconds
-        answer = self.client._control("retain", {
-            "registration_id": self.registration_id,
-        })
+        payload: dict[str, Any] = {"registration_id": self.registration_id}
+        if session_ids is not None:
+            payload["retained_session_ids"] = sorted(session_ids)
+        answer = self.client._control("retain", payload)
         return answer["status"] == "completed"
 
     def close(self) -> None:
