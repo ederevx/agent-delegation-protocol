@@ -5,7 +5,7 @@
       "id": "ci-claude-session-v2",
       "name": "CI Claude managed session",
       "kind": "session",
-      "priority": 100,
+      "tier": "low",
       "selector": {
         "runtimes": ["codex", "claude"],
         "platforms": ["linux", "darwin", "windows"],

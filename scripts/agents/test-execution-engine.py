@@ -54,7 +54,8 @@ class ExecutionEngineTests(unittest.TestCase):
             "repo": str(self.repo), "prompt": "perform bounded work",
             "allowed_paths": ["src"] if allowed is None else allowed,
             "workspace": workspace, "validation": validation or [],
-            "budgets": {"timeout_seconds": 30, "max_output_bytes": max_output,
+            "budgets": {"timeout_seconds": 30, "max_input_tokens": None,
+                        "max_output_tokens": None, "max_output_bytes": max_output,
                         "max_steps": max_steps},
         }
 

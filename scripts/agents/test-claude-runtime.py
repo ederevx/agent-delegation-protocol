@@ -349,7 +349,8 @@ def test_worker_runner_uses_bounded_headless_contract(root: Path) -> None:
         "schema_version": 2, "id": "task-1", "mode": "read",
         "repo": str(root), "prompt": "audit this", "allowed_paths": [],
         "workspace": "shared", "validation": [],
-        "budgets": {"timeout_seconds": 30, "max_output_bytes": 100000,
+        "budgets": {"timeout_seconds": 30, "max_input_tokens": None,
+                    "max_output_tokens": None, "max_output_bytes": 100000,
                     "max_steps": 5},
     }
     permissions = PermissionStore(root / "permissions.json", "session-1")

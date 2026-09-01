@@ -6,6 +6,10 @@ validation. Route large-text triage and compression to `bulk-worker`. Route
 other bounded work that needs moderate reasoning to `balanced-worker` when the
 task has three or more distinct steps or reaches 25% of the active context
 window. Keep work that needs parent-level judgment with the parent.
+Token envelopes descend with model seniority: the terminal low tier is
+policy-unbounded, balanced is 200,000 input/16,000 output, and the parent is
+100,000/8,000. Provider/model physical limits still apply. Never cross tiers
+to evade an envelope.
 
 For independent workstreams, use concurrent workers when capacity permits.
 Give each worker exclusive ownership, acceptance criteria, validation commands,
@@ -17,7 +21,8 @@ authority.
 Workers create file-backed v2 requests. Each task contains exactly
 `schema_version: 2`, `id`, `mode`, `repo`, `prompt`, `allowed_paths`,
 `workspace`, `validation`, and `budgets`; budgets contain positive timeout,
-output, and step limits. Resolve the active Claude config directory and invoke
+input-token, output-token, output-byte, and step limits. Resolve the active
+Claude config directory and invoke
 its absolute `.delegation-protocol/delegationctl` launcher on POSIX or
 `.delegation-protocol/delegationctl.cmd` on Windows. Use `run`, `batch`, or
 `resume`, always with `--request-file`.

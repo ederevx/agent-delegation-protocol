@@ -29,7 +29,7 @@ def main() -> None:
     assert "provider" not in backend and "model" not in backend
     assert backend["selector"]["functions"] == ["compress"]
     request = {
-        "route": "bulk", "runtime": "codex", "platform": "linux",
+        "route": "bulk", "tier": "low", "runtime": "codex", "platform": "linux",
         "mode": "read", "workspace": "shared", "function": "audit",
     }
     with mock.patch.object(CTL, "_available", return_value=True):

@@ -10,10 +10,11 @@
   "$defs": {
     "selector": {
       "type": "object",
-      "required": ["schema_version", "route", "runtime", "platform", "function", "mode", "workspace"],
+  "required": ["schema_version", "route", "tier", "runtime", "platform", "function", "mode", "workspace"],
       "properties": {
         "schema_version": {"const": 2},
-        "route": {"type": "string", "minLength": 1},
+    "route": {"type": "string", "minLength": 1},
+    "tier": {"enum": ["low", "balanced", "parent"]},
         "runtime": {"type": "string", "minLength": 1},
         "platform": {"type": "string", "minLength": 1},
         "function": {"type": "string", "minLength": 1},
