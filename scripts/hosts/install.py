@@ -79,6 +79,7 @@ def resources(repo: Path, home: Path, host: str) -> list[tuple[Path, Path, str]]
         # The old mux-scheduler/catalog links are intentionally not migrated.
         (repo / "scripts/agents/delegationctl.py", state / "delegationctl.py", "link"),
         (repo / "agents/protocol-v2.json", state / "protocol-v2.json", "link"),
+        (repo / "scripts/agents/delegation-classifier.py", state / "delegation-classifier.py", "link"),
         (repo / "scripts/hosts/hook_adapter.py", state / "hook_adapter.py", "link"),
         (repo / "scripts/hosts/lifecycle.py", state / "lifecycle.py", "link"),
     ]
@@ -120,21 +121,25 @@ def prepare(repo: Path, home: Path, host: str, manifest: dict[str, Any] | None) 
         if not source.exists():
             raise SystemExit(f"missing protocol source: {source}")
         validate_destination(source, destination, kind, str(destination) in owned)
-    for directory in directories:
-        directory.mkdir(parents=True, exist_ok=True)
     return result
 
 
 def install(repo: Path, home: Path, host: str) -> None:
     state = home / ".delegation-protocol"
-    state.mkdir(parents=True, exist_ok=True)
     manifest_path = state / "manifest.json"
     previous = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else None
+    if previous and previous.get("version") != VERSION:
+        raise SystemExit("v1 installation detected; use the tagged v1 uninstaller before installing protocol v2")
+    # Complete source/path preflight before creating any home or state entry.
+    prepare(repo, home, host, previous)
+    state.mkdir(parents=True, exist_ok=True)
     lock = acquire_lock(state)
     changed: list[tuple[Path, bytes | None, bool]] = []
     settings_path = home / ("settings.json" if host == "claude" else "hooks.json")
     prior_settings = settings_path.read_bytes() if settings_path.exists() else None
     try:
+        for directory in ((home / "rules" if host == "claude" else home), home / "agents", home / "hooks", state):
+            directory.mkdir(parents=True, exist_ok=True)
         items = prepare(repo, home, host, previous)
         for source, destination, kind in items:
             if kind == "link":

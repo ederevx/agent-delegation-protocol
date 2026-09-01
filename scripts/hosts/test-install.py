@@ -17,6 +17,7 @@ def fixture(root: Path) -> Path:
         "codex/agents/bulk_worker.toml", "codex/agents/balanced-worker.toml",
         "codex/hooks/delegation-enforcer.py", "scripts/agents/delegationctl.py",
         "scripts/hosts/hook_adapter.py", "scripts/hosts/lifecycle.py",
+        "scripts/agents/delegation-classifier.py",
         "agents/protocol-v2.json",
     ):
         target = repo / path
