@@ -1,0 +1,33 @@
+{
+  "schema_version": 2,
+  "backends": [
+    {
+      "id": "ci-claude-session-v2",
+      "name": "CI Claude session adapter",
+      "kind": "session",
+      "priority": 100,
+      "selector": {
+        "runtimes": ["codex", "claude"],
+        "platforms": ["linux", "darwin", "windows"],
+        "modes": ["read", "edit"],
+        "workspaces": ["shared", "isolated"],
+        "functions": ["audit", "edit", "batch"]
+      },
+      "availability": {
+        "commands": ["ci-claude-worker"],
+        "environment": []
+      },
+      "execution": {
+        "delivery": "json",
+        "argv": ["ci-claude-worker", "--v2"],
+        "timeout_seconds": 7200,
+        "max_steps": 1000
+      },
+      "lane": {
+        "id": "ci-claude-session-v2",
+        "max_concurrency": 1,
+        "lease_seconds": 900
+      }
+    }
+  ]
+}

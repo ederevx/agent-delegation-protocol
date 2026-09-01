@@ -34,6 +34,6 @@
       "lane": {"id": "native-claude", "max_concurrency": 4, "lease_seconds": 120}
     }
   ],
-  "routes": {"bulk": ["native-codex-bulk", "native-claude-bulk"]},
-  "includes": []
+  "routes": {"bulk": ["ci-claude-session-v2", "native-codex-bulk", "native-claude-bulk"]},
+  "includes": ["../integrations/ci-claude/catalog.json"]
 }
