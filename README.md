@@ -72,7 +72,9 @@ availability checks, JSON, managed, or native delivery, and an exact cost tier.
 External JSON adapters declare a scheduler lane; managed backends name a
 separately installed deployment whose resource configuration is authoritative.
 Route order defines fallback order after exact-tier filtering. Selection never
-crosses tiers.
+crosses tiers. The default `bulk` route keeps the configured external-first
+cost order; `native-bulk` provides an explicit local-only handoff for tasks
+whose source material must not leave the native host boundary.
 
 `run` and `batch` accept `--request-file`. Their top-level selector fields are:
 
