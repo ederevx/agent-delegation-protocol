@@ -20,7 +20,10 @@ def run(host: str, event: str, payload: dict) -> dict | None:
     except Exception: state = {"requires": False, "active": [], "finished": [], "mode": "session_release"}
     lifecycle = LifecycleState(state.get("mode", "session_release"), set(state.get("active", [])), set(state.get("finished", [])))
     if event == "prompt":
-        classifier = importlib.util.spec_from_file_location("protocol_classifier", Path(__file__).resolve().parents[1] / "agents" / "delegation-classifier.py")
+        candidates = (state_dir / "delegation-classifier.py",
+                      Path(__file__).resolve().parents[1] / "agents" / "delegation-classifier.py")
+        classifier = next((importlib.util.spec_from_file_location("protocol_classifier", p)
+                           for p in candidates if p.exists()), None)
         if classifier and classifier.loader:
             module = importlib.util.module_from_spec(classifier); classifier.loader.exec_module(module)
             decision = module.classify(str(payload.get("prompt", "")), state, context_env=("CLAUDE_CODE_MAX_CONTEXT_TOKENS",) if host == "claude" else ("CODEX_MAX_CONTEXT_TOKENS",))
