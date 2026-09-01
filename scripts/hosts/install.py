@@ -99,12 +99,12 @@ def resources(repo: Path, home: Path, host: str) -> list[tuple[Path, Path, str]]
     ]
 
 
-def validate_destination(source: Path, destination: Path, kind: str, owned: bool) -> None:
+def validate_destination(source: Path, destination: Path, kind: str, owned: bool, recorded: str | None = None) -> None:
     if not destination.exists() and not destination.is_symlink():
         return
     if kind == "link" and same_link(destination, source):
         return
-    if kind == "copy" and destination.is_file() and owned:
+    if kind == "copy" and destination.is_file() and owned and recorded and digest(destination) == recorded:
         return
     raise SystemExit(f"refusing to overwrite unowned destination: {destination}")
 
@@ -116,11 +116,12 @@ def prepare(repo: Path, home: Path, host: str, manifest: dict[str, Any] | None) 
         if directory.exists() and (not directory.is_dir() or directory.is_symlink()):
             raise SystemExit(f"unsafe protocol directory: {directory}")
     owned = set((manifest or {}).get("owned", []))
+    hashes = (manifest or {}).get("hashes", {})
     result = resources(repo, home, host)
     for source, destination, kind in result:
         if not source.exists():
             raise SystemExit(f"missing protocol source: {source}")
-        validate_destination(source, destination, kind, str(destination) in owned)
+        validate_destination(source, destination, kind, str(destination) in owned, hashes.get(str(destination)))
     return result
 
 
