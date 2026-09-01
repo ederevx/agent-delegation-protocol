@@ -8,11 +8,13 @@ import re
 import secrets
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
 SCHEMA_VERSION = 1
 MAX_RESULT_BYTES = 64 * 1024
+MAX_REQUEST_BYTES = 64 * 1024
 DECISIONS = {"allow", "deny", "handled"}
 OPERATIONS = {"read", "write", "shell", "network", "process", "external"}
 PROTECTED_PARTS = {".git", ".claude", ".codex", ".ssh", ".gnupg", ".aws"}
@@ -62,6 +64,12 @@ def validate_request(value: Any) -> dict[str, Any]:
     created = value.get("created_at")
     if not isinstance(created, (int, float)) or isinstance(created, bool) or created < 0:
         raise PermissionError("permission request created_at is invalid")
+    try:
+        encoded = json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError) as error:
+        raise PermissionError("permission request must be finite JSON") from error
+    if len(encoded.encode("utf-8")) > MAX_REQUEST_BYTES:
+        raise PermissionError("permission request is too large")
     return dict(value)
 
 
@@ -82,7 +90,11 @@ def validate_resolution(value: Any, request_id: str | None = None) -> dict[str, 
     if decision == "handled":
         if not isinstance(value.get("result"), dict):
             raise PermissionError("handled permission resolution requires a result")
-        encoded = json.dumps(value["result"], sort_keys=True, ensure_ascii=False)
+        try:
+            encoded = json.dumps(value["result"], sort_keys=True,
+                                 ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as error:
+            raise PermissionError("handled permission result must be finite JSON") from error
         if len(encoded.encode("utf-8")) > MAX_RESULT_BYTES:
             raise PermissionError("handled permission result is too large")
     elif "result" in value:
@@ -172,18 +184,42 @@ def deterministic_decision(request: dict[str, Any], root: Path, *, mode: str,
         return "deny", "shell command cannot be parsed"
     if not words:
         return "deny", "empty shell command"
+    if words[0] != Path(words[0]).name or words[0] != PureWindowsPath(words[0]).name:
+        return "deny", "executable paths are forbidden"
     executable = Path(words[0]).name.casefold()
     if executable.endswith(".exe"):
         executable = executable[:-4]
     if executable in HARD_DENY_COMMANDS or re.fullmatch(r"pythonw?(?:\d+(?:\.\d+)*)?", executable):
         return "deny", "executable is outside deterministic policy"
     if executable == "git":
+        path_options = {"-C", "--git-dir", "--work-tree", "--namespace"}
+        if any(word in path_options or any(
+                word.startswith(option + "=") for option in path_options - {"-C"}
+        ) for word in words[1:]):
+            return "deny", "git path and namespace overrides are forbidden"
         subcommand = next((word for word in words[1:] if not word.startswith("-")), "")
-        return (("allow", "read-only git operation") if subcommand in READ_GIT
-                else ("ask", "mutating or unknown git operation"))
+        decision = (("allow", "read-only git operation") if subcommand in READ_GIT
+                    else ("ask", "mutating or unknown git operation"))
+        if decision[0] != "allow":
+            return decision
     if executable in READ_COMMANDS:
-        return "allow", "read-only command"
-    return "ask", "command requires a parent decision"
+        decision = "allow", "read-only command"
+    elif executable != "git":
+        return "ask", "command requires a parent decision"
+    for word in words[1:]:
+        if word == "-" or word.startswith("-"):
+            continue
+        candidate = Path(word).expanduser()
+        looks_like_path = (candidate.is_absolute() or PureWindowsPath(word).drive
+                           or "/" in word or "\\" in word
+                           or (root / candidate).exists())
+        if not looks_like_path:
+            continue
+        path_decision = _path_decision(word, root.resolve(), writing=False,
+                                       mode=mode, allowed_paths=allowed_paths)
+        if path_decision[0] != "allow":
+            return path_decision
+    return decision
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
@@ -203,16 +239,45 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
             pass
 
 
+@contextmanager
+def _state_lock(path: Path):
+    """Hold an OS-released cross-process lock for a permission state file."""
+    descriptor = os.open(path.with_suffix(path.suffix + ".lock"),
+                         os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        if os.name == "nt":
+            import msvcrt
+            if os.fstat(descriptor).st_size == 0:
+                os.write(descriptor, b"\0")
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
 class PermissionStore:
     """Persistent pending requests and exact, one-use grants for one session."""
 
     def __init__(self, path: Path, session_id: str) -> None:
         self.path = path
         self.session_id = _single_line(session_id, "session_id")
-        if not path.exists():
-            _atomic_json(path, {"schema_version": SCHEMA_VERSION,
-                                "session_id": session_id, "pending": None,
-                                "grants": [], "resolved": []})
+        path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        with _state_lock(path):
+            if not path.exists():
+                _atomic_json(path, {"schema_version": SCHEMA_VERSION,
+                                    "session_id": session_id, "pending": None,
+                                    "grants": [], "resolved": []})
 
     def _read(self) -> dict[str, Any]:
         try:
@@ -230,50 +295,56 @@ class PermissionStore:
         request = validate_request(request)
         if request["session_id"] != self.session_id:
             raise PermissionError("permission request session_id does not match")
-        state = self._read()
-        if state.get("pending") is not None:
-            raise PermissionError("a permission request is already pending")
-        if request["request_id"] in state["resolved"]:
-            raise PermissionError("permission request was already resolved")
-        state["pending"] = request
-        _atomic_json(self.path, state)
+        with _state_lock(self.path):
+            state = self._read()
+            if state.get("pending") is not None:
+                raise PermissionError("a permission request is already pending")
+            if request["request_id"] in state["resolved"]:
+                raise PermissionError("permission request was already resolved")
+            state["pending"] = request
+            _atomic_json(self.path, state)
 
     def pending(self) -> dict[str, Any] | None:
-        pending = self._read().get("pending")
+        with _state_lock(self.path):
+            pending = self._read().get("pending")
         return validate_request(pending) if pending is not None else None
 
     def resolve(self, resolution: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
-        state = self._read()
-        pending = state.get("pending")
-        if pending is None:
-            raise PermissionError("there is no pending permission request")
-        pending = validate_request(pending)
-        resolution = validate_resolution(resolution, pending["request_id"])
-        decision = resolution["decision"]
-        if decision == "allow":
-            state["grants"].append({
-                "request_id": pending["request_id"],
-                "operation": pending["operation"],
-                "arguments": pending["arguments"],
-            })
-            continuation = "The parent approved the exact operation for one use."
-        elif decision == "deny":
-            continuation = "The parent denied the operation; do not retry it or a variant."
-        else:
-            encoded = json.dumps(resolution["result"], sort_keys=True, ensure_ascii=False)
-            continuation = "The parent handled the operation. Result: " + encoded
-        state["resolved"].append(pending["request_id"])
-        state["pending"] = None
-        _atomic_json(self.path, state)
+        with _state_lock(self.path):
+            state = self._read()
+            pending = state.get("pending")
+            if pending is None:
+                raise PermissionError("there is no pending permission request")
+            pending = validate_request(pending)
+            resolution = validate_resolution(resolution, pending["request_id"])
+            decision = resolution["decision"]
+            if decision == "allow":
+                state["grants"].append({
+                    "request_id": pending["request_id"],
+                    "operation": pending["operation"],
+                    "arguments": pending["arguments"],
+                })
+                continuation = "The parent approved the exact operation for one use."
+            elif decision == "deny":
+                continuation = "The parent denied the operation; do not retry it or a variant."
+            else:
+                encoded = json.dumps(resolution["result"], sort_keys=True,
+                                     ensure_ascii=False)
+                continuation = "The parent handled the operation. Result: " + encoded
+            state["resolved"].append(pending["request_id"])
+            state["pending"] = None
+            _atomic_json(self.path, state)
         current = time.time() if now is None else now
         return {"continuation": continuation,
                 "paused_seconds": max(0.0, current - pending["created_at"])}
 
     def consume_grant(self, operation: str, arguments: dict[str, Any]) -> bool:
-        state = self._read()
-        for index, grant in enumerate(state["grants"]):
-            if grant.get("operation") == operation and grant.get("arguments") == arguments:
-                state["grants"].pop(index)
-                _atomic_json(self.path, state)
-                return True
+        with _state_lock(self.path):
+            state = self._read()
+            for index, grant in enumerate(state["grants"]):
+                if (grant.get("operation") == operation
+                        and grant.get("arguments") == arguments):
+                    state["grants"].pop(index)
+                    _atomic_json(self.path, state)
+                    return True
         return False
