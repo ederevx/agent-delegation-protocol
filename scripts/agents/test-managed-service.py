@@ -143,11 +143,11 @@ class ManagedServiceTests(unittest.TestCase):
         for pid in self.service_pids:
             try:
                 os.kill(pid, signal.SIGTERM)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):
                 pass
             try:
                 os.waitpid(pid, 0)
-            except (ChildProcessError, ProcessLookupError):
+            except (ChildProcessError, OSError):
                 pass
         self.upstream.shutdown()
         self.upstream.server_close()
@@ -262,12 +262,16 @@ class ManagedServiceTests(unittest.TestCase):
         for value in ("CHEAPESTINFERENCE_API_KEY=secret",
                       "MY_PROVIDER_SECRET=secret"):
             assignment.write_text(value + "\n", encoding="utf-8")
-            os.chmod(assignment, 0o600)
+            if os.name == "nt":
+                managed_service._protect_windows_path(assignment)
+            else:
+                os.chmod(assignment, 0o600)
             with self.assertRaisesRegex(DeploymentError, "raw token"):
                 read_credential(assignment)
-        os.chmod(credential_path("fake"), 0o644)
-        with self.assertRaisesRegex(DeploymentError, "broader than 0600"):
-            read_credential(credential_path("fake"))
+        if os.name != "nt":
+            os.chmod(credential_path("fake"), 0o644)
+            with self.assertRaisesRegex(DeploymentError, "broader than 0600"):
+                read_credential(credential_path("fake"))
         with self.assertRaisesRegex(DeploymentError, "reference is invalid"):
             credential_path("../escape")
 
@@ -387,7 +391,12 @@ class ManagedServiceTests(unittest.TestCase):
             headers={"Authorization": "Bearer " + binding.token})
         response = connection.getresponse()
         self.assertEqual(response.status, 413)
-        response.read()
+        try:
+            response.read()
+        except OSError:
+            # Some Windows TCP stacks reset the connection after the server
+            # rejects an oversized request without consuming its body.
+            pass
         connection.close()
         binding.close()
         self.assertTrue(answers[0].stop())
@@ -412,13 +421,17 @@ class ManagedServiceTests(unittest.TestCase):
         self.assertEqual((response.status, response.read()),
                          (502, b"upstream unavailable\n"))
         connection.close()
+        audit_path = state / "gateway-audit.jsonl"
+        deadline = time.monotonic() + 2
+        while audit_path.stat().st_size == 0 and time.monotonic() < deadline:
+            time.sleep(0.01)
         record = json.loads(
-            (state / "gateway-audit.jsonl").read_text(encoding="utf-8"))
+            audit_path.read_text(encoding="utf-8"))
         self.assertEqual(record["error_class"], "transport_error")
         self.assertNotIn("upstream_status", record)
         self.assertEqual(record["path"], "/v1/messages")
         self.assertIn("elapsed_ms", record)
-        raw = (state / "gateway-audit.jsonl").read_text(encoding="utf-8")
+        raw = audit_path.read_text(encoding="utf-8")
         self.assertNotIn("private-body", raw)
         self.assertNotIn(binding.token, raw)
         binding.close()
