@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent))
+import permission_service  # noqa: E402
 from permission_service import (  # noqa: E402
     PermissionError, PermissionStore, deterministic_decision,
     permission_request, validate_resolution,
@@ -26,6 +29,46 @@ class PermissionServiceTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_atomic_state_write_is_windows_portable_and_posix_private(self) -> None:
+        windows_path = self.root / "windows-state.json"
+        with mock.patch.object(permission_service.os, "name", "nt"), \
+                mock.patch.object(permission_service.os, "fchmod", create=True,
+                                  side_effect=AssertionError("fchmod on Windows")):
+            permission_service._atomic_json(windows_path, {"platform": "windows"})
+        self.assertEqual(json.loads(windows_path.read_text(encoding="utf-8")),
+                         {"platform": "windows"})
+
+        posix_path = self.root / "posix-state.json"
+        with mock.patch.object(permission_service.os, "name", "posix"), \
+                mock.patch.object(permission_service.os, "fchmod", create=True) as chmod:
+            permission_service._atomic_json(posix_path, {"platform": "posix"})
+        chmod.assert_called_once_with(mock.ANY, 0o600)
+
+    def test_atomic_state_write_closes_descriptor_and_preserves_primary_error(self) -> None:
+        descriptor, temporary = tempfile.mkstemp(dir=self.root)
+        real_close = os.close
+        closed: list[int] = []
+
+        def close(value: int) -> None:
+            closed.append(value)
+            real_close(value)
+
+        try:
+            with mock.patch.object(permission_service.tempfile, "mkstemp",
+                                   return_value=(descriptor, temporary)), \
+                    mock.patch.object(permission_service.os, "name", "posix"), \
+                    mock.patch.object(permission_service.os, "fchmod", create=True,
+                                      side_effect=OSError("permission failure")), \
+                    mock.patch.object(permission_service.os, "close", side_effect=close), \
+                    mock.patch.object(permission_service.os, "unlink",
+                                      side_effect=OSError("cleanup failure")):
+                with self.assertRaisesRegex(OSError, "permission failure"):
+                    permission_service._atomic_json(
+                        self.root / "failed-state.json", {"value": 1})
+            self.assertEqual(closed, [descriptor])
+        finally:
+            Path(temporary).unlink(missing_ok=True)
 
     def test_policy_enforces_workspace_mode_scope_and_hard_denials(self) -> None:
         read = permission_request("session", "read", {"path": "src/main.py"},

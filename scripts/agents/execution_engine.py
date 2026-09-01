@@ -476,13 +476,27 @@ def _evidence(repo: Path, task_changes: list[str]) -> dict[str, Any]:
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     descriptor, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
     try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        if os.name != "nt":
+            os.fchmod(descriptor, 0o600)
+        handle = os.fdopen(descriptor, "w", encoding="utf-8")
+        descriptor = -1
+        with handle:
             json.dump(value, handle, sort_keys=True)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-    finally:
+    except BaseException:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+    else:
         try:
             os.unlink(temporary)
         except FileNotFoundError:

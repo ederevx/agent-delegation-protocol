@@ -14,9 +14,11 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts" / "agents"))
+import managed_service  # noqa: E402
 from managed_service import (  # noqa: E402
     CONTROL_PREFIX,
     ClientRegistry,
@@ -155,6 +157,64 @@ class ManagedServiceTests(unittest.TestCase):
         else:
             os.environ["XDG_CONFIG_HOME"] = self.old_config
         self.temporary.cleanup()
+
+    def test_atomic_writes_skip_windows_fchmod_and_keep_posix_modes(self):
+        windows_json = self.root / "windows.json"
+        windows_text = self.root / "windows.txt"
+        with mock.patch.object(managed_service.os, "name", "nt"), \
+                mock.patch.object(managed_service.os, "fchmod", create=True,
+                                  side_effect=AssertionError("fchmod on Windows")), \
+                mock.patch.object(managed_service, "_protect_windows_path") as protect:
+            managed_service._atomic_json(windows_json, {"value": 1})
+            managed_service._atomic_text(windows_text, "value")
+        self.assertEqual(protect.call_count, 2)
+
+        with mock.patch.object(managed_service.os, "name", "posix"), \
+                mock.patch.object(managed_service.os, "fchmod", create=True) as chmod:
+            managed_service._atomic_json(self.root / "posix.json", {}, mode=0o640)
+            managed_service._atomic_text(self.root / "posix.txt", "", mode=0o600)
+        self.assertEqual(
+            [call.args[1] for call in chmod.call_args_list], [0o640, 0o600])
+
+    def test_atomic_write_closes_descriptor_and_preserves_primary_error(self):
+        real_close = os.close
+        cases = {
+            "state": lambda: managed_service._atomic_text(
+                self.root / "failed-state.txt", "value"),
+            "credential": lambda: write_credential(
+                "failed", "value", self.root / "credentials"),
+        }
+        for name, invoke in cases.items():
+            with self.subTest(name=name):
+                descriptor, temporary = tempfile.mkstemp(dir=self.root)
+                closed = []
+
+                def close(value):
+                    closed.append(value)
+                    real_close(value)
+
+                try:
+                    with mock.patch.object(managed_service.tempfile, "mkstemp",
+                                           return_value=(descriptor, temporary)), \
+                            mock.patch.object(managed_service, "credential_path",
+                                              return_value=self.root /
+                                              "credentials" / "failed"), \
+                            mock.patch.object(managed_service, "Path",
+                                              type(self.root)), \
+                            mock.patch.object(managed_service.os, "name", "posix"), \
+                            mock.patch.object(managed_service.os, "fchmod", create=True,
+                                              side_effect=OSError(
+                                                  "permission failure")), \
+                            mock.patch.object(managed_service.os, "close",
+                                              side_effect=close), \
+                            mock.patch.object(managed_service.os, "unlink",
+                                              side_effect=OSError(
+                                                  "cleanup failure")):
+                        with self.assertRaisesRegex(OSError, "permission failure"):
+                            invoke()
+                    self.assertEqual(closed, [descriptor])
+                finally:
+                    Path(temporary).unlink(missing_ok=True)
 
     def start(self) -> ServiceClient:
         client = ensure_service(self.deployment_path, self.state)

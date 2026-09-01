@@ -1,11 +1,39 @@
 #!/usr/bin/env python3
 """v2 Codex host installation and clean-break smoke tests."""
-import json, os, subprocess, sys, tempfile
+import json, os, re, shutil, subprocess, sys, tempfile
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 ENGINE = ROOT / "scripts/hosts/install.py"
 HOOK = ROOT / "codex/hooks/delegation-enforcer.py"
+POWERSHELL_WRAPPERS = (
+  ROOT / "scripts/codex/install.ps1",
+  ROOT / "scripts/codex/uninstall.ps1",
+  ROOT / "scripts/claude/install.ps1",
+  ROOT / "scripts/claude/uninstall.ps1",
+)
+
+def test_powershell_wrappers():
+  for wrapper in POWERSHELL_WRAPPERS:
+    source = wrapper.read_text()
+    assert not re.search(r'^\s*\$home\s*=', source, re.IGNORECASE | re.MULTILINE), f'{wrapper} assigns PowerShell read-only $HOME'
+  powershell = shutil.which('pwsh') or shutil.which('powershell')
+  if not powershell:
+    return
+  with tempfile.TemporaryDirectory(prefix="codex-v2-powershell-") as raw:
+    for host, action in (('codex', 'install'), ('codex', 'uninstall'), ('claude', 'install'), ('claude', 'uninstall')):
+      home = Path(raw) / host
+      env = dict(os.environ)
+      if host == 'codex':
+        env.update(CODEX_HOME=str(home), CODEX_PYTHON='Write-Output')
+      else:
+        env.update(CLAUDE_CONFIG_DIR=str(home), PYTHON='Write-Output')
+      wrapper = ROOT / f'scripts/{host}/{action}.ps1'
+      result = subprocess.run([powershell, '-NoProfile', '-File', str(wrapper)], env=env, capture_output=True, text=True)
+      assert result.returncode == 0, result.stderr or result.stdout
+      assert action in result.stdout and f'--host\n{host}' in result.stdout.replace('\r', ''), result.stdout
+
 def main():
+  test_powershell_wrappers()
   with tempfile.TemporaryDirectory(prefix="codex-v2-") as raw:
     home=Path(raw); env=dict(os.environ, CODEX_HOME=str(home))
     r=subprocess.run([sys.executable,str(ENGINE),"install","--host","codex","--home",str(home),"--repo",str(ROOT)],env=env,capture_output=True,text=True)

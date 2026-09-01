@@ -705,8 +705,9 @@ def write_credential(reference: str, value: str,
             _protect_windows_path(temporary_path)
         else:
             os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                descriptor = -1
+            handle = os.fdopen(descriptor, "w", encoding="utf-8")
+            descriptor = -1
+            with handle:
                 handle.write(value + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -715,12 +716,27 @@ def write_credential(reference: str, value: str,
             check = os.open(path, os.O_RDONLY)
             try:
                 _private_windows_acl(check)
-            finally:
+            except BaseException:
+                try:
+                    os.close(check)
+                except OSError:
+                    pass
+                raise
+            else:
                 os.close(check)
         return path
-    finally:
+    except BaseException:
         if descriptor >= 0:
-            os.close(descriptor)
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    else:
         temporary_path.unlink(missing_ok=True)
 
 
@@ -1333,7 +1349,9 @@ def _atomic_json(path: Path, value: Any, mode: int = 0o600) -> None:
     try:
         if os.name != "nt":
             os.fchmod(descriptor, mode)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle = os.fdopen(descriptor, "w", encoding="utf-8")
+        descriptor = -1
+        with handle:
             json.dump(value, handle, sort_keys=True)
             handle.write("\n")
             handle.flush()
@@ -1341,7 +1359,18 @@ def _atomic_json(path: Path, value: Any, mode: int = 0o600) -> None:
         if os.name == "nt":
             _protect_windows_path(Path(temporary))
         os.replace(temporary, path)
-    finally:
+    except BaseException:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        try:
+            Path(temporary).unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    else:
         Path(temporary).unlink(missing_ok=True)
 
 
@@ -1351,14 +1380,27 @@ def _atomic_text(path: Path, value: str, mode: int = 0o600) -> None:
     try:
         if os.name != "nt":
             os.fchmod(descriptor, mode)
-        with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+        handle = os.fdopen(descriptor, "w", encoding="ascii")
+        descriptor = -1
+        with handle:
             handle.write(value)
             handle.flush()
             os.fsync(handle.fileno())
         if os.name == "nt":
             _protect_windows_path(Path(temporary))
         os.replace(temporary, path)
-    finally:
+    except BaseException:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        try:
+            Path(temporary).unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    else:
         Path(temporary).unlink(missing_ok=True)
 
 

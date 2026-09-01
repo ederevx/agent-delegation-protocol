@@ -347,14 +347,24 @@ def _atomic_json(path: Path, value: dict[str, Any], mode: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
-        os.fchmod(fd, mode)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        fchmod = getattr(os, "fchmod", None)
+        if fchmod is not None:
+            fchmod(fd, mode)
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+        fd = -1  # fdopen owns the descriptor from this point onward.
+        with handle:
             json.dump(value, handle, sort_keys=True)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
     finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                # Preserve any error that prevented fdopen from taking ownership.
+                pass
         try:
             os.unlink(temporary)
         except FileNotFoundError:

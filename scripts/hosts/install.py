@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import ntpath
 import os
 import shutil
 import sys
@@ -25,6 +26,32 @@ except ImportError:
 VERSION = 2
 
 
+def _strip_windows_extended_prefix(value: str) -> str:
+    """Return the ordinary spelling of a Windows extended-length path."""
+    if value[:8].casefold() == "\\\\?\\unc\\".casefold():
+        return "\\\\" + value[8:]
+    if value.startswith("\\\\?\\"):
+        return value[4:]
+    return value
+
+
+def _windows_path(value: str) -> bool:
+    return value.startswith("\\\\?\\") or bool(ntpath.splitdrive(value)[0])
+
+
+def _normalized_link_path(value: str, parent: str) -> str:
+    """Normalize link ownership paths lexically, without following aliases."""
+    if os.name == "nt" or _windows_path(value) or _windows_path(parent):
+        value = _strip_windows_extended_prefix(value)
+        parent = _strip_windows_extended_prefix(parent)
+        if not ntpath.isabs(value):
+            value = ntpath.join(parent, value)
+        return ntpath.normcase(ntpath.normpath(value))
+    if not os.path.isabs(value):
+        value = os.path.join(parent, value)
+    return os.path.normcase(os.path.normpath(value))
+
+
 def digest(path: Path) -> str:
     if path.is_dir():
         entries = []
@@ -36,7 +63,14 @@ def digest(path: Path) -> str:
 
 
 def same_link(path: Path, source: Path) -> bool:
-    return path.is_symlink() and Path(os.readlink(path)) == source
+    if not path.is_symlink():
+        return False
+    target = os.fspath(os.readlink(path))
+    expected = os.fspath(source)
+    parent = os.fspath(path.parent)
+    return _normalized_link_path(target, parent) == _normalized_link_path(
+        expected, os.getcwd()
+    )
 
 
 def atomic_json(path: Path, value: dict[str, Any]) -> None:
