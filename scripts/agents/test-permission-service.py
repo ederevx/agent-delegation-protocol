@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -50,6 +51,14 @@ class PermissionServiceTests(unittest.TestCase):
         self.assertEqual(deterministic_decision(
             shell, self.root, mode="edit", allowed_paths=[],
         )[0], "deny")
+        for command in ("cat /etc/passwd", "git -C /etc status",
+                        "/usr/bin/cat file", "cat ../outside"):
+            shell = permission_request(
+                "session", "shell", {"command": command}, "unsafe read", now=1,
+            )
+            self.assertEqual(deterministic_decision(
+                shell, self.root, mode="read", allowed_paths=[],
+            )[0], "deny", command)
 
     def test_exact_grant_is_one_use_and_resolution_cannot_replay(self) -> None:
         store = PermissionStore(self.root / "permissions.json", "session")
@@ -81,6 +90,9 @@ class PermissionServiceTests(unittest.TestCase):
                 "schema_version": 1, "request_id": "r", "decision": "handled",
                 "result": {"value": "x" * (64 * 1024)},
             })
+        with self.assertRaises(PermissionError):
+            permission_request("session", "shell", {"command": "x" * (64 * 1024)},
+                               "oversized", now=1)
 
     def test_state_file_contains_no_implicit_grants(self) -> None:
         path = self.root / "permissions.json"
@@ -88,6 +100,28 @@ class PermissionServiceTests(unittest.TestCase):
         state = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(state["grants"], [])
         self.assertIsNone(state["pending"])
+
+    def test_concurrent_consumers_cannot_reuse_a_grant(self) -> None:
+        store = PermissionStore(self.root / "permissions.json", "session")
+        request = permission_request("session", "shell", {"command": "make test"},
+                                     "run tests", now=1)
+        store.issue(request)
+        store.resolve({"schema_version": 1, "request_id": request["request_id"],
+                       "decision": "allow"}, now=2)
+        barrier = threading.Barrier(3)
+        results = []
+
+        def consume() -> None:
+            barrier.wait()
+            results.append(store.consume_grant("shell", {"command": "make test"}))
+
+        threads = [threading.Thread(target=consume) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(sorted(results), [False, True])
 
 
 if __name__ == "__main__":
