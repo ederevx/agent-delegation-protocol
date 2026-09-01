@@ -29,9 +29,11 @@ class LifecycleState:
     def complete(self, worker: str) -> None:
         if worker not in self.active:
             return
-        self.finished.add(worker)
         if self.mode == "automatic_release":
             self.active.remove(worker)
+            self.finished.discard(worker)
+        else:
+            self.finished.add(worker)
 
     def release(self, worker: str) -> None:
         self.active.discard(worker)

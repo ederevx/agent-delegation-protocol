@@ -14,10 +14,13 @@ import os
 import shutil
 import sys
 import tempfile
-import subprocess
-import signal
 from pathlib import Path
 from typing import Any
+
+try:
+    from . import settings
+except ImportError:
+    import settings
 
 VERSION = 2
 
@@ -75,9 +78,8 @@ def acquire_lock(state: Path) -> Path:
 def resources(repo: Path, home: Path, host: str) -> list[tuple[Path, Path, str]]:
     state = home / ".delegation-protocol"
     common = [
-        # delegationctl and protocol-v2 are the only supported control plane.
-        # The old mux-scheduler/catalog links are intentionally not migrated.
         (repo / "scripts/agents/delegationctl.py", state / "delegationctl.py", "link"),
+        (repo / "scripts/agents/lane_service.py", state / "lane_service.py", "link"),
         (repo / "agents/protocol-v2.json", state / "protocol-v2.json", "link"),
         (repo / "scripts/agents/delegation-classifier.py", state / "delegation-classifier.py", "link"),
         (repo / "scripts/hosts/hook_adapter.py", state / "hook_adapter.py", "link"),
@@ -122,6 +124,7 @@ def prepare(repo: Path, home: Path, host: str, manifest: dict[str, Any] | None) 
         if not source.exists():
             raise SystemExit(f"missing protocol source: {source}")
         validate_destination(source, destination, kind, str(destination) in owned, hashes.get(str(destination)))
+    settings.load_json(home / ("settings.json" if host == "claude" else "hooks.json"))
     return result
 
 
@@ -138,6 +141,14 @@ def install(repo: Path, home: Path, host: str) -> None:
     changed: list[tuple[Path, bytes | None, bool]] = []
     settings_path = home / ("settings.json" if host == "claude" else "hooks.json")
     prior_settings = settings_path.read_bytes() if settings_path.exists() else None
+    settings_manifest = state / "host-settings.json"
+    prior_settings_manifest = (
+        settings_manifest.read_bytes() if settings_manifest.exists() else None
+    )
+    settings_backup = state / f"{settings_path.name}.before-first-install"
+    prior_settings_backup = (
+        settings_backup.read_bytes() if settings_backup.exists() else None
+    )
     try:
         for directory in ((home / "rules" if host == "claude" else home), home / "agents", home / "hooks", state):
             directory.mkdir(parents=True, exist_ok=True)
@@ -154,20 +165,12 @@ def install(repo: Path, home: Path, host: str) -> None:
                 prior = destination.read_bytes() if destination.exists() else None
                 changed.append((destination, prior, prior is not None))
                 shutil.copy2(source, destination)
-        # Host settings are configured only after every filesystem destination
-        # has passed ownership checks.  The host manager is itself idempotent;
-        # a later failure removes newly-created links before returning.
-        manager = (repo / "scripts/claude/manage-settings.py" if host == "claude"
-                   else repo / "scripts/codex/manage-hooks.py")
-        command = [sys.executable, os.fspath(manager), "install"]
-        if host == "claude":
-            command += ["--claude-home", os.fspath(home), "--hook-path",
-                        os.fspath(home / "hooks/delegation-enforcer.py"), "--python", os.sys.executable]
-        else:
-            command += ["--codex-home", os.fspath(home), "--hook-path",
-                        os.fspath(home / "hooks/delegation-enforcer.py"), "--python", os.sys.executable]
-        if manager.exists():
-            subprocess.run(command, check=True)
+        settings.install(
+            host,
+            home,
+            home / "hooks/delegation-enforcer.py",
+            sys.executable,
+        )
         manifest = {"version": VERSION, "host": host, "repo": str(repo),
                     "release": "automatic_release" if host == "claude" else "session_release",
                     "owned": [str(destination) for _, destination, _ in items],
@@ -185,6 +188,14 @@ def install(repo: Path, home: Path, host: str) -> None:
             settings_path.unlink(missing_ok=True)
         else:
             settings_path.write_bytes(prior_settings)
+        if prior_settings_manifest is None:
+            settings_manifest.unlink(missing_ok=True)
+        else:
+            settings_manifest.write_bytes(prior_settings_manifest)
+        if prior_settings_backup is None:
+            settings_backup.unlink(missing_ok=True)
+        else:
+            settings_backup.write_bytes(prior_settings_backup)
         raise
     finally:
         shutil.rmtree(lock, ignore_errors=True)
@@ -200,28 +211,38 @@ def uninstall(home: Path, host: str) -> None:
         raise SystemExit("unsupported or mismatched protocol manifest; refusing uninstall")
     lock = acquire_lock(state)
     try:
-        repo = Path(manifest.get("repo", ""))
-        manager = (repo / "scripts/claude/manage-settings.py" if host == "claude"
-                   else repo / "scripts/codex/manage-hooks.py")
-        if manager.exists():
-            command = [sys.executable, os.fspath(manager), "uninstall"]
-            if host == "claude":
-                command += ["--claude-home", os.fspath(home), "--hook-path",
-                            os.fspath(home / "hooks/delegation-enforcer.py"), "--python", sys.executable]
-            else:
-                command += ["--codex-home", os.fspath(home), "--hook-path",
-                            os.fspath(home / "hooks/delegation-enforcer.py"), "--python", sys.executable]
-            subprocess.run(command, check=True)
+        settings.uninstall(host, home)
+        resources_by_destination = {
+            item.get("destination"): item
+            for item in manifest.get("resources", [])
+            if isinstance(item, dict)
+        }
         for name in manifest.get("owned", []):
             path = Path(name)
-            if path.is_symlink() or (path.is_file() and digest(path) == manifest.get("hashes", {}).get(name)):
+            resource = resources_by_destination.get(name, {})
+            source = Path(resource.get("source", ""))
+            owned_link = resource.get("kind") == "link" and same_link(path, source)
+            owned_copy = (
+                resource.get("kind") == "copy" and path.is_file() and
+                digest(path) == manifest.get("hashes", {}).get(name)
+            )
+            if owned_link or owned_copy:
                 path.unlink(missing_ok=True)
         manifest_path.unlink(missing_ok=True)
+        for backup in state.glob("*.before-first-install"):
+            backup.unlink(missing_ok=True)
+        shutil.rmtree(state / "hook-state", ignore_errors=True)
     finally:
         shutil.rmtree(lock, ignore_errors=True)
+    try:
+        state.rmdir()
+    except OSError:
+        pass
 
 
 def main() -> int:
+    if sys.version_info < (3, 11):
+        raise SystemExit("protocol v2 requires Python 3.11 or newer")
     parser = argparse.ArgumentParser()
     parser.add_argument("action", choices=("install", "uninstall"))
     parser.add_argument("--host", choices=("claude", "codex"), required=True)
