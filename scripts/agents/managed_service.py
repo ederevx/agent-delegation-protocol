@@ -593,6 +593,32 @@ def _private_windows_acl(descriptor: int) -> None:
         kernel.LocalFree(security)
 
 
+def _config_root() -> Path:
+    """Resolve the protocol config root exactly as delegationctl does."""
+    configured = os.environ.get("DELEGATION_CONFIG_HOME")
+    if configured:
+        return Path(configured).expanduser()
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME",
+                                   str(Path.home() / ".config")))
+    return base / "agent-delegation-protocol"
+
+
+def _state_root() -> Path:
+    """Resolve the protocol state root exactly as delegationctl does."""
+    configured = os.environ.get("DELEGATION_STATE_HOME")
+    if configured:
+        return Path(configured).expanduser()
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
+    else:
+        base = Path(os.environ.get("XDG_STATE_HOME",
+                                   str(Path.home() / ".local" / "state")))
+    return base / "agent-delegation-protocol"
+
+
 def credential_path(reference: str,
                     credential_root: str | Path | None = None) -> Path:
     if (not reference or len(reference) > 64 or not reference[0].isalnum() or
@@ -600,12 +626,7 @@ def credential_path(reference: str,
                 for character in reference)):
         raise DeploymentError("credential reference is invalid")
     if credential_root is None:
-        if os.name == "nt":
-            base = Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
-        else:
-            base = Path(os.environ.get("XDG_CONFIG_HOME",
-                                       str(Path.home() / ".config")))
-        credential_root = base / "agent-delegation-protocol" / "credentials"
+        credential_root = _config_root() / "credentials"
     return Path(credential_root) / reference
 
 
@@ -1406,12 +1427,7 @@ def _atomic_text(path: Path, value: str, mode: int = 0o600) -> None:
 
 
 def _default_state_dir(deployment_id: str) -> Path:
-    if os.name == "nt":
-        root = Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
-    else:
-        root = Path(os.environ.get("XDG_STATE_HOME",
-                                   str(Path.home() / ".local" / "state")))
-    return root / "agent-delegation-protocol" / "services" / deployment_id
+    return _state_root() / "services" / deployment_id
 
 
 def _fingerprint(deployment: dict[str, Any]) -> str:
