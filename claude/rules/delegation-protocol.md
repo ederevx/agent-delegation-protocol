@@ -49,3 +49,22 @@ background task that requires cancellation.
 Hooks enforce the deterministic delegation thresholds and request boundary.
 This rule supplies judgment for ambiguity and safety without duplicating
 provider or transport policy.
+
+## Hook-supplying repo hygiene
+
+The checkout supplying installed hooks/rules must sit exactly on the latest
+`protocol-v*` tag reachable from `origin/main`; hooks hard-block mutating
+actions otherwise, reading only local refs (never fetching). Before doing
+any work in a hook-supplying repo, check it for stale branches against
+`origin/main`; reconcile anything with unmerged value into `main` first,
+then drop the stale branch. Never push to or merge directly into `main`
+yourself — reconcile through a PR and let the user land it.
+
+## Owner bypass
+
+The user may unconditionally lift any hook-enforced convention here —
+delegation, release, or the commit/tag gate — by creating
+`<host-config-dir>/.delegation-protocol/bypass`; presence alone is enough,
+its contents are just an optional note. Agents must never create, edit, or
+script around this file themselves; it exists solely for the human owner to
+invoke by hand.
