@@ -60,6 +60,15 @@ any work in a hook-supplying repo, check it for stale branches against
 then drop the stale branch. Never push to or merge directly into `main`
 yourself — reconcile through a PR and let the user land it.
 
+Iterating on a change to hooks/rules may happen in an isolated test
+checkout that is not the one actually installed, so the live gate stays
+strict the whole time — this is the sanctioned way to develop against a
+mismatched HEAD without touching the bypass marker. That test environment
+never counts as done on its own and never substitutes for the real hook:
+land the change on `origin/main` via a PR, cut the next `protocol-v*` tag
+on the merged HEAD, and reinstall the actual host(s) from that tag so the
+installed checkout matches it before relying on the change.
+
 ## Owner bypass
 
 The user may unconditionally lift any hook-enforced convention here —
