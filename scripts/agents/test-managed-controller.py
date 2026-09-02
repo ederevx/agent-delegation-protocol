@@ -189,8 +189,11 @@ def main() -> None:
         assert "lane" not in completed
         status = run(environment, "service", "status", "--deployment", "ci-claude")
         assert status["clients"] == []
-        service_descriptor = (root / "xdg-state" /
-                              "agent-delegation-protocol" / "services" /
+        # The managed service now resolves its state root through
+        # DELEGATION_STATE_HOME, the same override delegationctl uses, so the
+        # descriptor lands under that configured root (taken literally, with no
+        # "agent-delegation-protocol" suffix) rather than under XDG_STATE_HOME.
+        service_descriptor = (root / "state" / "services" /
                               "ci-claude" / "service.json")
         old_pid = json.loads(
             service_descriptor.read_text(encoding="utf-8"))["pid"]
@@ -226,8 +229,7 @@ def main() -> None:
             environment, "deployment", "uninstall", "--deployment",
             "ci-claude", expected=64)
         assert refused["classification"] == "configuration_error"
-        credential = (root / "xdg-config" / "agent-delegation-protocol" /
-                      "credentials" / "cheapestinference")
+        credential = (root / "config" / "credentials" / "cheapestinference")
         assert credential.is_file()
         installed_launcher.write_bytes(original_launcher)
         installed_launcher.chmod(0o755)
