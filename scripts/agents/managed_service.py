@@ -12,6 +12,7 @@ import http.client
 import ipaddress
 import json
 import os
+import re
 import secrets
 import signal
 import ssl
@@ -35,6 +36,14 @@ MAX_CONTROL_BYTES = 256 * 1024
 MAX_HEADER_BYTES = 64 * 1024
 MAX_AUDIT_BYTES = 1024 * 1024
 CONTROL_PREFIX = "/_delegation/v1/"
+# Provider token-usage counters recorded per gateway request. The gateway
+# meters worker traffic and interactive-session traffic separately so a
+# deployment owner can account for each independently.
+USAGE_TOKEN_FIELDS = (
+    "input_tokens", "output_tokens",
+    "cache_creation_input_tokens", "cache_read_input_tokens",
+)
+CLIENT_KINDS = ("worker", "interactive", "other")
 HOP_BY_HOP = frozenset({
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailer", "transfer-encoding", "upgrade",
@@ -121,7 +130,9 @@ class GatewayAuditLog:
     def append(self, deployment_id: str, path: str, *,
                upstream_status: int | None = None,
                error_class: str | None = None,
-               elapsed_seconds: float) -> None:
+               elapsed_seconds: float,
+               client_kind: str | None = None,
+               usage: dict[str, int] | None = None) -> None:
         if (upstream_status is None) == (error_class is None):
             raise ValueError("audit outcome must have exactly one result")
         value: dict[str, Any] = {
@@ -135,6 +146,15 @@ class GatewayAuditLog:
             value["upstream_status"] = upstream_status
         else:
             value["error_class"] = error_class
+        if client_kind:
+            value["client_kind"] = client_kind
+        if usage:
+            metered = {name: int(count) for name, count in usage.items()
+                       if name in USAGE_TOKEN_FIELDS
+                       and isinstance(count, int) and not isinstance(count, bool)
+                       and count > 0}
+            if metered:
+                value["usage"] = metered
         line = (json.dumps(value, sort_keys=True, separators=(",", ":")) +
                 "\n").encode("utf-8")
         if len(line) > self.maximum_bytes:
@@ -1066,6 +1086,69 @@ class ClientRegistry:
             return True
 
 
+def client_kind(client_id: str) -> str:
+    """Classify a registration by the launcher that opened it.
+
+    ``launch_managed`` registers interactive launchers as ``launcher:...`` and
+    the headless execution engine registers slices as ``worker:...``. Anything
+    else (tests, future callers) is reported as ``other`` rather than guessed.
+    """
+    head = client_id.split(":", 1)[0] if isinstance(client_id, str) else ""
+    if head == "worker":
+        return "worker"
+    if head == "launcher":
+        return "interactive"
+    return "other"
+
+
+class _UsageScanner:
+    """Extract provider token counts from a forwarded response body.
+
+    The gateway streams responses straight through, so this only observes the
+    bytes as they pass. It recognises both a single JSON ``usage`` object and
+    the repeated ``message_start`` / ``message_delta`` usage blocks of a
+    streamed (SSE) response, keeping the highest value seen for each field
+    because streamed ``output_tokens`` is cumulative. A gzip-encoded body
+    simply yields no match and is reported as unmetered.
+    """
+
+    _PATTERN = re.compile(
+        rb'"(input_tokens|output_tokens'
+        rb'|cache_creation_input_tokens|cache_read_input_tokens)"'
+        rb'\s*:\s*(\d+)')
+    _MAX_TAIL = 128 * 1024
+
+    def __init__(self) -> None:
+        self._tail = b""
+        self._totals = {name: 0 for name in USAGE_TOKEN_FIELDS}
+        self._metered = False
+
+    def feed(self, chunk: bytes) -> None:
+        if not chunk:
+            return
+        data = self._tail + chunk
+        for match in self._PATTERN.finditer(data):
+            name = match.group(1).decode("ascii")
+            count = int(match.group(2))
+            if count > self._totals[name]:
+                self._totals[name] = count
+            self._metered = True
+        # Retain a bounded tail so a counter split across chunk boundaries is
+        # re-parsed once its digits arrive; trimming on a newline keeps whole
+        # SSE lines intact.
+        if len(data) > self._MAX_TAIL:
+            window = data[-self._MAX_TAIL:]
+            newline = window.find(b"\n")
+            self._tail = window[newline + 1:] if newline != -1 else window
+        else:
+            self._tail = data
+
+    def result(self) -> dict[str, int] | None:
+        if not self._metered:
+            return None
+        return {name: count for name, count in self._totals.items() if count}
+
+
 class ManagedHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -1275,6 +1358,8 @@ class ManagedHandler(BaseHTTPRequestHandler):
         owner = f"{self.server.deployment['id']}:{record.registration_id}"
         started = time.monotonic()
         audit_path = urlsplit(target).path
+        kind = client_kind(record.client_id)
+        scanner = _UsageScanner()
         upstream_status: int | None = None
         error_class: str | None = None
         try:
@@ -1284,7 +1369,8 @@ class ManagedHandler(BaseHTTPRequestHandler):
             self.server.audit.append(
                 self.server.deployment["id"], audit_path,
                 error_class="resource_timeout",
-                elapsed_seconds=time.monotonic() - started)
+                elapsed_seconds=time.monotonic() - started,
+                client_kind=kind)
             return
         stop = threading.Event()
         lost = threading.Event()
@@ -1299,7 +1385,7 @@ class ManagedHandler(BaseHTTPRequestHandler):
         heartbeat.start()
         try:
             upstream_status, error_class = self._forward_acquired(
-                body, target, lost)
+                body, target, lost, scanner)
         finally:
             stop.set()
             heartbeat.join(timeout=1)
@@ -1308,15 +1394,18 @@ class ManagedHandler(BaseHTTPRequestHandler):
                 self.server.audit.append(
                     self.server.deployment["id"], audit_path,
                     upstream_status=upstream_status,
-                    elapsed_seconds=time.monotonic() - started)
+                    elapsed_seconds=time.monotonic() - started,
+                    client_kind=kind, usage=scanner.result())
             else:
                 self.server.audit.append(
                     self.server.deployment["id"], audit_path,
                     error_class=error_class or "gateway_error",
-                    elapsed_seconds=time.monotonic() - started)
+                    elapsed_seconds=time.monotonic() - started,
+                    client_kind=kind)
 
     def _forward_acquired(self, body: bytes, target: str,
-                          lost: threading.Event) -> tuple[int | None, str | None]:
+                          lost: threading.Event,
+                          scanner: "_UsageScanner") -> tuple[int | None, str | None]:
         upstream = self.server.upstream
         timeout = self.server.deployment["gateway"]["timeout_seconds"]
         if upstream.scheme == "https":
@@ -1356,6 +1445,7 @@ class ManagedHandler(BaseHTTPRequestHandler):
                     break
                 self.wfile.write(chunk)
                 self.wfile.flush()
+                scanner.feed(chunk)
         except (OSError, http.client.HTTPException):
             pass
         finally:
@@ -1428,6 +1518,11 @@ def _atomic_text(path: Path, value: str, mode: int = 0o600) -> None:
 
 def _default_state_dir(deployment_id: str) -> Path:
     return _state_root() / "services" / deployment_id
+
+
+def service_state_dir(deployment_id: str) -> Path:
+    """Return the state directory a managed service uses for a deployment."""
+    return _default_state_dir(deployment_id)
 
 
 def _fingerprint(deployment: dict[str, Any]) -> str:
@@ -1757,6 +1852,65 @@ def existing_service(
             if time.monotonic() >= deadline:
                 raise
             time.sleep(0.05)
+
+
+def _empty_usage_bucket() -> dict[str, int]:
+    return {"requests": 0, "metered_requests": 0,
+            **{name: 0 for name in USAGE_TOKEN_FIELDS}}
+
+
+def summarize_gateway_usage(
+        state_dir: str | Path) -> dict[str, Any]:
+    """Aggregate the persisted gateway audit log into a token-usage report.
+
+    Traffic is split by ``client_kind`` so worker slices and the interactive
+    session are accounted for separately. Both the live log and its single
+    rotation are read; malformed or pre-metering lines are skipped. The report
+    is well-formed even when the deployment has never run.
+    """
+    state = Path(state_dir)
+    buckets = {kind: _empty_usage_bucket() for kind in CLIENT_KINDS}
+    live = state / "gateway-audit.jsonl"
+    rotated = live.with_name(live.name + ".1")
+    for path in (rotated, live):  # oldest first for chronological accumulation
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            kind = record.get("client_kind")
+            bucket = buckets[kind] if kind in buckets else buckets["other"]
+            bucket["requests"] += 1
+            usage = record.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            metered = False
+            for name in USAGE_TOKEN_FIELDS:
+                count = usage.get(name)
+                if (isinstance(count, int) and not isinstance(count, bool)
+                        and count > 0):
+                    bucket[name] += count
+                    metered = True
+            if metered:
+                bucket["metered_requests"] += 1
+    totals = _empty_usage_bucket()
+    for bucket in buckets.values():
+        for key, value in bucket.items():
+            totals[key] += value
+    return {
+        "state_dir": str(state),
+        "by_client_kind": buckets,
+        "totals": totals,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:

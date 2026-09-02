@@ -25,12 +25,14 @@ from managed_service import (  # noqa: E402
     DeploymentError,
     GatewayAuditLog,
     ServiceClient,
+    client_kind,
     credential_path,
     ensure_service,
     load_deployment,
     read_credential,
     remove_credential,
     serve,
+    summarize_gateway_usage,
     validate_deployment,
     write_credential,
 )
@@ -77,6 +79,40 @@ class UpstreamServer(ThreadingHTTPServer):
         self.maximum = 0
         self.received = []
         super().__init__(("127.0.0.1", 0), UpstreamHandler)
+
+
+class UsageUpstreamHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, _format, *_args):
+        return
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        self.rfile.read(length)
+        chunks = [
+            b'event: message_start\ndata: {"message":{"usage":'
+            b'{"input_tokens":1000,"cache_read_input_tokens":40,'
+            b'"output_tokens":1}}}\n\n',
+            b'event: message_delta\ndata: {"usage":{"output_tokens":9}}\n\n',
+            b'event: message_delta\ndata: {"usage":{"output_tokens":250}}\n\n',
+        ]
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        for chunk in chunks:
+            self.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+            self.wfile.flush()
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
+
+
+class UsageUpstreamServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self):
+        super().__init__(("127.0.0.1", 0), UsageUpstreamHandler)
 
 
 def deployment(upstream: str) -> dict:
@@ -552,6 +588,115 @@ class ManagedServiceTests(unittest.TestCase):
         self.assertEqual(by_client["second"]["retained_session_ids"], ["bg-3"])
         restarted.reconcile_retained(set())
         self.assertEqual(restarted.snapshot(), [])
+
+    def test_client_kind_classifies_launcher_and_worker_registrations(self):
+        self.assertEqual(client_kind("worker:token:3"), "worker")
+        self.assertEqual(client_kind("launcher:4141:deadbeef"), "interactive")
+        self.assertEqual(client_kind("test-client"), "other")
+        self.assertEqual(client_kind(""), "other")
+
+    def test_usage_scanner_reads_streamed_and_split_counters(self):
+        scanner = managed_service._UsageScanner()
+        self.assertIsNone(scanner.result())
+        scanner.feed(b'data: {"message":{"usage":{"input_tokens":1200,'
+                     b'"cache_read_input_tokens":30,"output_tokens":1}}}\n\n')
+        scanner.feed(b'data: {"usage":{"output_tok')
+        scanner.feed(b'ens":48}}\n\ndata: {"usage":{"output_tokens":515}}\n\n')
+        self.assertEqual(scanner.result(), {
+            "input_tokens": 1200, "output_tokens": 515,
+            "cache_read_input_tokens": 30})
+        plain = managed_service._UsageScanner()
+        plain.feed(b"firstsecond")
+        self.assertIsNone(plain.result())
+
+    def test_summarize_gateway_usage_splits_worker_and_interactive(self):
+        state = self.root / "usage-state"
+        state.mkdir()
+        live = state / "gateway-audit.jsonl"
+        rotated = state / "gateway-audit.jsonl.1"
+        rotated.write_text(json.dumps({
+            "deployment_id": "test-provider", "path": "/v1/messages",
+            "elapsed_ms": 1, "upstream_status": 200, "client_kind": "worker",
+            "usage": {"input_tokens": 100, "output_tokens": 20}}) + "\n",
+            encoding="utf-8")
+        live.write_text("\n".join([
+            json.dumps({"deployment_id": "test-provider", "path": "/v1/messages",
+                        "elapsed_ms": 1, "upstream_status": 200,
+                        "client_kind": "worker",
+                        "usage": {"input_tokens": 300, "output_tokens": 40,
+                                  "cache_read_input_tokens": 5}}),
+            json.dumps({"deployment_id": "test-provider", "path": "/v1/messages",
+                        "elapsed_ms": 1, "upstream_status": 200,
+                        "client_kind": "interactive",
+                        "usage": {"input_tokens": 900, "output_tokens": 275}}),
+            json.dumps({"deployment_id": "test-provider", "path": "/v1/messages",
+                        "elapsed_ms": 1, "error_class": "transport_error",
+                        "client_kind": "interactive"}),
+            "this is not json",
+            json.dumps({"deployment_id": "test-provider", "path": "/v1/messages",
+                        "elapsed_ms": 1, "upstream_status": 200}),
+        ]) + "\n", encoding="utf-8")
+        summary = summarize_gateway_usage(state)
+        self.assertEqual(summary["by_client_kind"]["worker"], {
+            "requests": 2, "metered_requests": 2, "input_tokens": 400,
+            "output_tokens": 60, "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 5})
+        self.assertEqual(summary["by_client_kind"]["interactive"], {
+            "requests": 2, "metered_requests": 1, "input_tokens": 900,
+            "output_tokens": 275, "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0})
+        self.assertEqual(summary["by_client_kind"]["other"]["requests"], 1)
+        self.assertEqual(summary["totals"]["requests"], 5)
+        self.assertEqual(summary["totals"]["input_tokens"], 1300)
+        self.assertEqual(summary["totals"]["output_tokens"], 335)
+
+    def test_summarize_gateway_usage_handles_missing_log(self):
+        summary = summarize_gateway_usage(self.root / "never-served")
+        self.assertEqual(summary["totals"], {
+            "requests": 0, "metered_requests": 0, "input_tokens": 0,
+            "output_tokens": 0, "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0})
+
+    def test_gateway_meters_worker_and_interactive_traffic_separately(self):
+        upstream = UsageUpstreamServer()
+        thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(upstream.server_close)
+        self.addCleanup(upstream.shutdown)
+        value = deployment(f"http://127.0.0.1:{upstream.server_address[1]}")
+        path = self.root / "usage-deployment.json"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        state = self.root / "usage-live-state"
+        client = ensure_service(path, state)
+        self.service_pids.add(
+            json.loads((state / "service.json").read_text())["pid"])
+        for client_id in ("worker:job-1:0", "launcher:9090:cafef00d"):
+            binding = client.register(client_id)
+            connection = http.client.HTTPConnection(
+                client.host, client.port, timeout=10)
+            connection.request("POST", "/v1/messages", body=b"{}", headers={
+                "Authorization": "Bearer " + binding.token})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            response.read()
+            connection.close()
+            binding.close()
+        records = [json.loads(line) for line in
+                   (state / "gateway-audit.jsonl").read_text(
+                       encoding="utf-8").splitlines() if line.strip()]
+        by_kind = {record["client_kind"]: record for record in records}
+        self.assertEqual(set(by_kind), {"worker", "interactive"})
+        for record in by_kind.values():
+            self.assertEqual(record["usage"], {
+                "input_tokens": 1000, "output_tokens": 250,
+                "cache_read_input_tokens": 40})
+        summary = summarize_gateway_usage(state)
+        self.assertEqual(summary["by_client_kind"]["worker"]["output_tokens"], 250)
+        self.assertEqual(
+            summary["by_client_kind"]["interactive"]["output_tokens"], 250)
+        self.assertEqual(summary["totals"]["input_tokens"], 2000)
+        self.assertTrue(client.stop())
 
 
 if __name__ == "__main__":

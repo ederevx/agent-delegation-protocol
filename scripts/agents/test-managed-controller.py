@@ -189,6 +189,24 @@ def main() -> None:
         assert "lane" not in completed
         status = run(environment, "service", "status", "--deployment", "ci-claude")
         assert status["clients"] == []
+
+        usage = subprocess.run(
+            [sys.executable, str(CTL), "launch", "--deployment", "ci-claude",
+             "--", "status", "--json"], env=environment,
+            text=True, capture_output=True, timeout=30, check=False)
+        assert usage.returncode == 0, (usage.stdout, usage.stderr)
+        report = json.loads(usage.stdout)
+        assert report["status"] == "completed"
+        assert report["classification"] == "token_usage_report"
+        assert set(report["by_client_kind"]) == {"worker", "interactive", "other"}
+        assert report["totals"]["input_tokens"] == 0
+        assert report["totals"]["output_tokens"] == 0
+        text_usage = subprocess.run(
+            [sys.executable, str(CTL), "launch", "--deployment", "ci-claude",
+             "--", "status"], env=environment,
+            text=True, capture_output=True, timeout=30, check=False)
+        assert text_usage.returncode == 0, (text_usage.stdout, text_usage.stderr)
+        assert "interactive session" in text_usage.stdout
         # The managed service now resolves its state root through
         # DELEGATION_STATE_HOME, the same override delegationctl uses, so the
         # descriptor lands under that configured root (taken literally, with no

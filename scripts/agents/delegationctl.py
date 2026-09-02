@@ -25,7 +25,7 @@ from lane_service import LaneClient, LaneError, LaneServer
 from managed_service import (
     DeploymentError, credential_path, ensure_service, existing_service,
     load_deployment, process_identity, read_credential, remove_credential,
-    write_credential,
+    service_state_dir, summarize_gateway_usage, write_credential,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -649,11 +649,52 @@ def _selector_from_args(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _token_usage_lines(deployment_id: str, summary: dict[str, Any]) -> list[str]:
+    labels = {"worker": "worker", "interactive": "interactive session",
+              "other": "other"}
+    columns = (("input_tokens", "input"), ("output_tokens", "output"),
+               ("cache_creation_input_tokens", "cache write"),
+               ("cache_read_input_tokens", "cache read"))
+    lines = [f"{deployment_id} token usage (source: {summary['state_dir']})"]
+
+    def render(name: str, bucket: dict[str, int]) -> None:
+        lines.append(
+            f"  {name}: {bucket['requests']} requests"
+            f" ({bucket['metered_requests']} metered)")
+        for key, column in columns:
+            lines.append(f"      {column}: {bucket[key]}")
+
+    for kind in ("worker", "interactive", "other"):
+        render(labels[kind], summary["by_client_kind"][kind])
+    render("total", summary["totals"])
+    return lines
+
+
+def report_token_usage(deployment: dict[str, Any], arguments: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="ci-claude status",
+        description="Report gateway token usage, splitting worker traffic from "
+                    "the interactive session.")
+    parser.add_argument("--json", action="store_true",
+                        help="emit the machine-readable receipt instead of text")
+    options = parser.parse_args(arguments)
+    summary = summarize_gateway_usage(service_state_dir(deployment["id"]))
+    if options.json:
+        print(json.dumps(receipt("completed", "token_usage_report",
+                                 deployment_id=deployment["id"], **summary),
+                         sort_keys=True))
+    else:
+        print("\n".join(_token_usage_lines(deployment["id"], summary)))
+    return 0
+
+
 def launch_managed(deployment_value: str, arguments: list[str]) -> int:
     deployment_path = resolve_deployment(deployment_value)
     deployment = load_deployment(deployment_path)
     if deployment["runtime"]["profile"] != "claude-code":
         raise ProtocolError("deployment runtime profile is not launchable")
+    if arguments and arguments[0] == "status":
+        return report_token_usage(deployment, arguments[1:])
     configured = deployment["runtime"].get("arguments", [])
     values = [*configured, *arguments]
     control = bool(values and values[0] in claude_runtime.CONTROL_COMMANDS)

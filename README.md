@@ -117,6 +117,15 @@ repository contains only deployment JSON and launch shims; all operational
 management lives here. When the deployment or runtime executable is absent,
 selection falls back to the applicable native backend before launch.
 
+The gateway meters every provider request it forwards and records the token
+counts in its private audit log, tagging each request as `worker` or
+`interactive` traffic from the registration that issued it. `ci-claude status`
+(equivalently `delegationctl[.cmd] launch --deployment ci-claude -- status`,
+with `--json` for a receipt) reports accumulated input, output, and cache
+tokens and request counts for the headless workers and the interactive session
+separately, plus a combined total. It reads only the persisted log, so it works
+whether or not the managed service is currently running.
+
 ## Install one host
 
 Python 3.11 or newer is required.
