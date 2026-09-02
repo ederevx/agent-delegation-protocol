@@ -125,8 +125,21 @@ class ManagedServiceTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
-        self.old_config = os.environ.get("XDG_CONFIG_HOME")
+        # DELEGATION_*_HOME are the only overrides honoured on every platform;
+        # XDG_CONFIG_HOME alone leaks into the live store on Windows.
+        self.old_environment = {
+            name: os.environ.get(name)
+            for name in ("DELEGATION_CONFIG_HOME", "DELEGATION_STATE_HOME",
+                         "XDG_CONFIG_HOME", "XDG_STATE_HOME", "LOCALAPPDATA")
+        }
+        os.environ["DELEGATION_CONFIG_HOME"] = str(self.root / "config")
+        os.environ["DELEGATION_STATE_HOME"] = str(self.root / "state-home")
         os.environ["XDG_CONFIG_HOME"] = str(self.root / "config")
+        os.environ["XDG_STATE_HOME"] = str(self.root / "state-home")
+        os.environ["LOCALAPPDATA"] = str(self.root / "localappdata")
+        self.assertTrue(
+            credential_path("fake").is_relative_to(self.root),
+            "credential store escaped the disposable test home")
         write_credential("fake", "provider-secret")
         self.upstream = UpstreamServer()
         self.upstream_thread = threading.Thread(
@@ -152,10 +165,11 @@ class ManagedServiceTests(unittest.TestCase):
         self.upstream.shutdown()
         self.upstream.server_close()
         self.upstream_thread.join(timeout=2)
-        if self.old_config is None:
-            os.environ.pop("XDG_CONFIG_HOME", None)
-        else:
-            os.environ["XDG_CONFIG_HOME"] = self.old_config
+        for name, value in self.old_environment.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         self.temporary.cleanup()
 
     def test_atomic_writes_skip_windows_fchmod_and_keep_posix_modes(self):
@@ -245,6 +259,49 @@ class ManagedServiceTests(unittest.TestCase):
         changed["credential"] = {"kind": "protected_file", "reference": "/tmp/key"}
         with self.assertRaisesRegex(DeploymentError, "protocol_store"):
             validate_deployment(changed)
+
+    def test_store_roots_honour_delegation_overrides(self):
+        """delegationctl and managed_service must resolve the same roots.
+
+        The DELEGATION_*_HOME branch short-circuits before any platform test,
+        so it is the one override that isolates a store on every platform.
+        """
+        import delegationctl
+
+        configured = self.root / "configured"
+        with mock.patch.dict(os.environ, {
+                "DELEGATION_CONFIG_HOME": str(configured / "config"),
+                "DELEGATION_STATE_HOME": str(configured / "state"),
+                # Deliberately point the per-platform fallbacks somewhere else:
+                # the explicit override must win regardless of which branch a
+                # given platform would otherwise have taken.
+                "LOCALAPPDATA": str(self.root / "unused-windows"),
+                "XDG_CONFIG_HOME": str(self.root / "unused-posix"),
+                "XDG_STATE_HOME": str(self.root / "unused-posix"),
+        }):
+            self.assertEqual(managed_service._config_root(),
+                             delegationctl._config_root())
+            self.assertEqual(managed_service._state_root(),
+                             delegationctl._state_root())
+            self.assertEqual(credential_path("fake"),
+                             configured / "config" / "credentials" / "fake")
+            self.assertEqual(
+                managed_service._default_state_dir("test-provider"),
+                configured / "state" / "services" / "test-provider")
+
+    def test_windows_store_ignores_posix_only_overrides(self):
+        """XDG_CONFIG_HOME must not be mistaken for isolation on Windows."""
+        environment = {
+            "XDG_CONFIG_HOME": str(self.root / "posix-only"),
+            "LOCALAPPDATA": str(self.root / "windows"),
+        }
+        with mock.patch.object(managed_service.os, "name", "nt"):
+            with mock.patch.dict(os.environ, environment):
+                os.environ.pop("DELEGATION_CONFIG_HOME", None)
+                self.assertEqual(
+                    credential_path("fake"),
+                    self.root / "windows" / "agent-delegation-protocol" /
+                    "credentials" / "fake")
 
     def test_protected_credential_store(self):
         self.assertEqual(read_credential(credential_path("fake")),
