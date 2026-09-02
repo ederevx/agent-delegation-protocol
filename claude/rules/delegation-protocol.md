@@ -52,18 +52,25 @@ provider or transport policy.
 
 ## Hook-supplying repo hygiene
 
-The checkout supplying installed hooks/rules must sit exactly on the latest
-`protocol-v*` tag reachable from `origin/main`; hooks hard-block mutating
-actions otherwise, reading only local refs (never fetching). Before doing
-any work in a hook-supplying repo, check it for stale branches against
-`origin/main`; reconcile anything with unmerged value into `main` first,
-then drop the stale branch. Never push to or merge directly into `main`
-yourself — reconcile through a PR and let the user land it.
+This is a convention, not a hook-enforced gate — nothing in `hook_adapter.py`
+checks it, so it never blocks a tool call. Before doing any work in a
+hook-supplying repo, confirm this checkout sits exactly on the latest
+`protocol-v*` tag reachable from `origin/main`, and check it for stale
+branches against `origin/main`; reconcile anything with unmerged value into
+`main` first, then drop the stale branch. Never push to or merge directly
+into `main` yourself — reconcile through a PR and let the user land it.
+
+Iterating on a change to hooks/rules may happen in an isolated test
+checkout that is not the one actually installed. That test environment
+never counts as done on its own: land the change on `origin/main` via a
+PR, cut the next `protocol-v*` tag on the merged HEAD, and reinstall the
+actual host(s) from that tag so the installed checkout matches it before
+relying on the change.
 
 ## Owner bypass
 
 The user may unconditionally lift any hook-enforced convention here —
-delegation, release, or the commit/tag gate — by creating
+delegation or release — by creating
 `<host-config-dir>/.delegation-protocol/bypass`; presence alone is enough,
 its contents are just an optional note. Agents must never create, edit, or
 script around this file themselves; it exists solely for the human owner to
