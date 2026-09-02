@@ -289,6 +289,12 @@ class ManagedServiceTests(unittest.TestCase):
                 managed_service._default_state_dir("test-provider"),
                 configured / "state" / "services" / "test-provider")
 
+    @unittest.skipUnless(
+        os.name == "nt",
+        "forcing os.name='nt' on POSIX breaks pathlib's Path dispatch; the "
+        "Windows fallback branch is only exercisable on Windows. The "
+        "cross-platform DELEGATION_* invariant is covered by "
+        "test_store_roots_honour_delegation_overrides.")
     def test_windows_store_ignores_posix_only_overrides(self):
         """XDG_CONFIG_HOME must not be mistaken for isolation on Windows."""
         environment = {
