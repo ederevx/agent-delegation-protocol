@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import subprocess
 import tempfile
 import time
 from contextlib import contextmanager
@@ -174,6 +175,68 @@ def _deny(reason: str) -> dict[str, Any]:
     }
 
 
+def _bypass(home: Path) -> bool:
+    """Global convention: the user may unconditionally lift any
+    hook-enforced convention -- the delegation requirement, the release
+    gate, the commit/tag gate -- by creating this marker file by hand.
+    Agents must never create, edit, or script around it themselves; it
+    exists solely for the human owner to invoke directly."""
+    return (home / ".delegation-protocol" / "bypass").is_file()
+
+
+def _repo_root() -> Path:
+    # hook_adapter.py itself is a symlink installed at
+    # <home>/.delegation-protocol/hook_adapter.py -> <repo>/scripts/hosts/hook_adapter.py.
+    # resolve() follows the symlink to the real file, so parents[2] is
+    # whichever checkout is actually supplying every installed hook/rule.
+    return Path(__file__).resolve().parents[2]
+
+
+def _git(repo: Path, *args: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _head_gate(repo: Path) -> str | None:
+    """Global convention: the checkout supplying installed hooks must sit
+    exactly on the latest `protocol-v*` tag reachable from origin/main.
+    Read-only and local-refs-only -- never fetches -- so this reflects the
+    last time anyone in this repo ran `git fetch`, not live network state.
+    Only called for mutating actions (see the `pre-mutation` branch below),
+    so a mismatch blocks work, never diagnosis. Returns a block reason, or
+    None when the checkout matches (or when there is nothing local to gate
+    against yet: no origin/main, or no protocol-v* tag has ever been cut)."""
+    installed = _git(repo, "rev-parse", "HEAD")
+    if not installed:
+        return None
+    if _git(repo, "rev-parse", "--verify", "--quiet",
+            "refs/remotes/origin/main") is None:
+        return None
+    tags = _git(repo, "tag", "-l", "protocol-v*", "--sort=-v:refname",
+                "--merged", "origin/main")
+    if not tags:
+        return None
+    latest = tags.splitlines()[0]
+    target = _git(repo, "rev-parse", f"{latest}^{{commit}}")
+    if not target or target == installed:
+        return None
+    return (
+        f"Global convention violation: this checkout ({repo}) is at "
+        f"{installed[:12]}, but the latest release tag reachable from "
+        f"origin/main is {latest} ({target[:12]}). Reconcile this repo "
+        f"against origin/main (merge/rebase, or reinstall from a checkout "
+        f"of the tag) and re-run the host installer before doing any "
+        f"work. If `git fetch` hasn't run recently, refresh origin/main "
+        f"first -- this check never fetches on its own."
+    )
+
+
 def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     """Apply one normalized hook event and return host-compatible feedback."""
     if host not in {"claude", "codex"} or not isinstance(payload, dict):
@@ -244,21 +307,24 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
             lifecycle.end_session()
             state["completed"] = True
         elif event == "pre-mutation":
-            if _mutating(payload, classifier):
-                reason = _unmet(state)
+            if _mutating(payload, classifier) and not _bypass(home):
+                reason = _head_gate(_repo_root()) or _unmet(state)
                 if reason:
                     output = _deny(reason)
         elif event == "turn-stop":
-            reason = _unmet(state)
-            if reason:
-                output = {"decision": "block", "reason": reason}
-            elif mode == "explicit_release" and lifecycle.finished:
-                output = {
-                    "decision": "block",
-                    "reason": "Release completed workers before ending this turn.",
-                }
-            else:
+            if _bypass(home):
                 state["completed"] = True
+            else:
+                reason = _unmet(state)
+                if reason:
+                    output = {"decision": "block", "reason": reason}
+                elif mode == "explicit_release" and lifecycle.finished:
+                    output = {
+                        "decision": "block",
+                        "reason": "Release completed workers before ending this turn.",
+                    }
+                else:
+                    state["completed"] = True
         state.update({
             "active": sorted(lifecycle.active),
             "finished": sorted(lifecycle.finished),
