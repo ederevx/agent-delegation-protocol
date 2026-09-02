@@ -147,7 +147,10 @@ def _mutating(payload: dict[str, Any], classifier: Any) -> bool:
     if classifier.MUTATING_TOOL_NAME.search(name):
         return True
     tool = payload.get("tool_input") or payload.get("toolInput") or {}
-    command = tool.get("command", "") if isinstance(tool, dict) else ""
+    command = (
+        tool.get("command") or tool.get("cmd", "")
+        if isinstance(tool, dict) else ""
+    )
     return bool(classifier.MUTATING_BASH.search(str(command)) or
                 classifier.MUTATING_POWERSHELL.search(str(command)))
 

@@ -12,8 +12,74 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 CTL = ROOT / "scripts" / "agents" / "delegationctl.py"
-CI_REPO = Path(os.environ.get("CI_CLAUDE_REPO", ROOT.parent / "ci-claude"))
-CI_DEPLOYMENT = CI_REPO / "deployment.json"
+
+
+def deployment_fixture(root: Path) -> tuple[Path, Path]:
+    launcher = root / "ci-claude"
+    launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    deployment = root / "deployment.json"
+    deployment.write_text(json.dumps({
+        "schema_version": 1,
+        "id": "ci-claude",
+        "selector": {
+            "runtimes": ["codex", "claude"],
+            "platforms": ["linux", "darwin", "windows"],
+            "modes": ["read", "edit"],
+            "workspaces": ["shared", "isolated"],
+            "functions": ["audit", "edit", "batch", "compress"],
+            "tier": "low",
+        },
+        "provider": {"id": "cheapestinference"},
+        "credential": {
+            "kind": "protocol_store", "reference": "cheapestinference",
+        },
+        "gateway": {
+            "upstream": "https://api.cheapestinference.com/anthropic",
+            "allowed_methods": ["POST"],
+            "allowed_paths": ["/v1/messages", "/v1/messages/count_tokens"],
+            "credential_header": "Authorization",
+            "credential_scheme": "Bearer",
+            "resource": "cheapestinference-account",
+            "timeout_seconds": 3600,
+            "max_request_bytes": 67108864,
+        },
+        "resources": [{
+            "id": "cheapestinference-account", "capacity": 1,
+            "lease_seconds": 30, "wait_seconds": 600,
+        }],
+        "service": {
+            "idle_seconds": 300, "max_clients": 16,
+            "max_dependency_seconds": 86400, "retention_probe_seconds": 5,
+        },
+        "runtime": {
+            "profile": "claude-code",
+            "executable": {"command": "claude", "environment": "CI_CLAUDE_BIN"},
+            "session": {
+                "config_dir": {"posix": "~/.config/test-session",
+                               "windows": "%LOCALAPPDATA%/test-session"},
+                "environment": "CI_CLAUDE_SESSION_DIR",
+                "max_agents": 4,
+                "permission_mode": "auto",
+            },
+            "environment": {},
+            "arguments": [],
+        },
+        "inference": {
+            "model": "deepseek-v4-flash",
+            "thinking": {"type": "adaptive"},
+            "worker_effort": "max",
+            "interactive_effort": "max",
+            "context_tokens": 1000000,
+            "max_output_tokens": 131072,
+        },
+        "execution": {
+            "workspace_engine": "git-isolated-v1",
+            "evidence": "git-patch-v1",
+            "permission_policy": "bounded-coding-v1",
+        },
+    }), encoding="utf-8")
+    return deployment, launcher
 
 
 def run(environment: dict[str, str], *arguments: str,
@@ -28,6 +94,7 @@ def run(environment: dict[str, str], *arguments: str,
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="managed-controller-") as raw:
         root = Path(raw)
+        deployment, launcher = deployment_fixture(root)
         fake = root / "claude"
         record = root / "launch.json"
         fake.write_text(
@@ -62,8 +129,7 @@ def main() -> None:
         }
         installed = run(
             environment, "deployment", "install", "--config",
-            str(CI_DEPLOYMENT), "--launcher",
-            str(CI_REPO / "ci-claude"), "ci-claude")
+            str(deployment), "--launcher", str(launcher), "ci-claude")
         assert installed["classification"] == "deployment_installed"
         run(environment, "credential", "set", "--deployment", "ci-claude",
             "--from-file", str(source_credential))
@@ -118,7 +184,7 @@ def main() -> None:
         completed = run(
             environment, "--catalog", str(catalog), "run", "--request-file",
             str(request))
-        assert completed["status"] == "completed"
+        assert completed["status"] == "completed", completed
         assert completed["backend"] == "managed-test"
         assert "lane" not in completed
         status = run(environment, "service", "status", "--deployment", "ci-claude")
@@ -144,13 +210,13 @@ def main() -> None:
         original_launcher = installed_launcher.read_bytes()
         installed_launcher.write_bytes(original_launcher + b"# modified\n")
         changed_config = root / "changed-deployment.json"
-        changed = json.loads(CI_DEPLOYMENT.read_text(encoding="utf-8"))
+        changed = json.loads(deployment.read_text(encoding="utf-8"))
         changed["inference"]["model"] = "changed-model"
         changed_config.write_text(json.dumps(changed), encoding="utf-8")
         refused_install = run(
             environment, "deployment", "install", "--config",
             str(changed_config), "--launcher",
-            str(ROOT.parent / "ci-claude" / "ci-claude"), "ci-claude",
+            str(launcher), "ci-claude",
             expected=64)
         assert refused_install["classification"] == "configuration_error"
         assert run(

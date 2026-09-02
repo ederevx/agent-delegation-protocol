@@ -39,6 +39,9 @@ def main():
     r=subprocess.run([sys.executable,str(ENGINE),"install","--host","codex","--home",str(home),"--repo",str(ROOT)],env=env,capture_output=True,text=True)
     assert r.returncode==0,r.stderr
     m=json.loads((home/'.delegation-protocol/manifest.json').read_text()); assert m['version']==2 and m['release']=='session_release'
+    hooks=json.loads((home/'hooks.json').read_text())['hooks']
+    assert 'SubagentStart' in hooks and 'SubagentStop' in hooks
+    assert 'PostToolUse' not in hooks, 'Codex completion must use native subagent lifecycle events'
     assert (home/'.delegation-protocol/delegationctl.py').is_symlink()
     if os.name == 'nt':
       launcher=home/'.delegation-protocol/delegationctl.cmd'; assert launcher.is_file()
@@ -53,6 +56,15 @@ def main():
     worker = home/'agents/bulk_worker.toml'; worker.write_text('user change\n')
     r2=subprocess.run([sys.executable,str(ENGINE),"install","--host","codex","--home",str(home),"--repo",str(ROOT)],env=env,capture_output=True,text=True)
     assert r2.returncode != 0 and 'unowned destination' in r2.stderr
+    for index, prompt in enumerate(('Check hooks and evaluate', 'Inspect hooks', 'Verify hooks', 'Diagnose hooks')):
+      audit=subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':f'audit-{index}','prompt':prompt}),env=env,capture_output=True,text=True)
+      assert audit.returncode==0,audit.stderr
+      audit_context=json.loads(audit.stdout)['hookSpecificOutput']['additionalContext']
+      assert 'requires 1 lifecycle-visible worker' in audit_context,audit_context
+    audit_denied=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'audit-0','tool_name':'exec_command','tool_input':{'cmd':'touch changed.txt'}}),env=env,capture_output=True,text=True)
+    assert json.loads(audit_denied.stdout)['hookSpecificOutput']['permissionDecision']=='deny'
+    audit_read=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'audit-0','tool_name':'exec_command','tool_input':{'cmd':'git status --short'}}),env=env,capture_output=True,text=True)
+    assert json.loads(audit_read.stdout)=={},audit_read.stdout
     p=subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'s','prompt':'Update 12 files across independent modules.'}),env=env,capture_output=True,text=True)
     assert p.returncode==0,p.stderr
     denied=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'s','tool_name':'Edit'}),env=env,capture_output=True,text=True)
