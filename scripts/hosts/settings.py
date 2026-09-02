@@ -74,11 +74,6 @@ def groups(host: str, hook_path: Path, python_executable: str) -> dict[str, list
             "matcher": "Agent",
             "hooks": [handler(base + " worker-complete", "track Agent failure")],
         }]
-    else:
-        common["PostToolUse"] = [{
-            "matcher": "^Agent$",
-            "hooks": [handler(base + " worker-complete", "track Agent result")],
-        }]
     return common
 
 

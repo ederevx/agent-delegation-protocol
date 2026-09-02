@@ -95,6 +95,11 @@ ACTION_WORDS = (
     "apply", "replace", "remove", "delete", "format", "lint",
 )
 
+EVALUATION_WORDS = (
+    "analyze", "analyse", "review", "audit", "check", "evaluate", "inspect",
+    "verify", "diagnose",
+)
+
 SHARD_WORDS = (
     "subsystem", "subsystems", "service", "services", "module", "modules", "package",
     "packages", "component", "components", "directory", "directories", "workstream",
@@ -264,6 +269,7 @@ def classify(
 
     explicit_no = any(re.search(pattern, lower) for pattern in NO_DELEGATION_PATTERNS)
     action = contains_any(lower, ACTION_WORDS)
+    evaluation_signal = contains_any(lower, EVALUATION_WORDS)
     count = explicit_count(lower)
     bulk_signal = contains_any(lower, BULK_WORDS) or count >= 3
     tokens = explicit_tokens(lower)
@@ -306,6 +312,7 @@ def classify(
     )
     requires = False if explicit_no else (
         (action and (bulk_signal or shard_signal or size_signal or step_signal))
+        or evaluation_signal
         or token_signal
         or carry
     )
@@ -314,6 +321,8 @@ def classify(
     )
 
     reasons: list[str] = []
+    if evaluation_signal:
+        reasons.append("analysis, review, or verification wording")
     if count >= 3:
         reasons.append(f"explicit unit count {count}")
     if bulk_signal and count < 3:
