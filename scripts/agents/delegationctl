@@ -1,2 +1,0 @@
-#!/usr/bin/env sh
-exec "${PYTHON:-python3}" "$(dirname "$0")/delegationctl.py" "$@"
