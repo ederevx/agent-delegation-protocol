@@ -1,4 +1,4 @@
-# Codex v2 installation
+# Codex installation
 
 Codex is installed independently from Claude. The wrapper
 `scripts/codex/install.sh` (or `install.ps1`) invokes the host installer and
@@ -6,10 +6,11 @@ writes only protocol-owned state under `$CODEX_HOME` (normally `~/.codex`).
 
 ## Clean-break prerequisite
 
-v2 is not an in-place upgrade. Before installation, preserve the prior branch
-tips with annotated backup tags and keep their ancestry reachable. Install
-from the rewritten v2 checkout only after its audit and verification pass.
-Do not combine v1 and v2 runtime assets or state in one home.
+This native-only protocol is not an in-place upgrade over the earlier
+scheduler-based protocol. Before installation, preserve the prior branch tips
+with annotated backup tags and keep their ancestry reachable. Install from the
+rewritten checkout only after its audit and verification pass. Do not combine
+runtime assets or state from the two generations in one home.
 
 ## Install
 
@@ -45,10 +46,6 @@ The active home also receives the worker and protocol-owned links:
 $CODEX_HOME/agents/bulk_worker.toml
 $CODEX_HOME/agents/balanced-worker.toml
 $CODEX_HOME/hooks/delegation-enforcer.py
-$CODEX_HOME/.delegation-protocol/delegationctl[.cmd]
-$CODEX_HOME/.delegation-protocol/delegationctl.py
-$CODEX_HOME/.delegation-protocol/lane_service.py
-$CODEX_HOME/.delegation-protocol/protocol-v2.json
 $CODEX_HOME/.delegation-protocol/delegation-classifier.py
 $CODEX_HOME/.delegation-protocol/hook_adapter.py
 $CODEX_HOME/.delegation-protocol/lifecycle.py
@@ -58,19 +55,12 @@ The bulk worker is a managed regular-file copy because the Codex runtime require
 no-follow loading for selected role files. The installer records its source
 revision and refreshes only an unmodified protocol-owned copy.
 
-On Windows, the controller launcher avoids a worker dependency on `python` or
-`python3` being discoverable through `PATH`. It records the trusted interpreter
-that ran the installer; workers invoke the absolute launcher under the active
-Codex home. Reinstall refreshes an unmodified launcher, and uninstall removes
-it through the ownership manifest.
-
 ## Lifecycle and trust
 
-The Codex profile uses a lifecycle-visible worker. The scheduler accepts a
-file-backed v2 request through `delegationctl run`, `batch`, or `resume`; it
-authenticates the local loopback session and owns the provider lane. The
-worker classifies stable receipts and never retries an accepted request under
-another backend.
+The Codex profile uses a lifecycle-visible worker. The hook adapter observes
+native `SubagentStart`/`SubagentStop` events for the session and gates eligible
+parent mutation and turn completion on that evidence — there is no scheduler,
+request file, or receipt to manage.
 
 Codex requires user review and trust for non-managed hooks. After installation:
 
@@ -89,7 +79,6 @@ Run the checks from the repository:
 
 ```bash
 python3 scripts/agents/render-bulk-workers.py --check
-python3 scripts/agents/test-protocol-v2.py
 python3 scripts/hosts/test-install.py
 python3 scripts/hosts/test-lifecycle.py
 python3 scripts/codex/test-protocol.py

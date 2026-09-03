@@ -1,4 +1,4 @@
-# Delegation Protocol v2
+# Delegation Protocol
 
 Claude Code keeps the strongest parent context for planning, ambiguity,
 architecture, difficult debugging, integration, conflict resolution, and final
@@ -9,27 +9,12 @@ of the active context window. Adjacent tiers intentionally overlap; choose the
 lowest tier with enough reasoning ability. Keep work that needs parent-level
 judgment with the parent.
 
-For independent workstreams, use concurrent workers when capacity permits.
-Give each worker exclusive ownership, acceptance criteria, validation commands,
-and a concise evidence report. The parent remains the single integration
-authority.
-
-## v2 request contract
-
-Workers create file-backed v2 requests. Each task contains exactly
-`schema_version: 2`, `id`, `mode`, `repo`, `prompt`, `allowed_paths`,
-`workspace`, `validation`, and `budgets`; budgets contain positive timeout,
-output-byte, and step limits. Resolve the active
-Claude config directory and invoke
-its absolute `.delegation-protocol/delegationctl` launcher on POSIX or
-`.delegation-protocol/delegationctl.cmd` on Windows. Use `run`, `batch`, or
-`resume`, always with `--request-file`.
-
-The scheduler authenticates the local loopback session, owns the provider lane,
-selects an available backend by declared capability and runtime, and returns
-stable receipts. A selected request is never silently retried elsewhere.
-Relay `permission_required` receipts to the parent with their exact request ID,
-backend, token, and operation; resume only after a parent decision.
+For independent workstreams, use concurrent native subagents when capacity
+permits. Give each worker exclusive ownership, acceptance criteria, validation
+commands, and a concise evidence report. The parent remains the single
+integration authority. Delegation is proven only by the host's own native
+subagent lifecycle (`SubagentStart`/`SubagentStop`) — there is no other
+delegation channel, request format, or scheduler to route through.
 
 ## Conflict boundary
 
