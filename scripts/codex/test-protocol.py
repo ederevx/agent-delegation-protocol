@@ -42,6 +42,16 @@ def main():
     hooks=json.loads((home/'hooks.json').read_text())['hooks']
     assert 'SubagentStart' in hooks and 'SubagentStop' in hooks
     assert 'PostToolUse' not in hooks, 'Codex completion must use native subagent lifecycle events'
+    # Only native lifecycle events ever wire to worker-start/worker-complete --
+    # no arbitrary tool call (which is how ACP/AALP traffic would otherwise
+    # reach the hook) can ever produce delegation evidence.
+    def commands(event):
+      return [h['command'] for group in hooks.get(event, []) for h in group.get('hooks', [])]
+    assert any(c.endswith(' worker-start') for c in commands('SubagentStart'))
+    assert any(c.endswith(' worker-complete') for c in commands('SubagentStop'))
+    assert any(c.endswith(' pre-mutation') for c in commands('PreToolUse'))
+    worker_wired_events={e for e in hooks if any(c.endswith((' worker-start',' worker-complete')) for c in commands(e))}
+    assert worker_wired_events=={'SubagentStart','SubagentStop'},worker_wired_events
     assert (home/'.delegation-protocol/hook_adapter.py').is_symlink()
     worker = home/'agents/bulk_worker.toml'; worker.write_text('user change\n')
     r2=subprocess.run([sys.executable,str(ENGINE),"install","--host","codex","--home",str(home),"--repo",str(ROOT)],env=env,capture_output=True,text=True)
@@ -64,6 +74,30 @@ def main():
       assert q.returncode==0,q.stderr
     stopped=subprocess.run([sys.executable,str(HOOK),'turn-stop'],input=json.dumps({'session_id':'s'}),env=env,capture_output=True,text=True)
     assert stopped.returncode==0 and json.loads(stopped.stdout)=={}, 'session release created impossible finished-worker warning'
+    # Stop detects unsatisfied delegation instead of silently ending the turn.
+    subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'unmet','prompt':'Update 12 files across independent modules.'}),env=env,capture_output=True,text=True)
+    stop_unmet=subprocess.run([sys.executable,str(HOOK),'turn-stop'],input=json.dumps({'session_id':'unmet'}),env=env,capture_output=True,text=True)
+    stop_body=json.loads(stop_unmet.stdout)
+    assert stop_body.get('decision')=='block' and stop_body.get('reason'),stop_body
+    # Multi-agent/fan-out requires real concurrent overlap. Under Codex's
+    # session_release mode a completed worker stays "held" (no inferred
+    # dismissal debt), so this specifically exercises that a strictly
+    # sequential start/complete/start/complete pair -- which never overlaps in
+    # real time -- must not be misread as concurrent evidence.
+    subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'seq','prompt':'Update 12 files across independent modules.'}),env=env,capture_output=True,text=True)
+    for event,worker in (('worker-start','worker-a'),('worker-complete','worker-a'),('worker-start','worker-b'),('worker-complete','worker-b')):
+      subprocess.run([sys.executable,str(HOOK),event],input=json.dumps({'session_id':'seq','agent_id':worker}),env=env,capture_output=True,text=True)
+    seq_stop=subprocess.run([sys.executable,str(HOOK),'turn-stop'],input=json.dumps({'session_id':'seq'}),env=env,capture_output=True,text=True)
+    seq_body=json.loads(seq_stop.stdout)
+    assert seq_body.get('decision')=='block' and 'concurrently' in seq_body.get('reason',''),seq_body
+    # Owner bypass lifts both gates only while the marker file is present.
+    subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'byp','prompt':'Update 12 files across independent modules.'}),env=env,capture_output=True,text=True)
+    (home/'.delegation-protocol/bypass').write_text('owner note\n')
+    allowed=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'byp','tool_name':'Edit'}),env=env,capture_output=True,text=True)
+    assert json.loads(allowed.stdout)=={},allowed.stdout
+    byp_stop=subprocess.run([sys.executable,str(HOOK),'turn-stop'],input=json.dumps({'session_id':'byp'}),env=env,capture_output=True,text=True)
+    assert json.loads(byp_stop.stdout)=={},byp_stop.stdout
+    (home/'.delegation-protocol/bypass').unlink()
     r=subprocess.run([sys.executable,str(ENGINE),"uninstall","--host","codex","--home",str(home),"--repo",str(ROOT)],env=env,capture_output=True,text=True); assert r.returncode==0,r.stderr
     assert not (home/'.delegation-protocol/hook_adapter.py').exists()
     assert not (home/'.delegation-protocol').exists()
