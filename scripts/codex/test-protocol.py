@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""v2 Codex host installation and clean-break smoke tests."""
+"""Codex host installation and native lifecycle smoke tests."""
 import json, os, re, shutil, subprocess, sys, tempfile
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
@@ -38,21 +38,11 @@ def main():
     home=Path(raw); env=dict(os.environ, CODEX_HOME=str(home))
     r=subprocess.run([sys.executable,str(ENGINE),"install","--host","codex","--home",str(home),"--repo",str(ROOT)],env=env,capture_output=True,text=True)
     assert r.returncode==0,r.stderr
-    m=json.loads((home/'.delegation-protocol/manifest.json').read_text()); assert m['version']==2 and m['release']=='session_release'
+    m=json.loads((home/'.delegation-protocol/manifest.json').read_text()); assert m['version']==3 and m['release']=='session_release'
     hooks=json.loads((home/'hooks.json').read_text())['hooks']
     assert 'SubagentStart' in hooks and 'SubagentStop' in hooks
     assert 'PostToolUse' not in hooks, 'Codex completion must use native subagent lifecycle events'
-    assert (home/'.delegation-protocol/delegationctl.py').is_symlink()
-    if os.name == 'nt':
-      launcher=home/'.delegation-protocol/delegationctl.cmd'; assert launcher.is_file()
-      assert str(Path(sys.executable)) in launcher.read_text()
-      command=os.environ.get('COMSPEC', r'C:\Windows\System32\cmd.exe')
-      clean_env=dict(env, PATH='')
-      invoked=subprocess.run([command,'/d','/c',str(launcher),'--help'],env=clean_env,capture_output=True,text=True)
-      assert invoked.returncode==0,invoked.stderr or invoked.stdout
-    else:
-      launcher=home/'.delegation-protocol/delegationctl'; assert launcher.is_symlink()
-    assert not (home/'.delegation-protocol/mux-scheduler.py').exists()
+    assert (home/'.delegation-protocol/hook_adapter.py').is_symlink()
     worker = home/'agents/bulk_worker.toml'; worker.write_text('user change\n')
     r2=subprocess.run([sys.executable,str(ENGINE),"install","--host","codex","--home",str(home),"--repo",str(ROOT)],env=env,capture_output=True,text=True)
     assert r2.returncode != 0 and 'unowned destination' in r2.stderr
@@ -75,7 +65,7 @@ def main():
     stopped=subprocess.run([sys.executable,str(HOOK),'turn-stop'],input=json.dumps({'session_id':'s'}),env=env,capture_output=True,text=True)
     assert stopped.returncode==0 and json.loads(stopped.stdout)=={}, 'session release created impossible finished-worker warning'
     r=subprocess.run([sys.executable,str(ENGINE),"uninstall","--host","codex","--home",str(home),"--repo",str(ROOT)],env=env,capture_output=True,text=True); assert r.returncode==0,r.stderr
-    assert not launcher.exists()
+    assert not (home/'.delegation-protocol/hook_adapter.py').exists()
     assert not (home/'.delegation-protocol').exists()
-  print('Codex v2 host tests: PASS')
+  print('Codex host tests: PASS')
 if __name__=='__main__': main()

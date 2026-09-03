@@ -23,8 +23,7 @@ try:
 except ImportError:
     import settings
 
-VERSION = 2
-PYTHON_EXECUTABLE_TOKEN = "@PYTHON_EXECUTABLE@"
+VERSION = 3
 
 
 def _strip_windows_extended_prefix(value: str) -> str:
@@ -63,20 +62,7 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def launcher_bytes(source: Path, python_executable: str) -> bytes:
-    """Render a Windows launcher bound to the trusted install interpreter."""
-    template = source.read_text(encoding="utf-8")
-    if template.count(PYTHON_EXECUTABLE_TOKEN) != 1:
-        raise SystemExit(f"invalid Windows launcher template: {source}")
-    if any(character in python_executable for character in '\"\r\n'):
-        raise SystemExit("Python executable path is unsafe for a Windows launcher")
-    escaped = python_executable.replace("%", "%%")
-    return template.replace(PYTHON_EXECUTABLE_TOKEN, escaped).encode("utf-8")
-
-
 def resource_digest(source: Path, kind: str) -> str:
-    if kind == "launcher":
-        return hashlib.sha256(launcher_bytes(source, sys.executable)).hexdigest()
     return digest(source)
 
 
@@ -145,24 +131,7 @@ def acquire_lock(state: Path) -> Path:
 
 def resources(repo: Path, home: Path, host: str) -> list[tuple[Path, Path, str]]:
     state = home / ".delegation-protocol"
-    launcher = (
-        (repo / "scripts/agents/delegationctl.cmd.tmpl", state / "delegationctl.cmd", "launcher")
-        if os.name == "nt" else
-        (repo / "scripts/agents/delegationctl", state / "delegationctl", "link")
-    )
     common = [
-        launcher,
-        (repo / "scripts/agents/delegationctl.py", state / "delegationctl.py", "link"),
-        (repo / "scripts/agents/lane_service.py", state / "lane_service.py", "link"),
-        (repo / "scripts/agents/managed_service.py", state / "managed_service.py", "link"),
-        (repo / "scripts/agents/execution_engine.py", state / "execution_engine.py", "link"),
-        (repo / "scripts/agents/permission_service.py", state / "permission_service.py", "link"),
-        (repo / "scripts/agents/claude_runtime.py", state / "claude_runtime.py", "link"),
-        (repo / "agents/protocol-v2.json", state / "protocol-v2.json", "link"),
-        (repo / "agents/contracts/deployment-v1.schema.json",
-         state / "deployment-v1.schema.json", "link"),
-        (repo / "agents/contracts/permission-v1.schema.json",
-         state / "permission-v1.schema.json", "link"),
         (repo / "scripts/agents/delegation-classifier.py", state / "delegation-classifier.py", "link"),
         (repo / "scripts/hosts/hook_adapter.py", state / "hook_adapter.py", "link"),
         (repo / "scripts/hosts/lifecycle.py", state / "lifecycle.py", "link"),
@@ -336,7 +305,7 @@ def validate_destination(source: Path, destination: Path, kind: str, owned: bool
         return
     if kind == "link" and same_link(destination, source):
         return
-    if kind in {"copy", "launcher"} and destination.is_file() and owned and recorded and digest(destination) == recorded:
+    if kind == "copy" and destination.is_file() and owned and recorded and digest(destination) == recorded:
         return
     raise SystemExit(f"refusing to overwrite unowned destination: {destination}")
 
@@ -365,7 +334,7 @@ def install(repo: Path, home: Path, host: str) -> None:
     manifest_path = state / "manifest.json"
     previous = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else None
     if previous and previous.get("version") != VERSION:
-        raise SystemExit("v1 installation detected; use the tagged v1 uninstaller before installing protocol v2")
+        raise SystemExit("legacy scheduler-based installation detected; use the tagged v2 uninstaller before installing native-only protocol v3")
     # Complete source/path preflight before creating any home or state entry.
     prepare(repo, home, host, previous)
     state.mkdir(parents=True, exist_ok=True)
@@ -398,10 +367,7 @@ def install(repo: Path, home: Path, host: str) -> None:
                     continue
                 prior = destination.read_bytes() if destination.exists() else None
                 changed.append((destination, prior, prior is not None))
-                if kind == "launcher":
-                    atomic_bytes(destination, launcher_bytes(source, sys.executable))
-                else:
-                    shutil.copy2(source, destination)
+                shutil.copy2(source, destination)
         policy = None
         if host == "codex":
             policy, rollback_policy = install_codex_policy(
@@ -473,7 +439,7 @@ def uninstall(home: Path, host: str) -> None:
             source = Path(resource.get("source", ""))
             owned_link = resource.get("kind") == "link" and same_link(path, source)
             owned_copy = (
-                resource.get("kind") in {"copy", "launcher"} and path.is_file() and
+                resource.get("kind") == "copy" and path.is_file() and
                 digest(path) == manifest.get("hashes", {}).get(name)
             )
             if owned_link or owned_copy:
