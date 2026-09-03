@@ -37,6 +37,18 @@ def main():
       assert q.returncode==0,q.stderr
     q=subprocess.run([sys.executable,str(HOOK),'turn-stop'],input=json.dumps({'session_id':'s'}),env=env,capture_output=True,text=True)
     assert q.returncode==0 and json.loads(q.stdout)=={}
+    # A relayed task-notification is a worker's/system's words, not the
+    # user's -- even one dense with trip words (steps, token counts, review/
+    # verify wording) must not be classified as a fresh delegation-requiring
+    # prompt, and must not disturb the (already-clear) state it lands on.
+    subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'relay','prompt':'Say hi.'}),env=env,capture_output=True,text=True)
+    notif_body=('<task-notification>\n<result>1. review\n2. verify\n3. analyze\n'
+                '4. check\n5. audit\nstated budget of 999999 tokens\n'
+                '</result>\n</task-notification>')
+    relay=subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'relay','prompt':notif_body}),env=env,capture_output=True,text=True)
+    assert relay.returncode==0 and json.loads(relay.stdout)=={},relay.stdout
+    relay_stop=subprocess.run([sys.executable,str(HOOK),'turn-stop'],input=json.dumps({'session_id':'relay'}),env=env,capture_output=True,text=True)
+    assert json.loads(relay_stop.stdout)=={},relay_stop.stdout
     # Mutation is blocked before required delegation is satisfied.
     subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'pm','prompt':'Update 12 files across independent modules.'}),env=env,capture_output=True,text=True)
     blocked=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'pm','tool_name':'Edit'}),env=env,capture_output=True,text=True)
