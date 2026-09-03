@@ -117,6 +117,7 @@ def _load(path: Path, mode: str) -> dict[str, Any]:
         "min_agents": int(state.get("min_agents", 0)),
         "active": list(state.get("active", [])),
         "finished": list(state.get("finished", [])),
+        "concurrent": list(state.get("concurrent", [])),
         "observed": list(state.get("observed", [])),
         "peak_active": int(state.get("peak_active", 0)),
         "completed": bool(state.get("completed")),
@@ -203,6 +204,7 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
             mode,
             set(state["active"]),
             set(state["finished"]),
+            set(state["concurrent"]),
         )
         output = None
         if event == "prompt":
@@ -242,7 +244,7 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
                 observed.add(worker)
                 state["observed"] = sorted(observed)
                 state["peak_active"] = max(
-                    state["peak_active"], len(lifecycle.active)
+                    state["peak_active"], len(lifecycle.concurrent)
                 )
         elif event == "worker-complete":
             worker = _worker(payload)
@@ -277,6 +279,7 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         state.update({
             "active": sorted(lifecycle.active),
             "finished": sorted(lifecycle.finished),
+            "concurrent": sorted(lifecycle.concurrent),
             "mode": mode,
         })
         _save(path, state)
