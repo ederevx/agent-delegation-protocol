@@ -1,41 +1,39 @@
-# Agent Delegation Protocol v2
+# Agent Delegation Protocol
 
-Protocol v2 lets a frontier coding model coordinate bounded work through one
-backend-neutral contract. The parent retains planning, judgment, integration,
-conflict resolution, and final validation. Selected backends receive exact
-task envelopes and return stable JSON receipts.
+The protocol answers one question: did the host actually perform native
+delegation before the parent is allowed to mutate or finish its turn? It has
+no scheduler, provider catalog, or transport of its own. The parent retains
+planning, judgment, integration, conflict resolution, and final validation;
+selected work is bounded work the parent hands to native subagents the host
+already knows how to run.
 
-v2 is a clean break. It has no compatibility runtime, queue wrapper, alternate
-scheduler, or in-place state migration from v1.
+This is a clean break from the earlier scheduler-based generation of this
+protocol. It has no compatibility runtime, request-file transport, managed
+deployment, or in-place state migration from that generation.
 
 ## Architecture
 
 ```text
 frontier parent
-      │ bounded request file
+      │ prompt submitted
       ▼
-lifecycle-visible host worker
-      │ run, batch, or resume
-      ▼
-delegationctl ─── selected adapter or managed execution engine
-      │
-      └── managed service ── authenticated gateway ── provider API
-                  └──────── named FIFO resource ──────┘
+deterministic classifier ── requires_delegation / requires_multi / min_agents
       │
       ▼
-structured receipt → parent integration and validation
+host-native subagent lifecycle (SubagentStart / SubagentStop)
+      │
+      ├── PreToolUse gate ── blocks parent mutation until delegation evidence exists
+      │
+      └── Stop gate ── blocks turn completion until delegation evidence exists
 ```
 
-`delegationctl` validates catalogs and requests and selects an available
-backend by capability and an exact cost tier. External JSON adapters use the
-role-blind scheduler lane. Managed deployments instead route interactive and
-delegated traffic through one authenticated gateway. That service owns FIFO
-admission for each actual provider request; runtimes receive only scoped dummy
-credentials and never receive or reenter a shared lane lease.
-
-An adapter may translate the common contract into deployment-specific API or
-model settings. Those details stay in the integration; they do not enter host
-policy, the core catalog schema, or task manifests.
+The classifier is a deterministic, host-agnostic function of the prompt text:
+bulk/size/multi-step/shard/domain-family signals and an explicit token-budget
+threshold (25% of the active context window) decide whether delegation is
+required, whether it must fan out to multiple agents, and the minimum agent
+count. Nothing here talks to an external provider, gateway, or credential
+store — native agent concurrency is unconstrained except by the host's own
+capabilities.
 
 The generated low-tier workers handle bounded low-risk work that needs little
 interpretation, including mechanical edits, straightforward audits, extraction,
@@ -48,74 +46,34 @@ retains architecture, integration, conflict resolution, and final validation.
 ## Repository layout
 
 ```text
-agents/                 v2 catalog, schemas, worker source and profiles
-scripts/agents/         controller, managed runtime, lane, adapter and tests
-scripts/hosts/          shared installer, settings and lifecycle engine
-scripts/codex/          thin Codex install/uninstall wrappers
-scripts/claude/         thin Claude install/uninstall wrappers
-codex/                  Codex policy, hook and generated worker
-claude/                 Claude policy, hook and generated worker
-integrations/ci-claude/ optional external session-backend catalog fragment
-docs/audit/             history rewrite ledger and convention evidence
+agents/                 worker profiles and rendering templates
+scripts/agents/          classifier and worker-rendering tooling
+scripts/hosts/           shared installer, settings and lifecycle engine
+scripts/codex/           thin Codex install/uninstall wrappers
+scripts/claude/          thin Claude install/uninstall wrappers
+codex/                   Codex policy, hook and generated worker
+claude/                  Claude policy, hook and generated worker
+docs/audit/              history rewrite ledger and convention evidence
 ```
 
 Codex and Claude installations are independent. Both use the same core
-contracts and classifier, while their manifests declare different lifecycle
+classifier and hook adapter, while their manifests declare different lifecycle
 release modes.
 
-## Catalog and requests
+## Delegation evidence
 
-[`agents/protocol-v2.json`](agents/protocol-v2.json) contains native backends,
-route membership, and optional catalog includes. Each backend declares exactly
-one kind (`native`, `oneshot`, or `session`), selector capabilities,
-availability checks, JSON, managed, or native delivery, and an exact cost tier.
-External JSON adapters declare a scheduler lane; managed backends name a
-separately installed deployment whose resource configuration is authoritative.
-Route order defines fallback order after exact-tier filtering. Selection never
-crosses tiers. The default `bulk` route keeps the configured external-first
-cost order; `native-bulk` provides an explicit local-only handoff for tasks
-whose source material must not leave the native host boundary.
+There is no request schema, receipt, or backend selection. The only proof of
+delegation the protocol recognizes is the host's own native subagent
+lifecycle: a `SubagentStart` event opens a worker slot for the session, and a
+matching `SubagentStop` (or, on Claude, a foreground Agent result) closes it.
+`scripts/hosts/hook_adapter.py` tracks per-session lifecycle state under
+`.delegation-protocol/hook-state/`; `scripts/agents/delegation-classifier.py`
+decides, purely from the prompt, whether delegation is required at all and
+how many concurrent workers it must reach.
 
-`run` and `batch` accept `--request-file`. Their top-level selector fields are:
-
-- `schema_version`, fixed at `2`;
-- `route`, `tier`, `runtime`, `platform`, `function`, `mode`, and `workspace`;
-- `task` for `run`, or non-empty `tasks` for `batch`.
-
-Every task contains exactly `schema_version`, `id`, `mode`, `repo`, `prompt`,
-`allowed_paths`, `workspace`, `validation`, and `budgets`. Budgets contain
-positive `timeout_seconds`, `max_output_bytes`, and `max_steps`. Tiers classify
-the judgment and cost appropriate to a task; they do not impose protocol token
-ceilings. Validation is a list of exact argv arrays. Credentials and deployment
-settings are never task data.
-
-`resume` accepts exactly `schema_version`, `backend`, `token`, and a bounded
-`resolution` object. It continues the selected session and never falls through
-to another backend.
-
-Stable receipt statuses are `native_required`, `ready`, `yielded`,
-`permission_required`, `completed`, `failed`, and `cancelled`. A native handoff
-exits 69 before any external launch. A paused receipt retains its opaque token;
-terminal receipts do not authorize replay. Adapter failure never triggers a
-silent native retry.
-
-Schemas live in [`agents/contracts`](agents/contracts). A runnable neutral
-adapter and conformance suite demonstrate one-shot, session, batch, pause,
-resume, cancellation, and lane behavior.
-
-## Managed deployments
-
-[`agents/contracts/deployment-v1.schema.json`](agents/contracts/deployment-v1.schema.json)
-defines provider-neutral gateway, resource, runtime, inference, execution, and
-credential-reference policy. Secret values live only in the protected protocol
-credential store. The managed service owns singleton election, client
-registration, credential injection, restart-safe background bindings, request
-admission, streaming, and idle retirement.
-
-The ci-claude catalog fragment names the `ci-claude` deployment. Its external
-repository contains only deployment JSON and launch shims; all operational
-management lives here. When the deployment or runtime executable is absent,
-selection falls back to the applicable native backend before launch.
+`PreToolUse` denies an eligible parent mutation until that evidence exists.
+`Stop` denies turn completion the same way. Neither gate consults a catalog,
+lane, or credential store — there is nothing external left to consult.
 
 ## Install one host
 
@@ -139,32 +97,10 @@ mutation. It uses a lock, atomic settings writes, rollback, and a complete
 ownership manifest. Uninstall removes only unchanged protocol-owned resources
 and preserves unrelated configuration.
 
-Each host receives an absolute controller launcher under its active home at
-`.delegation-protocol/delegationctl` on POSIX or
-`.delegation-protocol/delegationctl.cmd` on Windows. The Windows launcher is
-bound to the trusted interpreter used for installation, so worker execution
-does not depend on `python` or `python3` being present on `PATH`.
-
-Install a deployment and its launch shim, then enroll its credential without
-placing the secret on an argument vector. Replace `delegationctl[.cmd]` below
-with the absolute platform launcher under the active host home:
-
-```bash
-delegationctl[.cmd] deployment install --config deployment.json \
-  --launcher ci-claude.sh ci-claude
-delegationctl[.cmd] credential set --deployment ci-claude
-delegationctl[.cmd] launch --deployment ci-claude -- --help
-```
-
-`deployment uninstall` refuses active or retained clients and removes its
-credential by default; `--keep-credential` preserves it for rollback.
-Installation and removal use digest-owned manifests and never remove modified
-or unrelated files.
-
 Codex uses `session_release`; a completed worker never creates an impossible
 dismissal warning. Claude uses `automatic_release`; a foreground result clears
-its lifecycle automatically. The hook classifier gates parent mutation and
-turn completion on observed delegation and concurrent fan-out when required.
+its lifecycle automatically. The hook adapter gates parent mutation and turn
+completion on observed delegation and concurrent fan-out when required.
 
 ## Verify
 
@@ -178,38 +114,20 @@ Windows.
 
 ```bash
 python3 scripts/agents/render-bulk-workers.py --check
-python3 scripts/agents/test-protocol-v2.py
-python3 scripts/agents/test-managed-service.py
-python3 scripts/agents/test-managed-controller.py
-python3 scripts/agents/test-claude-runtime.py
-python3 scripts/agents/test-execution-engine.py
-python3 scripts/agents/test-permission-service.py
-python3 integrations/ci-claude/test-integration.py
 python3 scripts/hosts/test-install.py
 python3 scripts/hosts/test-lifecycle.py
 python3 scripts/codex/test-protocol.py
 python3 scripts/claude/test-protocol.py
-python3 scripts/agents/test-audit-commits.py
 ```
 
-The lane, gateway, and managed-controller suites bind local TCP ports. Run them
-in an environment that permits loopback sockets.
+## Rollback
 
-## v1 boundary and rollback
+Before adopting this native-only generation, preserve the prior protocol tip
+with an annotated backup tag. An occupied non-matching manifest is refused
+with instructions to run the uninstaller from the tagged prior checkout. Do
+not mix runtime files or state from the two generations. Rollback means
+checking out the backup tag and using its installer as a unit.
 
-Before adopting v2, preserve both old protocol tips with annotated backup tags.
-This overhaul uses:
-
-```text
-backup/pre-v2-overhaul-main-20260831
-backup/pre-v2-overhaul-ci-agents-20260831
-backup/pre-managed-runtime-v3-20260901
-```
-
-An occupied non-v2 manifest is refused with instructions to run the uninstaller
-from the tagged v1 checkout. Do not mix old runtime files or state into v2.
-Rollback means checking out the backup tag and using its installer as a unit.
-
-The rewrite ledger maps every retained old commit to its new hash and records
-message-convention disposition. Only after the full suite and ledger audit pass
-should canonical refs replace the old tips.
+The rewrite ledger under `docs/audit/` maps every retained old commit to its
+new hash and records message-convention disposition from the last history
+rewrite; it is historical record, not a step this rewrite repeats.
