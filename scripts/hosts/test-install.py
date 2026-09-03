@@ -71,8 +71,36 @@ def test_same_link_paths() -> None:
         )
 
 
+def test_bypass_not_creatable_by_product_code() -> None:
+    """The owner bypass marker must stay a human-only, hand-created file.
+
+    Only `hook_adapter.py` may know about it at all, and only to read it
+    (`Path.is_file()`); nothing shipped may write, touch, or otherwise
+    fabricate it. A future change that lets any agent-facing code create or
+    script around the marker should fail this check and force explicit
+    review rather than landing silently.
+    """
+    root = Path(__file__).resolve().parents[2]
+    allowed_readers = {root / "scripts/hosts/hook_adapter.py"}
+    product_dirs = (
+        root / "scripts/hosts", root / "scripts/agents",
+        root / "claude/hooks", root / "codex/hooks",
+    )
+    offenders = []
+    for directory in product_dirs:
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("*.py")):
+            if path.name.startswith("test-") or path.name.startswith("test_"):
+                continue
+            if "bypass" in path.read_text(encoding="utf-8").lower() and path not in allowed_readers:
+                offenders.append(str(path))
+    assert not offenders, f"unexpected bypass reference outside hook_adapter.py: {offenders}"
+
+
 def main() -> None:
     test_same_link_paths()
+    test_bypass_not_creatable_by_product_code()
     with tempfile.TemporaryDirectory(prefix="protocol-hosts-") as raw:
         root, repo = Path(raw), None
         repo = fixture(root)
