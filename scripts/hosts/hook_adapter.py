@@ -209,6 +209,13 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         output = None
         if event == "prompt":
             prompt = payload.get("prompt") or payload.get("user_prompt") or ""
+            if classifier.RELAYED_MESSAGE.match(str(prompt)):
+                # A relayed worker/peer message or a background task's own
+                # notification, not something the user typed -- leave
+                # whatever obligation is already in flight untouched rather
+                # than classifying its text or resetting evidence collected
+                # so far (see RELAYED_MESSAGE's own docstring).
+                return None
             decision = classifier.classify(
                 str(prompt),
                 state,

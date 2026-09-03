@@ -169,8 +169,10 @@ MUTATING_TOOL_NAME = re.compile(
 # the turn already in flight. Its text is a worker's words, not the user's, so
 # classifying it would judge a report as if the user had typed it, and resetting
 # evidence would discard fan-out already performed for work still in progress.
+# `<task-notification` covers a background task's own completion report, which
+# reaches the host the same way a relayed agent/teammate message does.
 RELAYED_MESSAGE = re.compile(
-    r"\s*(?:<(agent|teammate|cross-session)-message\b|Stop hook feedback:)",
+    r"\s*(?:<(agent|teammate|cross-session)-message\b|<task-notification\b|Stop hook feedback:)",
     re.IGNORECASE,
 )
 
