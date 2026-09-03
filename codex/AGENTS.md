@@ -1,4 +1,4 @@
-# Delegation Protocol v2
+# Delegation Protocol
 
 ## Purpose
 
@@ -18,25 +18,9 @@ permits. Give each worker exclusive ownership, acceptance criteria, validation
 commands, and a required evidence report. The parent is the integration
 authority.
 
-## v2 execution contract
-
-Workers use the common v2 task fields: `schema_version: 2`, `id`, `mode`,
-`repo`, `prompt`, `allowed_paths`, `workspace`, `validation`, and `budgets`.
-Budgets contain positive `timeout_seconds`, `max_output_bytes`, and `max_steps`.
-Requests are written to a file and executed only through the
-absolute launcher under the active Codex home. Use `delegationctl` on POSIX or
-`delegationctl.cmd` on Windows:
-
-```text
-<active-Codex-home>/.delegation-protocol/delegationctl[.cmd] run --request-file <path>
-<active-Codex-home>/.delegation-protocol/delegationctl[.cmd] batch --request-file <path>
-<active-Codex-home>/.delegation-protocol/delegationctl[.cmd] resume --request-file <path>
-```
-
-The scheduler authenticates the local session, owns the provider lane, and
-returns stable structured receipts. Never retry an accepted request through a
-different backend. Treat `permission_required` as a parent decision and
-preserve its exact request ID, backend, token, and operation for `resume`.
+Delegation is proven only by Codex's own native subagent lifecycle
+(`SubagentStart`/`SubagentStop`) — there is no request format, launcher, or
+scheduler to route through.
 
 ## Conflict boundary
 
