@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""v2 Claude host installation and lifecycle smoke tests."""
+"""Claude host installation and native lifecycle smoke tests."""
 import json, os, subprocess, sys, tempfile, importlib.util
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
@@ -11,8 +11,8 @@ def main():
     home=Path(raw); env=dict(os.environ, CLAUDE_CONFIG_DIR=str(home))
     r=subprocess.run([sys.executable,str(ENGINE),"install","--host","claude","--home",str(home),"--repo",str(ROOT)],env=env,capture_output=True,text=True)
     assert r.returncode==0,r.stderr
-    m=json.loads((home/'.delegation-protocol/manifest.json').read_text()); assert m['version']==2 and m['release']=='automatic_release'
-    assert (home/'.delegation-protocol/delegationctl.py').is_symlink()
+    m=json.loads((home/'.delegation-protocol/manifest.json').read_text()); assert m['version']==3 and m['release']=='automatic_release'
+    assert (home/'.delegation-protocol/hook_adapter.py').is_symlink()
     assert (home/'agents/bulk-worker.md').is_symlink()
     assert (home/'agents/balanced-worker.md').is_symlink()
     p=subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'s','prompt':'Update 12 files across independent modules.'}),env=env,capture_output=True,text=True)
@@ -26,7 +26,7 @@ def main():
     assert q.returncode==0 and json.loads(q.stdout)=={}
     (home/'.delegation-protocol/manifest.json').write_text(json.dumps({'version':1}))
     old=subprocess.run([sys.executable,str(ENGINE),"install","--host","claude","--home",str(home),"--repo",str(ROOT)],env=env,capture_output=True,text=True)
-    assert old.returncode != 0 and 'tagged v1 uninstaller' in old.stderr
+    assert old.returncode != 0 and 'tagged v2 uninstaller' in old.stderr
     (home/'.delegation-protocol/manifest.json').write_text(json.dumps(m))
     r=subprocess.run([sys.executable,str(ENGINE),"uninstall","--host","claude","--home",str(home),"--repo",str(ROOT)],env=env,capture_output=True,text=True); assert r.returncode==0,r.stderr
     assert not (home/'agents/bulk-worker.md').exists()
@@ -42,5 +42,5 @@ def main():
     except ValueError: pass
     else: raise AssertionError('invalid settings accepted')
     assert cfg.read_bytes()==b'{invalid'
-  print('Claude v2 host tests: PASS')
+  print('Claude host tests: PASS')
 if __name__=='__main__': main()
