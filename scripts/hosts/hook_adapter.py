@@ -156,6 +156,16 @@ def _mutating(payload: dict[str, Any], classifier: Any) -> bool:
                 classifier.MUTATING_POWERSHELL.search(str(command)))
 
 
+def _context_pulling(payload: dict[str, Any], classifier: Any) -> bool:
+    name = str(payload.get("tool_name") or payload.get("toolName") or "")
+    if classifier.CONTEXT_PULLING_TOOL_NAME.search(name):
+        return True
+    tool = payload.get("tool_input") or payload.get("toolInput") or {}
+    if isinstance(tool, dict) and (tool.get("command") or tool.get("cmd")):
+        return True
+    return False
+
+
 def _unmet(state: dict[str, Any]) -> str | None:
     if not state["requires_delegation"]:
         return None
@@ -255,10 +265,20 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
             lifecycle.end_session()
             state["completed"] = True
         elif event == "pre-mutation":
-            if _mutating(payload, classifier) and not _bypass(home):
-                reason = _unmet(state)
-                if reason:
-                    output = _deny(reason)
+            if not _bypass(home):
+                if _mutating(payload, classifier):
+                    reason = _unmet(state)
+                    if reason:
+                        output = _deny(reason)
+                elif _context_pulling(payload, classifier):
+                    floor = max(state["min_agents"], 1) if state["requires_delegation"] else 1
+                    observed = len(set(state["observed"]))
+                    if observed < floor:
+                        output = _deny(
+                            "Route this to a worker before pulling content "
+                            f"into context (requires at least {floor} "
+                            "lifecycle-visible worker(s))."
+                        )
         elif event == "turn-stop":
             if _bypass(home):
                 state["completed"] = True

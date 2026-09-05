@@ -65,11 +65,23 @@ def main():
     audit_denied=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'audit-0','tool_name':'exec_command','tool_input':{'cmd':'touch changed.txt'}}),env=env,capture_output=True,text=True)
     assert json.loads(audit_denied.stdout)['hookSpecificOutput']['permissionDecision']=='deny'
     audit_read=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'audit-0','tool_name':'exec_command','tool_input':{'cmd':'git status --short'}}),env=env,capture_output=True,text=True)
-    assert json.loads(audit_read.stdout)=={},audit_read.stdout
+    # A read-only shell command still pulls its output into context, so under
+    # the context-pulling gate it is denied the same as a mutating one would
+    # be -- only the tool NAME's mutating-vs-not distinction no longer matters
+    # once a `cmd`/`command` field is present at all.
+    assert json.loads(audit_read.stdout)['hookSpecificOutput']['permissionDecision']=='deny',audit_read.stdout
     p=subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'s','prompt':'Update 12 files across independent modules.'}),env=env,capture_output=True,text=True)
     assert p.returncode==0,p.stderr
     denied=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'s','tool_name':'Edit'}),env=env,capture_output=True,text=True)
     assert json.loads(denied.stdout)['hookSpecificOutput']['permissionDecision']=='deny'
+    # Same context-pulling gate on a session with no prior prompt classification
+    # at all -- default state (requires_delegation False) still gates a
+    # content-pulling exec call.
+    ctx_denied=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'ctxpull','tool_name':'exec_command','tool_input':{'cmd':'cat file.txt'}}),env=env,capture_output=True,text=True)
+    assert json.loads(ctx_denied.stdout)['hookSpecificOutput']['permissionDecision']=='deny',ctx_denied.stdout
+    subprocess.run([sys.executable,str(HOOK),'worker-start'],input=json.dumps({'session_id':'ctxpull','agent_id':'worker-a'}),env=env,capture_output=True,text=True)
+    ctx_allowed=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'ctxpull','tool_name':'exec_command','tool_input':{'cmd':'cat file.txt'}}),env=env,capture_output=True,text=True)
+    assert json.loads(ctx_allowed.stdout)=={},ctx_allowed.stdout
     for event, worker in (('worker-start','worker-a'), ('worker-start','worker-b'), ('worker-complete','worker-a'), ('worker-complete','worker-b')):
       q=subprocess.run([sys.executable,str(HOOK),event],input=json.dumps({'session_id':'s','agent_id':worker}),env=env,capture_output=True,text=True)
       assert q.returncode==0,q.stderr
