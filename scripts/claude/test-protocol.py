@@ -53,6 +53,15 @@ def main():
     subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'pm','prompt':'Update 12 files across independent modules.'}),env=env,capture_output=True,text=True)
     blocked=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'pm','tool_name':'Edit'}),env=env,capture_output=True,text=True)
     assert json.loads(blocked.stdout)['hookSpecificOutput']['permissionDecision']=='deny',blocked.stdout
+    # A context-pulling tool (Read, Grep, Glob, a shell command...) is gated
+    # too, even on a session that never had a prompt classified as requiring
+    # delegation at all -- reading/searching costs parent context regardless
+    # of what the classifier decided.
+    ctx_denied=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'ctx','tool_name':'Read'}),env=env,capture_output=True,text=True)
+    assert json.loads(ctx_denied.stdout)['hookSpecificOutput']['permissionDecision']=='deny',ctx_denied.stdout
+    subprocess.run([sys.executable,str(HOOK),'worker-start'],input=json.dumps({'session_id':'ctx','agent_id':'worker-a'}),env=env,capture_output=True,text=True)
+    ctx_allowed=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'ctx','tool_name':'Read'}),env=env,capture_output=True,text=True)
+    assert json.loads(ctx_allowed.stdout)=={},ctx_allowed.stdout
     # Stop detects unsatisfied delegation instead of silently ending the turn.
     stop_unmet=subprocess.run([sys.executable,str(HOOK),'turn-stop'],input=json.dumps({'session_id':'pm'}),env=env,capture_output=True,text=True)
     stop_body=json.loads(stop_unmet.stdout)
