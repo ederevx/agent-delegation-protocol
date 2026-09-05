@@ -30,7 +30,7 @@ def main():
     assert worker_wired_events=={'SubagentStart','SubagentStop','PostToolUseFailure'},worker_wired_events
     p=subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'s','prompt':'Update 12 files across independent modules.'}),env=env,capture_output=True,text=True)
     assert p.returncode==0,p.stderr
-    assert 'hookSpecificOutput' in json.loads(p.stdout)
+    assert json.loads(p.stdout)=={},p.stdout
     # Normalized lifecycle events release foreground workers automatically.
     for event, worker in (("worker-start", "worker-a"), ("worker-start", "worker-b"), ("worker-complete", "worker-a"), ("worker-complete", "worker-b")):
       q=subprocess.run([sys.executable,str(HOOK),event],input=json.dumps({'session_id':'s','agent_id':worker}),env=env,capture_output=True,text=True)
