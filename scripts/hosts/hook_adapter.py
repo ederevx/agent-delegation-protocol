@@ -233,16 +233,6 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
                 "min_agents": int(decision["min_agents"]),
                 "completed": False,
             })
-            if decision["requires_delegation"]:
-                reasons = "; ".join(decision["classification_reasons"])
-                context = (
-                    f"Delegation protocol v2 requires {decision['min_agents']} "
-                    f"lifecycle-visible worker(s) for this turn: {reasons}."
-                )
-                output = {"hookSpecificOutput": {
-                    "hookEventName": "UserPromptSubmit",
-                    "additionalContext": context,
-                }}
         elif event == "worker-start":
             worker = _worker(payload)
             if worker:
