@@ -59,8 +59,9 @@ def main():
     for index, prompt in enumerate(('Check hooks and evaluate', 'Inspect hooks', 'Verify hooks', 'Diagnose hooks')):
       audit=subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':f'audit-{index}','prompt':prompt}),env=env,capture_output=True,text=True)
       assert audit.returncode==0,audit.stderr
-      audit_context=json.loads(audit.stdout)['hookSpecificOutput']['additionalContext']
-      assert 'requires 1 lifecycle-visible worker' in audit_context,audit_context
+      # Enforcement is the deterministic PreToolUse/Stop gate below, not
+      # injected prompt context -- the prompt event only records state.
+      assert json.loads(audit.stdout)=={},audit.stdout
     audit_denied=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'audit-0','tool_name':'exec_command','tool_input':{'cmd':'touch changed.txt'}}),env=env,capture_output=True,text=True)
     assert json.loads(audit_denied.stdout)['hookSpecificOutput']['permissionDecision']=='deny'
     audit_read=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'audit-0','tool_name':'exec_command','tool_input':{'cmd':'git status --short'}}),env=env,capture_output=True,text=True)
