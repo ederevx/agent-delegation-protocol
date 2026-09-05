@@ -12,9 +12,13 @@ judgment with the parent.
 For independent workstreams, use concurrent native subagents when capacity
 permits. Give each worker exclusive ownership, acceptance criteria, validation
 commands, and a concise evidence report. The parent remains the single
-integration authority. Delegation is proven only by the host's own native
-subagent lifecycle (`SubagentStart`/`SubagentStop`) — there is no other
-delegation channel, request format, or scheduler to route through.
+integration authority. A worker's report states findings or the completed
+result, not a raw dump of what it read or ran; the parent does not repeat a
+worker's completed task to re-obtain the same information, redoing it only to
+independently review, verify, or correct that worker's own claims. Delegation
+is proven only by the host's own native subagent lifecycle
+(`SubagentStart`/`SubagentStop`) — there is no other delegation channel,
+request format, or scheduler to route through.
 
 ## Conflict boundary
 
