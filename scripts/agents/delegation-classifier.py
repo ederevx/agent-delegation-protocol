@@ -165,6 +165,19 @@ MUTATING_TOOL_NAME = re.compile(
     re.IGNORECASE,
 )
 
+# Any tool that pulls file, search, or command content into the parent's own
+# context costs that context the same way whether or not it mutates anything
+# -- so it is judged by the tool call itself, independent of how the turn's
+# prompt text was classified. Matched loosely by substring, same style as
+# MUTATING_TOOL_NAME, since host tool names vary (e.g. Claude's "Bash" vs.
+# Codex's "exec_command") and a name is only one of the two signals used --
+# see `_context_pulling` in hook_adapter.py for the command-field signal
+# that covers exec-shaped tools regardless of their name.
+CONTEXT_PULLING_TOOL_NAME = re.compile(
+    r"(?:read|grep|glob|bash|webfetch|websearch)",
+    re.IGNORECASE,
+)
+
 # A turn opened by a relayed worker or peer message continues the obligations of
 # the turn already in flight. Its text is a worker's words, not the user's, so
 # classifying it would judge a report as if the user had typed it, and resetting
