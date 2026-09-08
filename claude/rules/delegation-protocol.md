@@ -9,9 +9,20 @@ of the active context window. Adjacent tiers intentionally overlap; choose the
 lowest tier with enough reasoning ability. Keep work that needs parent-level
 judgment with the parent.
 
+Analysis stays fully reserved for delegated agents: once a turn is analysis
+(review, audit, verification, or similar), the parent does not perform that
+analysis itself, even after a worker has already started this turn — the
+parent plans, integrates, and validates the worker's findings, it does not
+duplicate the work. Execution stays reserved for delegated agents by default
+too, but with room for the parent to act directly: bounded execution that
+needs no in-depth research and stays under roughly 5% of the active context
+window may still be done by the parent inline.
+
 For independent workstreams, use concurrent native subagents when capacity
 permits. Give each worker exclusive ownership, acceptance criteria, validation
-commands, and a concise evidence report. The parent remains the single
+commands, and a concise evidence report, scoped to a single topic; a task
+that carries different context gets its own subagent rather than being
+folded into an existing worker's scope. The parent remains the single
 integration authority. A worker's report states findings or the completed
 result, not a raw dump of what it read or ran; the parent does not repeat a
 worker's completed task to re-obtain the same information, redoing it only to
