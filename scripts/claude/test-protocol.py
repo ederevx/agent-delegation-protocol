@@ -73,6 +73,15 @@ def main():
     assert json.loads(bash_allowed.stdout)=={},bash_allowed.stdout
     bash_mutating_denied=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'ctxbash','tool_name':'Bash','tool_input':{'command':'rm -rf build'}}),env=env,capture_output=True,text=True)
     assert json.loads(bash_mutating_denied.stdout)['hookSpecificOutput']['permissionDecision']=='deny',bash_mutating_denied.stdout
+    # An analysis-flagged turn ("review", "audit", ...) loses the plain-Bash
+    # exemption: a read-only command is denied same as Read/Grep would be,
+    # until a worker has started.
+    subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'ctxbashaudit','prompt':'Please review and audit this module.'}),env=env,capture_output=True,text=True)
+    bash_audit_denied=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'ctxbashaudit','tool_name':'Bash','tool_input':{'command':'git status'}}),env=env,capture_output=True,text=True)
+    assert json.loads(bash_audit_denied.stdout)['hookSpecificOutput']['permissionDecision']=='deny',bash_audit_denied.stdout
+    subprocess.run([sys.executable,str(HOOK),'worker-start'],input=json.dumps({'session_id':'ctxbashaudit','agent_id':'worker-a'}),env=env,capture_output=True,text=True)
+    bash_audit_allowed=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'ctxbashaudit','tool_name':'Bash','tool_input':{'command':'git status'}}),env=env,capture_output=True,text=True)
+    assert json.loads(bash_audit_allowed.stdout)=={},bash_audit_allowed.stdout
     # Stop detects unsatisfied delegation instead of silently ending the turn.
     stop_unmet=subprocess.run([sys.executable,str(HOOK),'turn-stop'],input=json.dumps({'session_id':'pm'}),env=env,capture_output=True,text=True)
     stop_body=json.loads(stop_unmet.stdout)
