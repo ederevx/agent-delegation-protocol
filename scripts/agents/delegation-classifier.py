@@ -169,12 +169,18 @@ MUTATING_TOOL_NAME = re.compile(
 # context costs that context the same way whether or not it mutates anything
 # -- so it is judged by the tool call itself, independent of how the turn's
 # prompt text was classified. Matched loosely by substring, same style as
-# MUTATING_TOOL_NAME, since host tool names vary (e.g. Claude's "Bash" vs.
-# Codex's "exec_command") and a name is only one of the two signals used --
-# see `_context_pulling` in hook_adapter.py for the command-field signal
-# that covers exec-shaped tools regardless of their name.
+# MUTATING_TOOL_NAME, since host tool names vary and a name is only one of
+# the two signals used -- see `_context_pulling` in hook_adapter.py for the
+# command-field signal that covers exec-shaped tools regardless of their
+# name. Claude's "Bash" is deliberately excluded from this regex: plain
+# (non-mutating) shell execution is exempted from this gate by an explicit
+# tool-name check in `_context_pulling` itself, so the parent can run shell
+# commands directly without a worker having started first, while a mutating
+# bash command is still caught by the separate `_mutating` check. Codex's
+# "exec_command" is still covered here via the command-field signal in
+# `_context_pulling`, independent of this name regex.
 CONTEXT_PULLING_TOOL_NAME = re.compile(
-    r"(?:read|grep|glob|bash|webfetch|websearch)",
+    r"(?:read|grep|glob|webfetch|websearch)",
     re.IGNORECASE,
 )
 

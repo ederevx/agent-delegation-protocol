@@ -158,6 +158,13 @@ def _mutating(payload: dict[str, Any], classifier: Any) -> bool:
 
 def _context_pulling(payload: dict[str, Any], classifier: Any) -> bool:
     name = str(payload.get("tool_name") or payload.get("toolName") or "")
+    if name.strip().lower() == "bash":
+        # Plain (non-mutating) Bash execution is exempt from the
+        # context-pulling gate so the parent can run shell commands directly
+        # without a worker having started first. Mutating bash commands are
+        # still caught separately by `_mutating` above, unaffected by this
+        # exemption since that check runs first in the elif-chain.
+        return False
     if classifier.CONTEXT_PULLING_TOOL_NAME.search(name):
         return True
     tool = payload.get("tool_input") or payload.get("toolInput") or {}
