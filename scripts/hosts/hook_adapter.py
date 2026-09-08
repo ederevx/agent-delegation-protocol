@@ -115,6 +115,7 @@ def _load(path: Path, mode: str) -> dict[str, Any]:
         "requires_delegation": bool(state.get("requires_delegation")),
         "requires_multi": bool(state.get("requires_multi")),
         "analysis_signal": bool(state.get("analysis_signal")),
+        "execution_signal": bool(state.get("execution_signal")),
         "min_agents": int(state.get("min_agents", 0)),
         "active": list(state.get("active", [])),
         "finished": list(state.get("finished", [])),
@@ -191,6 +192,24 @@ def _unmet(state: dict[str, Any]) -> str | None:
     return None
 
 
+def _execution_unmet(state: dict[str, Any]) -> str | None:
+    """Execution's own floor, independent of `_unmet` above.
+
+    `execution_signal` clears at a lower bar than `requires_delegation` (see
+    EXECUTION_WINDOW_SHARE in delegation-classifier.py), so a turn too small
+    to need general delegation can still be too big to execute inline. Only
+    a bare floor of one worker applies here -- no `min_agents`/concurrency
+    requirement, since those belong to the broader delegation decision, not
+    to this narrower one.
+    """
+    if not state.get("execution_signal") or state["observed"]:
+        return None
+    return (
+        "Execution beyond a small, non-research-requiring change is "
+        "reserved for delegated agents; route this to a worker first."
+    )
+
+
 def _deny(reason: str) -> dict[str, Any]:
     return {
         "hookSpecificOutput": {
@@ -254,6 +273,7 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
                 "requires_delegation": bool(decision["requires_delegation"]),
                 "requires_multi": bool(decision["requires_multi"]),
                 "analysis_signal": bool(decision.get("analysis_signal")),
+                "execution_signal": bool(decision.get("execution_signal")),
                 "min_agents": int(decision["min_agents"]),
                 "completed": False,
             })
@@ -281,18 +301,30 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         elif event == "pre-mutation":
             if not _bypass(home):
                 if _mutating(payload, classifier):
-                    reason = _unmet(state)
+                    reason = _unmet(state) or _execution_unmet(state)
                     if reason:
                         output = _deny(reason)
                 elif _context_pulling(payload, classifier, state):
-                    floor = max(state["min_agents"], 1) if state["requires_delegation"] else 1
-                    observed = len(set(state["observed"]))
-                    if observed < floor:
+                    if state.get("analysis_signal"):
+                        # No floor escape here, unlike the branch below: once
+                        # a turn is analysis-flagged, the parent never pulls
+                        # content into its own context for the rest of the
+                        # turn, no matter how many workers have started.
+                        # Analysis stays reserved for delegated agents.
                         output = _deny(
-                            "Route this to a worker before pulling content "
-                            f"into context (requires at least {floor} "
-                            "lifecycle-visible worker(s))."
+                            "Analysis is reserved for delegated agents; "
+                            "route this to a worker instead of pulling "
+                            "content into the parent's own context."
                         )
+                    else:
+                        floor = max(state["min_agents"], 1) if state["requires_delegation"] else 1
+                        observed = len(set(state["observed"]))
+                        if observed < floor:
+                            output = _deny(
+                                "Route this to a worker before pulling content "
+                                f"into context (requires at least {floor} "
+                                "lifecycle-visible worker(s))."
+                            )
         elif event == "turn-stop":
             if _bypass(home):
                 state["completed"] = True
