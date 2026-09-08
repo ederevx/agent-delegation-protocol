@@ -114,6 +114,7 @@ def _load(path: Path, mode: str) -> dict[str, Any]:
         "schema_version": 2,
         "requires_delegation": bool(state.get("requires_delegation")),
         "requires_multi": bool(state.get("requires_multi")),
+        "analysis_signal": bool(state.get("analysis_signal")),
         "min_agents": int(state.get("min_agents", 0)),
         "active": list(state.get("active", [])),
         "finished": list(state.get("finished", [])),
@@ -156,14 +157,19 @@ def _mutating(payload: dict[str, Any], classifier: Any) -> bool:
                 classifier.MUTATING_POWERSHELL.search(str(command)))
 
 
-def _context_pulling(payload: dict[str, Any], classifier: Any) -> bool:
+def _context_pulling(payload: dict[str, Any], classifier: Any,
+                      state: dict[str, Any]) -> bool:
     name = str(payload.get("tool_name") or payload.get("toolName") or "")
-    if name.strip().lower() == "bash":
+    if name.strip().lower() == "bash" and not state.get("analysis_signal"):
         # Plain (non-mutating) Bash execution is exempt from the
-        # context-pulling gate so the parent can run shell commands directly
-        # without a worker having started first. Mutating bash commands are
-        # still caught separately by `_mutating` above, unaffected by this
-        # exemption since that check runs first in the elif-chain.
+        # context-pulling gate so the parent can run direct user orders as
+        # shell commands without a worker having started first -- but only
+        # while this turn carries no "analysis, review, or verification"
+        # wording. An analysis-flagged turn falls through to the
+        # command-field check below instead, same as any other exec-shaped
+        # tool. Mutating bash commands are still caught separately by
+        # `_mutating` above regardless, unaffected by this exemption since
+        # that check runs first in the elif-chain.
         return False
     if classifier.CONTEXT_PULLING_TOOL_NAME.search(name):
         return True
@@ -247,6 +253,7 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
             state.update({
                 "requires_delegation": bool(decision["requires_delegation"]),
                 "requires_multi": bool(decision["requires_multi"]),
+                "analysis_signal": bool(decision.get("analysis_signal")),
                 "min_agents": int(decision["min_agents"]),
                 "completed": False,
             })
@@ -277,7 +284,7 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
                     reason = _unmet(state)
                     if reason:
                         output = _deny(reason)
-                elif _context_pulling(payload, classifier):
+                elif _context_pulling(payload, classifier, state):
                     floor = max(state["min_agents"], 1) if state["requires_delegation"] else 1
                     observed = len(set(state["observed"]))
                     if observed < floor:
