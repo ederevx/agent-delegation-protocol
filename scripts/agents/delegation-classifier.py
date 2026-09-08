@@ -174,11 +174,14 @@ MUTATING_TOOL_NAME = re.compile(
 # command-field signal that covers exec-shaped tools regardless of their
 # name. Claude's "Bash" is deliberately excluded from this regex: plain
 # (non-mutating) shell execution is exempted from this gate by an explicit
-# tool-name check in `_context_pulling` itself, so the parent can run shell
-# commands directly without a worker having started first, while a mutating
-# bash command is still caught by the separate `_mutating` check. Codex's
-# "exec_command" is still covered here via the command-field signal in
-# `_context_pulling`, independent of this name regex.
+# tool-name check in `_context_pulling` itself, so the parent can run direct
+# user orders as shell commands without a worker having started first --
+# but only while the turn's `analysis_signal` (above) is false. A turn
+# carrying "analysis, review, or verification wording" loses that exemption:
+# `_context_pulling` falls through to the command-field signal below, the
+# same path Codex's "exec_command" always takes, since analysis work is
+# exactly the case this gate exists to cover. A mutating bash command is
+# unaffected either way, still caught by the separate `_mutating` check.
 CONTEXT_PULLING_TOOL_NAME = re.compile(
     r"(?:read|grep|glob|webfetch|websearch)",
     re.IGNORECASE,
@@ -340,6 +343,10 @@ def classify(
     multi = False if explicit_no else (
         requires and (shard_signal or bool(previous.get("requires_multi") and carry))
     )
+    # Carried forward the same way `multi` is: a short continuation like
+    # "continue" carries no analysis wording of its own, but the task it
+    # continues is still the analysis task that started it.
+    analysis = evaluation_signal or bool(previous.get("analysis_signal") and carry)
 
     reasons: list[str] = []
     if evaluation_signal:
@@ -376,6 +383,7 @@ def classify(
     result: dict[str, Any] = {
         "requires_delegation": requires,
         "requires_multi": multi,
+        "analysis_signal": analysis,
         "min_agents": min_agents,
         "token_threshold": threshold,
         "classification_reasons": reasons,
