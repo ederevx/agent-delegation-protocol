@@ -20,6 +20,18 @@ is proven only by the host's own native subagent lifecycle
 (`SubagentStart`/`SubagentStop`) — there is no other delegation channel,
 request format, or scheduler to route through.
 
+## Model tiers
+
+`bulk-worker` and `balanced-worker` bind to the `haiku` and `sonnet` model
+aliases, which track the current Claude generation automatically (Haiku 4.5
+and Sonnet 5 as of this writing); the parent stays on the frontier model for
+the active session (Opus 5). Codex has no alias layer, so its bindings are
+explicit slugs: `bulk_worker` → `gpt-5.6-luna`, `balanced_worker` →
+`gpt-5.6-terra`, parent → `gpt-6-astra`. Re-verify Codex's slugs by asking
+Codex directly whenever its lineup changes — it knows its own capability
+tiers better than external documentation — and update this note and
+`codex/AGENTS.md` together.
+
 ## Conflict boundary
 
 Native shared-workspace workers can see current working-tree changes; isolated
@@ -34,6 +46,11 @@ Claude automatically releases a foreground Agent when its result returns.
 Collect and integrate the report normally; do not issue a stop operation for a
 completed foreground worker. Use a stop operation only for a running
 background task that requires cancellation.
+
+Resuming a released worker (via `SendMessage` to its id or name) continues
+it on its original topic only. When the next task is a different topic from
+what the worker was originally deployed on, spawn a fresh worker instead of
+reusing an existing one.
 
 Hooks enforce the deterministic delegation thresholds and request boundary.
 This rule supplies judgment for ambiguity and safety without duplicating
