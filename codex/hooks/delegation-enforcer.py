@@ -5,4 +5,5 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "hosts"
 from hook_adapter import run
 payload = json.load(sys.stdin)
 mode = sys.argv[1] if len(sys.argv) > 1 else "prompt"
-print(json.dumps(run("codex", mode, payload) or {}))
+host = Path(__file__).resolve().parents[1].name
+print(json.dumps(run(host, mode, payload) or {}))
