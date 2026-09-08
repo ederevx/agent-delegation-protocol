@@ -22,6 +22,15 @@ Delegation is proven only by Codex's own native subagent lifecycle
 (`SubagentStart`/`SubagentStop`) — there is no request format, launcher, or
 scheduler to route through.
 
+## Model tiers
+
+`bulk_worker` runs `gpt-5.6-luna`; `balanced_worker` runs `gpt-5.6-terra`; the
+parent frontier session runs `gpt-6-astra`. These are explicit slugs, not
+aliases that auto-track new generations — re-verify them by asking Codex
+directly whenever its model lineup changes (it knows its own capability tiers
+better than external documentation), and update this note and the mirrored
+Claude-side note in `claude/rules/delegation-protocol.md` together.
+
 ## Conflict boundary
 
 Native shared-workspace workers can see current working-tree changes; isolated
@@ -36,3 +45,7 @@ Codex workers report their result and end their host session. The parent
 collects the report, integrates only verified evidence, and runs final
 repository-wide checks. Do not require an unavailable post-result worker
 operation or block completion on one.
+
+Resuming a worker session continues it on its original topic only. When the
+next task is a different topic from its original deployment, start a fresh
+worker instead of reusing the existing session.
