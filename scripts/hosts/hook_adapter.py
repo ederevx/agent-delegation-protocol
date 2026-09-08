@@ -114,6 +114,8 @@ def _load(path: Path, mode: str) -> dict[str, Any]:
         "schema_version": 2,
         "requires_delegation": bool(state.get("requires_delegation")),
         "requires_multi": bool(state.get("requires_multi")),
+        "analysis_signal": bool(state.get("analysis_signal")),
+        "execution_signal": bool(state.get("execution_signal")),
         "min_agents": int(state.get("min_agents", 0)),
         "active": list(state.get("active", [])),
         "finished": list(state.get("finished", [])),
@@ -156,14 +158,19 @@ def _mutating(payload: dict[str, Any], classifier: Any) -> bool:
                 classifier.MUTATING_POWERSHELL.search(str(command)))
 
 
-def _context_pulling(payload: dict[str, Any], classifier: Any) -> bool:
+def _context_pulling(payload: dict[str, Any], classifier: Any,
+                      state: dict[str, Any]) -> bool:
     name = str(payload.get("tool_name") or payload.get("toolName") or "")
-    if name.strip().lower() == "bash":
+    if name.strip().lower() == "bash" and not state.get("analysis_signal"):
         # Plain (non-mutating) Bash execution is exempt from the
-        # context-pulling gate so the parent can run shell commands directly
-        # without a worker having started first. Mutating bash commands are
-        # still caught separately by `_mutating` above, unaffected by this
-        # exemption since that check runs first in the elif-chain.
+        # context-pulling gate so the parent can run direct user orders as
+        # shell commands without a worker having started first -- but only
+        # while this turn carries no "analysis, review, or verification"
+        # wording. An analysis-flagged turn falls through to the
+        # command-field check below instead, same as any other exec-shaped
+        # tool. Mutating bash commands are still caught separately by
+        # `_mutating` above regardless, unaffected by this exemption since
+        # that check runs first in the elif-chain.
         return False
     if classifier.CONTEXT_PULLING_TOOL_NAME.search(name):
         return True
@@ -183,6 +190,24 @@ def _unmet(state: dict[str, Any]) -> str | None:
     if minimum > 1 and state["peak_active"] < minimum:
         return f"Launch at least {minimum} independent workers concurrently."
     return None
+
+
+def _execution_unmet(state: dict[str, Any]) -> str | None:
+    """Execution's own floor, independent of `_unmet` above.
+
+    `execution_signal` clears at a lower bar than `requires_delegation` (see
+    EXECUTION_WINDOW_SHARE in delegation-classifier.py), so a turn too small
+    to need general delegation can still be too big to execute inline. Only
+    a bare floor of one worker applies here -- no `min_agents`/concurrency
+    requirement, since those belong to the broader delegation decision, not
+    to this narrower one.
+    """
+    if not state.get("execution_signal") or state["observed"]:
+        return None
+    return (
+        "Execution beyond a small, non-research-requiring change is "
+        "reserved for delegated agents; route this to a worker first."
+    )
 
 
 def _deny(reason: str) -> dict[str, Any]:
@@ -247,6 +272,8 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
             state.update({
                 "requires_delegation": bool(decision["requires_delegation"]),
                 "requires_multi": bool(decision["requires_multi"]),
+                "analysis_signal": bool(decision.get("analysis_signal")),
+                "execution_signal": bool(decision.get("execution_signal")),
                 "min_agents": int(decision["min_agents"]),
                 "completed": False,
             })
@@ -274,18 +301,30 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         elif event == "pre-mutation":
             if not _bypass(home):
                 if _mutating(payload, classifier):
-                    reason = _unmet(state)
+                    reason = _unmet(state) or _execution_unmet(state)
                     if reason:
                         output = _deny(reason)
-                elif _context_pulling(payload, classifier):
-                    floor = max(state["min_agents"], 1) if state["requires_delegation"] else 1
-                    observed = len(set(state["observed"]))
-                    if observed < floor:
+                elif _context_pulling(payload, classifier, state):
+                    if state.get("analysis_signal"):
+                        # No floor escape here, unlike the branch below: once
+                        # a turn is analysis-flagged, the parent never pulls
+                        # content into its own context for the rest of the
+                        # turn, no matter how many workers have started.
+                        # Analysis stays reserved for delegated agents.
                         output = _deny(
-                            "Route this to a worker before pulling content "
-                            f"into context (requires at least {floor} "
-                            "lifecycle-visible worker(s))."
+                            "Analysis is reserved for delegated agents; "
+                            "route this to a worker instead of pulling "
+                            "content into the parent's own context."
                         )
+                    else:
+                        floor = max(state["min_agents"], 1) if state["requires_delegation"] else 1
+                        observed = len(set(state["observed"]))
+                        if observed < floor:
+                            output = _deny(
+                                "Route this to a worker before pulling content "
+                                f"into context (requires at least {floor} "
+                                "lifecycle-visible worker(s))."
+                            )
         elif event == "turn-stop":
             if _bypass(home):
                 state["completed"] = True

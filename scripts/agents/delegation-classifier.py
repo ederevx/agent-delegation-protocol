@@ -54,6 +54,13 @@ DEFAULT_CONTEXT_WINDOW = 200_000
 STEP_DELEGATION_THRESHOLD = 3
 LONG_BRIEF_WORDS = 150
 
+# Execution (mutating work) is reserved for delegated agents by a lower bar
+# than the general delegation threshold above: a much smaller share of the
+# window is enough to push execution to a worker, on the theory that even a
+# "small" edit is cheap to hand off while a genuinely small one still clears
+# this bar. Same window-relative reasoning as DELEGATION_WINDOW_SHARE.
+EXECUTION_WINDOW_SHARE = 0.05
+
 # A continuation is short by construction. The two halves disagreed here (12
 # words against 14); the longer cutoff wins because carry-forward only ever
 # fires when the previous turn already required delegation and did not finish,
@@ -98,6 +105,16 @@ ACTION_WORDS = (
 EVALUATION_WORDS = (
     "analyze", "analyse", "review", "audit", "check", "evaluate", "inspect",
     "verify", "diagnose",
+)
+
+# Open-ended investigation/exploration, as distinct from EVALUATION_WORDS:
+# assessing something already understood (review/check/verify) versus digging
+# in to understand something that isn't yet. Either one names in-depth
+# research that execution should not attempt to do inline.
+RESEARCH_WORDS = (
+    "investigate", "research", "explore", "dig into", "look into",
+    "find out", "figure out", "discover", "uncover", "understand how",
+    "understand why", "root cause", "track down", "deep dive",
 )
 
 SHARD_WORDS = (
@@ -174,11 +191,14 @@ MUTATING_TOOL_NAME = re.compile(
 # command-field signal that covers exec-shaped tools regardless of their
 # name. Claude's "Bash" is deliberately excluded from this regex: plain
 # (non-mutating) shell execution is exempted from this gate by an explicit
-# tool-name check in `_context_pulling` itself, so the parent can run shell
-# commands directly without a worker having started first, while a mutating
-# bash command is still caught by the separate `_mutating` check. Codex's
-# "exec_command" is still covered here via the command-field signal in
-# `_context_pulling`, independent of this name regex.
+# tool-name check in `_context_pulling` itself, so the parent can run direct
+# user orders as shell commands without a worker having started first --
+# but only while the turn's `analysis_signal` (above) is false. A turn
+# carrying "analysis, review, or verification wording" loses that exemption:
+# `_context_pulling` falls through to the command-field signal below, the
+# same path Codex's "exec_command" always takes, since analysis work is
+# exactly the case this gate exists to cover. A mutating bash command is
+# unaffected either way, still caught by the separate `_mutating` check.
 CONTEXT_PULLING_TOOL_NAME = re.compile(
     r"(?:read|grep|glob|webfetch|websearch)",
     re.IGNORECASE,
@@ -236,9 +256,11 @@ def context_window(env_names: tuple[str, ...] = ()) -> int:
     return DEFAULT_CONTEXT_WINDOW
 
 
-def token_threshold(env_names: tuple[str, ...] = ()) -> int:
+def token_threshold(
+    env_names: tuple[str, ...] = (), share: float = DELEGATION_WINDOW_SHARE
+) -> int:
     """Work at or above this many tokens must be delegated."""
-    return max(1, int(context_window(env_names) * DELEGATION_WINDOW_SHARE))
+    return max(1, int(context_window(env_names) * share))
 
 
 def explicit_tokens(text: str) -> int:
@@ -291,11 +313,13 @@ def classify(
     explicit_no = any(re.search(pattern, lower) for pattern in NO_DELEGATION_PATTERNS)
     action = contains_any(lower, ACTION_WORDS)
     evaluation_signal = contains_any(lower, EVALUATION_WORDS)
+    research_signal = contains_any(lower, RESEARCH_WORDS)
     count = explicit_count(lower)
     bulk_signal = contains_any(lower, BULK_WORDS) or count >= 3
     tokens = explicit_tokens(lower)
     steps = step_count(lower)
     threshold = token_threshold(context_env)
+    execution_threshold = token_threshold(context_env, EXECUTION_WINDOW_SHARE)
     token_signal = tokens >= threshold
     size_signal = (
         token_signal
@@ -340,10 +364,25 @@ def classify(
     multi = False if explicit_no else (
         requires and (shard_signal or bool(previous.get("requires_multi") and carry))
     )
+    # Carried forward the same way `multi` is: a short continuation like
+    # "continue" carries no analysis wording of its own, but the task it
+    # continues is still the analysis task that started it.
+    analysis = evaluation_signal or bool(previous.get("analysis_signal") and carry)
+    # Execution clears delegation at a much lower bar than `requires` above: a
+    # stated budget at or above EXECUTION_WINDOW_SHARE (rather than the full
+    # DELEGATION_WINDOW_SHARE), or in-depth-research wording, pushes even a
+    # turn otherwise too small for `requires` to a worker. Anything that
+    # already set `requires` clears this lower bar automatically.
+    execution = False if explicit_no else (
+        requires or research_signal or tokens >= execution_threshold
+        or bool(previous.get("execution_signal") and carry)
+    )
 
     reasons: list[str] = []
     if evaluation_signal:
         reasons.append("analysis, review, or verification wording")
+    if research_signal:
+        reasons.append("in-depth research wording")
     if count >= 3:
         reasons.append(f"explicit unit count {count}")
     if bulk_signal and count < 3:
@@ -376,8 +415,11 @@ def classify(
     result: dict[str, Any] = {
         "requires_delegation": requires,
         "requires_multi": multi,
+        "analysis_signal": analysis,
+        "execution_signal": execution,
         "min_agents": min_agents,
         "token_threshold": threshold,
+        "execution_token_threshold": execution_threshold,
         "classification_reasons": reasons,
         "explicit_no_delegation": explicit_no,
         "carry_forward": carry,
