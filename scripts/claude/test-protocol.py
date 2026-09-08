@@ -74,14 +74,33 @@ def main():
     bash_mutating_denied=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'ctxbash','tool_name':'Bash','tool_input':{'command':'rm -rf build'}}),env=env,capture_output=True,text=True)
     assert json.loads(bash_mutating_denied.stdout)['hookSpecificOutput']['permissionDecision']=='deny',bash_mutating_denied.stdout
     # An analysis-flagged turn ("review", "audit", ...) loses the plain-Bash
-    # exemption: a read-only command is denied same as Read/Grep would be,
-    # until a worker has started.
+    # exemption: a read-only command is denied same as Read/Grep would be --
+    # analysis is reserved for delegated agents with no escape hatch, so this
+    # stays denied even after a worker has started, unlike the plain
+    # context-pulling floor below.
     subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'ctxbashaudit','prompt':'Please review and audit this module.'}),env=env,capture_output=True,text=True)
     bash_audit_denied=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'ctxbashaudit','tool_name':'Bash','tool_input':{'command':'git status'}}),env=env,capture_output=True,text=True)
     assert json.loads(bash_audit_denied.stdout)['hookSpecificOutput']['permissionDecision']=='deny',bash_audit_denied.stdout
     subprocess.run([sys.executable,str(HOOK),'worker-start'],input=json.dumps({'session_id':'ctxbashaudit','agent_id':'worker-a'}),env=env,capture_output=True,text=True)
-    bash_audit_allowed=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'ctxbashaudit','tool_name':'Bash','tool_input':{'command':'git status'}}),env=env,capture_output=True,text=True)
-    assert json.loads(bash_audit_allowed.stdout)=={},bash_audit_allowed.stdout
+    bash_audit_still_denied=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'ctxbashaudit','tool_name':'Bash','tool_input':{'command':'git status'}}),env=env,capture_output=True,text=True)
+    assert json.loads(bash_audit_still_denied.stdout)['hookSpecificOutput']['permissionDecision']=='deny',bash_audit_still_denied.stdout
+    # A small, non-research change with no signals at all stays parent-executable.
+    subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'small','prompt':'Fix the typo in the README.'}),env=env,capture_output=True,text=True)
+    small_allowed=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'small','tool_name':'Edit'}),env=env,capture_output=True,text=True)
+    assert json.loads(small_allowed.stdout)=={},small_allowed.stdout
+    # In-depth-research wording pushes execution to a worker even though the
+    # turn is too small to trip the general delegation requirement.
+    subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'research','prompt':'Please figure out why this fails.'}),env=env,capture_output=True,text=True)
+    research_denied=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'research','tool_name':'Edit'}),env=env,capture_output=True,text=True)
+    assert json.loads(research_denied.stdout)['hookSpecificOutput']['permissionDecision']=='deny',research_denied.stdout
+    subprocess.run([sys.executable,str(HOOK),'worker-start'],input=json.dumps({'session_id':'research','agent_id':'worker-a'}),env=env,capture_output=True,text=True)
+    research_allowed=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'research','tool_name':'Edit'}),env=env,capture_output=True,text=True)
+    assert json.loads(research_allowed.stdout)=={},research_allowed.stdout
+    # A stated budget at or above 5% of the window (but below the 25%
+    # general-delegation threshold) pushes execution to a worker too.
+    subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'exectok','prompt':'Do this with a budget of 15000 tokens.'}),env=env,capture_output=True,text=True)
+    exectok_denied=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'exectok','tool_name':'Edit'}),env=env,capture_output=True,text=True)
+    assert json.loads(exectok_denied.stdout)['hookSpecificOutput']['permissionDecision']=='deny',exectok_denied.stdout
     # Stop detects unsatisfied delegation instead of silently ending the turn.
     stop_unmet=subprocess.run([sys.executable,str(HOOK),'turn-stop'],input=json.dumps({'session_id':'pm'}),env=env,capture_output=True,text=True)
     stop_body=json.loads(stop_unmet.stdout)
