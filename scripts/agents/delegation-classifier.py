@@ -217,6 +217,43 @@ CONTEXT_PULLING_TOOL_NAME = re.compile(
     re.IGNORECASE,
 )
 
+# The delegation tool itself (Claude's "Agent"/"Task"). Matched as a tight
+# exact name rather than the loose substring style used by
+# MUTATING_TOOL_NAME/CONTEXT_PULLING_TOOL_NAME above, since "agent" and
+# "task" are common English words/tool-name fragments that would
+# false-positive under substring matching against unrelated tool names.
+# Used by `_is_worker_session`/pre-mutation handling in hook_adapter.py to
+# decide whether a worker's own session may spawn a further subagent at
+# all, and if so at what tier -- see WORKER_TIERS below -- independent of
+# whatever the delegation/context-pulling gates above decide.
+AGENT_TOOL_NAME = re.compile(r"^(?:agent|task)$", re.IGNORECASE)
+
+# Worker tiers, lowest first. A worker may delegate (via the Agent/Task tool)
+# only to a strictly lower tier than its own -- never to itself or to a
+# higher tier -- so a delegation chain can only ever move downward and is
+# automatically depth-bounded by the number of tiers, with no cycle
+# possible. The lowest tier can never delegate further. The parent/main
+# agent is not a member of this mapping at all: it is always implicitly
+# above every tier here and is completely exempt from this constraint.
+# Adding a future tier is a one-line append to this tuple; nothing else
+# needs to change.
+WORKER_TIERS: tuple[str, ...] = ("bulk-worker", "balanced-worker")
+WORKER_TIER_RANK: dict[str, int] = {
+    name: rank for rank, name in enumerate(WORKER_TIERS, start=1)
+}
+
+
+def worker_tier_rank(name: str | None) -> int | None:
+    """Rank of a worker tier name (lowest=1), or None if unknown/not a tier."""
+    if not isinstance(name, str):
+        return None
+    return WORKER_TIER_RANK.get(name.strip())
+
+
+def lower_tiers(rank: int) -> tuple[str, ...]:
+    """Worker tier names strictly below `rank`, lowest first."""
+    return tuple(name for name, value in WORKER_TIER_RANK.items() if value < rank)
+
 # A turn opened by a relayed worker or peer message continues the obligations of
 # the turn already in flight. Its text is a worker's words, not the user's, so
 # classifying it would judge a report as if the user had typed it, and resetting
