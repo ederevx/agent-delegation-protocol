@@ -104,29 +104,19 @@ completion on observed delegation and concurrent fan-out when required.
 
 ## Owner bypass
 
-The user may override all ADP rules and disable all ADP hook enforcement,
-including delegation, recursion, and lifecycle requirements. On explicit user
-authorization, an assistant may create or remove
-`<host-config-dir>/.delegation-protocol/bypass`; agents must never enable
-bypass autonomously or infer authorization from a blocked operation.
-
-The marker defaults to `~/.claude/.delegation-protocol/bypass` for Claude and
-`~/.codex/.delegation-protocol/bypass` for Codex; `CLAUDE_CONFIG_DIR` and
-`CODEX_HOME` select the respective host configuration directory. Its presence
-alone activates bypass for all sessions of that host, and it persists until
-removed; contents are an optional note. While present, all ADP rules are
-waived and its hooks permit every event. Removing it restores ADP enforcement.
-This authority does not override host permissions or other protocols.
+ADP enforcement can be lifted only per action, by explicit authorizing text
+in the user's own prompt -- there is no standing bypass or marker file. See
+"Owner bypass" in `claude/rules/delegation-protocol.md` (mirrored in
+`codex/AGENTS.md`) for the full rule.
 
 ## Verify
 
 These tests use disposable homes and do not change live configuration.
-Isolation is asserted, not assumed: every store root resolves through
-`DELEGATION_CONFIG_HOME` and `DELEGATION_STATE_HOME`, the only overrides
-honoured on every platform. The per-platform fallbacks differ
-(`LOCALAPPDATA` on Windows, `XDG_CONFIG_HOME`/`XDG_STATE_HOME`
-elsewhere), so setting an XDG variable alone does not isolate a store on
-Windows.
+Isolation is asserted, not assumed: each host reads its own configuration
+directory. Claude resolves through `CLAUDE_CONFIG_DIR` (defaulting to
+`$HOME/.claude`), and Codex resolves through `CODEX_HOME` (defaulting to
+`$HOME/.codex`). The delegation protocol state is stored under the host's
+configuration directory in `.delegation-protocol/`.
 
 ```bash
 python3 scripts/agents/render-bulk-workers.py --check

@@ -14,7 +14,8 @@
         "name": "balanced-worker",
         "model": "sonnet",
         "effort": "medium",
-        "max_turns": 30
+        "max_turns": 30,
+        "tools": ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "WebFetch", "WebSearch", "NotebookEdit", "SendMessage", "Agent"]
       }
     },
     "codex": {
