@@ -2,8 +2,7 @@
 name: bulk-worker
 description: Lifecycle-visible dispatcher for bounded, low-risk work through native host delegation.
 model: haiku
-effort: medium
-maxTurns: 30
+effort: max
 tools: Read, Write, Edit, Bash, Grep, Glob, WebFetch, WebSearch, NotebookEdit, SendMessage
 ---
 

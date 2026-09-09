@@ -41,7 +41,9 @@ explicit slugs: `bulk_worker` → `gpt-5.6-luna`, `balanced_worker` →
 `gpt-5.6-terra`, parent → `gpt-6-astra`. Re-verify Codex's slugs by asking
 Codex directly whenever its lineup changes — it knows its own capability
 tiers better than external documentation — and update this note and
-`codex/AGENTS.md` together.
+`codex/AGENTS.md` together. Reasoning effort rises as tier falls: `bulk-worker`
+runs the highest effort supported by its host, `balanced-worker` one step
+below, and the parent uses ordinary session effort.
 
 ## Recursive delegation
 

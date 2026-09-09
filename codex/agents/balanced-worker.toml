@@ -2,7 +2,7 @@
 name = "balanced_worker"
 description = "Mid-tier worker for bounded work that needs moderate reasoning but not parent-level architecture or integration."
 model = "gpt-5.6-terra"
-model_reasoning_effort = "medium"
+model_reasoning_effort = "high"
 
 developer_instructions = """
 Handle a bounded delegated task that needs moderate reasoning while preserving the parent frontier model for architecture, ambiguity, integration, and final review.

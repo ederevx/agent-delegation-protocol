@@ -29,7 +29,10 @@ parent frontier session runs `gpt-6-astra`. These are explicit slugs, not
 aliases that auto-track new generations — re-verify them by asking Codex
 directly whenever its model lineup changes (it knows its own capability tiers
 better than external documentation), and update this note and the mirrored
-Claude-side note in `claude/rules/delegation-protocol.md` together.
+Claude-side note in `claude/rules/delegation-protocol.md` together. Reasoning
+effort rises as tier falls: `bulk_worker` runs the highest
+`model_reasoning_effort` in Codex's vocabulary, `balanced_worker` one step
+below, and the parent uses ordinary session effort.
 
 ## Recursive delegation
 

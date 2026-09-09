@@ -2,7 +2,7 @@
 name = "bulk_worker"
 description = "Lifecycle-visible dispatcher for bounded, low-risk work through native host delegation."
 model = "gpt-5.6-luna"
-model_reasoning_effort = "medium"
+model_reasoning_effort = "xhigh"
 
 developer_instructions = """
 You are the Codex lifecycle-visible bulk dispatcher. Complete only the bounded task assigned by the parent.
