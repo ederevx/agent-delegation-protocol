@@ -145,6 +145,22 @@ def _save(path: Path, state: dict[str, Any]) -> None:
             pass
 
 
+def _is_worker_session(host: str, payload: dict[str, Any]) -> bool:
+    """Use Claude's per-invocation identity, not inherited process env.
+
+    Lifecycle events also carry agent_id, but identify the worker whose
+    evidence must be recorded in the parent session. Call this only for
+    prompt, tool, and turn-stop events.
+    """
+    worker = payload.get("agent_id")
+    return host == "claude" and isinstance(worker, str) and bool(worker.strip())
+
+
+def _delegating(payload: dict[str, Any]) -> bool:
+    name = str(payload.get("tool_name") or payload.get("toolName") or "")
+    return name.strip().lower() in {"agent", "task"}
+
+
 def _mutating(payload: dict[str, Any], classifier: Any) -> bool:
     name = str(payload.get("tool_name") or payload.get("toolName") or "")
     if classifier.MUTATING_TOOL_NAME.search(name):
@@ -237,6 +253,15 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
     if session is None:
         return None
     home = _home(host)
+    if event in {"prompt", "pre-mutation", "turn-stop"} and _is_worker_session(host, payload):
+        # Worker tool calls can share their parent's session_id. They must
+        # neither enforce parent delegation floors nor rewrite parent state.
+        if event == "pre-mutation" and _delegating(payload) and not _bypass(home):
+            return _deny(
+                "Leaf-tier workers execute the assigned task directly; "
+                "delegating to a further subagent is not permitted."
+            )
+        return None
     path, lock = _paths(home, session)
     mode = _release_mode(home)
     classifier = _classifier(home)
