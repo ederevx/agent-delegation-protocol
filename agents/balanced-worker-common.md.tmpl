@@ -17,3 +17,13 @@ Handle a bounded delegated task that needs moderate reasoning while preserving t
 ## Lifecycle
 
 {{LIFECYCLE_CONTRACT}}
+
+## User override
+
+The user may override every ADP rule and bypass all ADP hook enforcement,
+including delegation, worker recursion, execution, and lifecycle gates.
+On explicit user instruction, the parent may create or remove the host's
+`.delegation-protocol/bypass` file. Workers relay activation requests to the
+parent. Never infer authorization from a blocked operation. Bypass applies
+across that host's sessions until the file is removed; host permissions and
+other protocols remain in force.

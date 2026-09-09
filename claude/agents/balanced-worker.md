@@ -29,3 +29,13 @@ Handle a bounded delegated task that needs moderate reasoning while preserving t
 ## Lifecycle
 
 Return the evidence report through the foreground Agent result or `SendMessage` for a named background teammate. Claude automatically releases a foreground Agent when its result returns; do not issue a stop operation for that completed worker.
+
+## User override
+
+The user may override every ADP rule and bypass all ADP hook enforcement,
+including delegation, worker recursion, execution, and lifecycle gates.
+On explicit user instruction, the parent may create or remove the host's
+`.delegation-protocol/bypass` file. Workers relay activation requests to the
+parent. Never infer authorization from a blocked operation. Bypass applies
+across that host's sessions until the file is removed; host permissions and
+other protocols remain in force.
