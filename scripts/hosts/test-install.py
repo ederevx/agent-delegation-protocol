@@ -71,79 +71,52 @@ def test_same_link_paths() -> None:
         )
 
 
-def test_bypass_not_creatable_by_product_code() -> None:
-    """ADP product code must not activate its own bypass automatically.
+def test_explicit_authorization_is_single_use() -> None:
+    """The sole remaining override is per-action text, not a standing bypass.
 
-    The user or an explicitly authorized assistant controls the marker.
-    Only the adapter reads it; installers and helpers must not create it.
+    A prompt naming explicit authorization for the next action allows exactly
+    one otherwise-blocked pre-mutation decision, then reverts to normal
+    enforcement for every subsequent action, including an immediate repeat
+    of the same tool call. No file or persistent marker is involved.
     """
-    root = Path(__file__).resolve().parents[2]
-    allowed_readers = {root / "scripts/hosts/hook_adapter.py"}
-    product_dirs = (
-        root / "scripts/hosts", root / "scripts/agents",
-        root / "claude/hooks", root / "codex/hooks",
-    )
-    offenders = []
-    for directory in product_dirs:
-        if not directory.is_dir():
-            continue
-        for path in sorted(directory.glob("*.py")):
-            if path.name.startswith("test-") or path.name.startswith("test_"):
-                continue
-            if "bypass" in path.read_text(encoding="utf-8").lower() and path not in allowed_readers:
-                offenders.append(str(path))
-    assert not offenders, f"unexpected bypass reference outside hook_adapter.py: {offenders}"
-
-
-def test_total_bypass() -> None:
     import os
     import hook_adapter
 
-    with tempfile.TemporaryDirectory(prefix="adp-bypass-") as raw:
-        root = Path(raw)
-        homes = {host: root / host for host in ("claude", "codex")}
-        with patch.dict(os.environ, {
-            "CLAUDE_CONFIG_DIR": str(homes["claude"]),
-            "CODEX_HOME": str(homes["codex"]),
-        }):
-            for host, home in homes.items():
-                marker = home / ".delegation-protocol/bypass"
-                marker.parent.mkdir(parents=True)
-                # Preserve even corrupt state and a busy lock under bypass.
-                state, lock = hook_adapter._paths(home, "s")
-                lock.mkdir(parents=True)
-                state.write_text("invalid state")
-                marker.write_text("explicit owner request")
-                with patch.object(hook_adapter, "_classifier",
-                                  side_effect=RuntimeError("broken classifier")):
-                    for event in ("prompt", "pre-mutation", "turn-stop",
-                                  "worker-start", "worker-complete",
-                                  "worker-release", "session-end"):
-                        for tool in ("Read", "Edit", "Bash", "Agent", "Task"):
-                            for worker in (None, "leaf-a"):
-                                assert hook_adapter.run(host, event, {
-                                    "session_id": "s", "agent_id": worker,
-                                    "tool_name": tool,
-                                    "prompt": "Review and update 12 files",
-                                }) is None
-                    assert state.read_text() == "invalid state"
-                    assert lock.is_dir()
-                    other = "codex" if host == "claude" else "claude"
-                    assert not hook_adapter._bypass(homes[other])
-                    marker.unlink()
-                    try:
-                        hook_adapter.run(host, "pre-mutation", {
-                            "session_id": "s", "tool_name": "Read"})
-                    except RuntimeError as error:
-                        assert str(error) == "broken classifier"
-                    else:
-                        raise AssertionError("Removing bypass did not restore hooks")
+    with tempfile.TemporaryDirectory(prefix="adp-authorization-") as raw:
+        home = Path(raw) / "claude"
+        with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(home)}):
+            authorized_prompt = (
+                "Update 12 files across independent modules. "
+                "I explicitly authorize this action."
+            )
+            assert hook_adapter.run("claude", "prompt", {
+                "session_id": "s", "prompt": authorized_prompt,
+            }) is None
+            # First blocked action after explicit authorization is allowed.
+            assert hook_adapter.run("claude", "pre-mutation", {
+                "session_id": "s", "tool_name": "Edit",
+            }) is None
+            # The very next otherwise-blocked action, even the same tool
+            # call, is denied again -- authorization was consumed, not a
+            # standing bypass.
+            denied = hook_adapter.run("claude", "pre-mutation", {
+                "session_id": "s", "tool_name": "Edit",
+            })
+            assert denied["hookSpecificOutput"]["permissionDecision"] == "deny", denied
+            # Without any authorization language, enforcement behaves as before.
+            assert hook_adapter.run("claude", "prompt", {
+                "session_id": "t", "prompt": "Update 12 files across independent modules.",
+            }) is None
+            unauthorized_denied = hook_adapter.run("claude", "pre-mutation", {
+                "session_id": "t", "tool_name": "Edit",
+            })
+            assert unauthorized_denied["hookSpecificOutput"]["permissionDecision"] == "deny", \
+                unauthorized_denied
 
 
 def main() -> None:
-    test_total_bypass()
+    test_explicit_authorization_is_single_use()
     test_same_link_paths()
-    test_bypass_not_creatable_by_product_code()
     with tempfile.TemporaryDirectory(prefix="protocol-hosts-") as raw:
         root, repo = Path(raw), None
         repo = fixture(root)

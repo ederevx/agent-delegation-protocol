@@ -136,6 +136,27 @@ NO_DELEGATION_PATTERNS = (
     r"\bno (?:delegation|subagents?|agents?)\b",
 )
 
+# The sole remaining override for all ADP enforcement, now that the persistent
+# marker file is retired: a single, explicit, one-shot authorization named in
+# the user's own prompt text for one specific blocked action. Matched as tight
+# anchored phrases, same style as NO_DELEGATION_PATTERNS above, deliberately
+# not a loose keyword-in-text check like ACTION_WORDS/EVALUATION_WORDS --
+# "authorize" alone is too common (contracts, permissions, unrelated prose,
+# or text merely quoted/pasted/relayed from a tool) to trust as a security
+# signal. Each pattern requires first-person voice, the word "explicitly",
+# and a deictic reference naming the action being authorized, so an
+# incidental or ambiguous mention does not consume this override by
+# accident. `hook_adapter.py` records a match as a one-shot pending
+# authorization on the `prompt` event and consumes (clears) it at the next
+# `pre-mutation` event it would otherwise deny -- it never persists past
+# that single decision or past the turn it was granted in.
+EXPLICIT_AUTHORIZATION_PATTERNS = (
+    r"\bi\s+(?:hereby\s+)?explicitly\s+authorize\s+(?:this|the\s+following|the\s+next)\s+"
+    r"(?:action|step|command|tool\s+call|operation)\b",
+    r"\byou\s+have\s+my\s+explicit\s+authorization\s+for\s+(?:this|the\s+following|the\s+next)\s+"
+    r"(?:action|step|command|tool\s+call|operation)\b",
+)
+
 FOLLOWUP_PATTERNS = (
     r"^\s*(?:yes|ok(?:ay)?|sure|continue|proceed|go ahead|do it|keep going|finish it|same|also)\b",
 )
@@ -317,6 +338,9 @@ class _TurnClassifier:
         self.explicit_no = any(
             re.search(pattern, lower) for pattern in NO_DELEGATION_PATTERNS
         )
+        self.explicit_authorization = any(
+            re.search(pattern, lower) for pattern in EXPLICIT_AUTHORIZATION_PATTERNS
+        )
         self.action = contains_any(lower, ACTION_WORDS)
         self.evaluation_signal = contains_any(lower, EVALUATION_WORDS)
         self.research_signal = contains_any(lower, RESEARCH_WORDS)
@@ -447,6 +471,7 @@ class _TurnClassifier:
             "execution_token_threshold": self.execution_threshold,
             "classification_reasons": reasons,
             "explicit_no_delegation": self.explicit_no,
+            "explicit_authorization": self.explicit_authorization,
             "carry_forward": self.carry,
         }
 
