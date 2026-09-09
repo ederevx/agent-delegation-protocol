@@ -25,14 +25,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-# Hook state uses the protocol-v2 schema and is discarded on any mismatch.
-PROTOCOL_VERSION = 2
-
-# How long an untouched v2 session JSON document may sit before a sweep removes
-# it. Host adapters own no sidecar marker directories.
-STATE_TTL_SECONDS = 7 * 24 * 3600
-
-STATE_ENTRY_SUFFIXES = (".json",)
 
 BULK_WORDS = (
     "bulk", "batch", "high-volume", "high volume", "many files", "many modules",
@@ -144,6 +136,27 @@ NO_DELEGATION_PATTERNS = (
     r"\bno (?:delegation|subagents?|agents?)\b",
 )
 
+# The sole remaining override for all ADP enforcement, now that the persistent
+# marker file is retired: a single, explicit, one-shot authorization named in
+# the user's own prompt text for one specific blocked action. Matched as tight
+# anchored phrases, same style as NO_DELEGATION_PATTERNS above, deliberately
+# not a loose keyword-in-text check like ACTION_WORDS/EVALUATION_WORDS --
+# "authorize" alone is too common (contracts, permissions, unrelated prose,
+# or text merely quoted/pasted/relayed from a tool) to trust as a security
+# signal. Each pattern requires first-person voice, the word "explicitly",
+# and a deictic reference naming the action being authorized, so an
+# incidental or ambiguous mention does not consume this override by
+# accident. `hook_adapter.py` records a match as a one-shot pending
+# authorization on the `prompt` event and consumes (clears) it at the next
+# `pre-mutation` event it would otherwise deny -- it never persists past
+# that single decision or past the turn it was granted in.
+EXPLICIT_AUTHORIZATION_PATTERNS = (
+    r"\bi\s+(?:hereby\s+)?explicitly\s+authorize\s+(?:this|the\s+following|the\s+next)\s+"
+    r"(?:action|step|command|tool\s+call|operation)\b",
+    r"\byou\s+have\s+my\s+explicit\s+authorization\s+for\s+(?:this|the\s+following|the\s+next)\s+"
+    r"(?:action|step|command|tool\s+call|operation)\b",
+)
+
 FOLLOWUP_PATTERNS = (
     r"^\s*(?:yes|ok(?:ay)?|sure|continue|proceed|go ahead|do it|keep going|finish it|same|also)\b",
 )
@@ -203,6 +216,43 @@ CONTEXT_PULLING_TOOL_NAME = re.compile(
     r"(?:read|grep|glob|webfetch|websearch)",
     re.IGNORECASE,
 )
+
+# The delegation tool itself (Claude's "Agent"/"Task"). Matched as a tight
+# exact name rather than the loose substring style used by
+# MUTATING_TOOL_NAME/CONTEXT_PULLING_TOOL_NAME above, since "agent" and
+# "task" are common English words/tool-name fragments that would
+# false-positive under substring matching against unrelated tool names.
+# Used by `_is_worker_session`/pre-mutation handling in hook_adapter.py to
+# decide whether a worker's own session may spawn a further subagent at
+# all, and if so at what tier -- see WORKER_TIERS below -- independent of
+# whatever the delegation/context-pulling gates above decide.
+AGENT_TOOL_NAME = re.compile(r"^(?:agent|task)$", re.IGNORECASE)
+
+# Worker tiers, lowest first. A worker may delegate (via the Agent/Task tool)
+# only to a strictly lower tier than its own -- never to itself or to a
+# higher tier -- so a delegation chain can only ever move downward and is
+# automatically depth-bounded by the number of tiers, with no cycle
+# possible. The lowest tier can never delegate further. The parent/main
+# agent is not a member of this mapping at all: it is always implicitly
+# above every tier here and is completely exempt from this constraint.
+# Adding a future tier is a one-line append to this tuple; nothing else
+# needs to change.
+WORKER_TIERS: tuple[str, ...] = ("bulk-worker", "balanced-worker")
+WORKER_TIER_RANK: dict[str, int] = {
+    name: rank for rank, name in enumerate(WORKER_TIERS, start=1)
+}
+
+
+def worker_tier_rank(name: str | None) -> int | None:
+    """Rank of a worker tier name (lowest=1), or None if unknown/not a tier."""
+    if not isinstance(name, str):
+        return None
+    return WORKER_TIER_RANK.get(name.strip())
+
+
+def lower_tiers(rank: int) -> tuple[str, ...]:
+    """Worker tier names strictly below `rank`, lowest first."""
+    return tuple(name for name, value in WORKER_TIER_RANK.items() if value < rank)
 
 # A turn opened by a relayed worker or peer message continues the obligations of
 # the turn already in flight. Its text is a worker's words, not the user's, so
@@ -291,186 +341,175 @@ def step_count(text: str) -> int:
     return max(ordered, listed)
 
 
+class _TurnClassifier:
+    """One turn's classification, split into signal/decision/reason stages.
+
+    `_compute_signals` extracts every independent wording/size/shape signal
+    from the prompt text. `_decide` combines those signals (plus carry-over
+    from the previous turn) into the actual requires/multi/analysis/execution
+    booleans. `_build_reasons` renders the human-readable explanation of
+    `_decide`'s outcome. Each stage only reads state set up by the ones
+    before it, matching the original function's top-to-bottom data flow.
+    """
+
+    def __init__(self, prompt: str, previous: dict[str, Any],
+                 context_env: tuple[str, ...]) -> None:
+        self.previous = previous
+        self.context_env = context_env
+        self.text = (prompt or "").strip()
+        self.lower = self.text.lower()
+        self.words = re.findall(r"\b[\w'-]+\b", self.lower)
+
+    def _compute_signals(self) -> None:
+        lower, words = self.lower, self.words
+        self.explicit_no = any(
+            re.search(pattern, lower) for pattern in NO_DELEGATION_PATTERNS
+        )
+        self.explicit_authorization = any(
+            re.search(pattern, lower) for pattern in EXPLICIT_AUTHORIZATION_PATTERNS
+        )
+        self.action = contains_any(lower, ACTION_WORDS)
+        self.evaluation_signal = contains_any(lower, EVALUATION_WORDS)
+        self.research_signal = contains_any(lower, RESEARCH_WORDS)
+        self.count = explicit_count(lower)
+        self.bulk_signal = contains_any(lower, BULK_WORDS) or self.count >= 3
+        self.tokens = explicit_tokens(lower)
+        self.steps = step_count(lower)
+        self.threshold = token_threshold(self.context_env)
+        self.execution_threshold = token_threshold(
+            self.context_env, EXECUTION_WINDOW_SHARE
+        )
+        self.token_signal = self.tokens >= self.threshold
+        self.size_signal = (
+            self.token_signal
+            or contains_any(lower, SIZE_WORDS)
+            or len(words) >= LONG_BRIEF_WORDS
+        )
+        self.step_signal = (
+            contains_any(lower, MULTI_STEP_WORDS)
+            or self.steps >= STEP_DELEGATION_THRESHOLD
+        )
+        multiple_signal = "multiple" in lower and contains_any(lower, SHARD_WORDS)
+        independent_signal = "independent" in lower and contains_any(lower, SHARD_WORDS)
+
+        distinct_domains = sum(
+            1 for family in DOMAIN_FAMILIES if any(token in lower for token in family)
+        )
+        cross_domain_signal = distinct_domains >= 2 and (
+            " and " in lower or "," in lower or "/" in lower or "across" in lower
+        )
+
+        self.shard_signal = (
+            independent_signal
+            or multiple_signal
+            or cross_domain_signal
+            or contains_any(lower, SEPARABLE_PHRASES)
+        )
+
+        followup = len(words) <= FOLLOWUP_MAX_WORDS and any(
+            re.search(pattern, lower) for pattern in FOLLOWUP_PATTERNS
+        )
+        self.carry = (
+            bool(self.previous.get("requires_delegation"))
+            and not bool(self.previous.get("completed"))
+            and followup
+        )
+
+    def _decide(self) -> None:
+        explicit_no, carry = self.explicit_no, self.carry
+        self.requires = False if explicit_no else (
+            (self.action and (self.bulk_signal or self.shard_signal
+                               or self.size_signal or self.step_signal))
+            or self.evaluation_signal
+            or self.token_signal
+            or carry
+        )
+        self.multi = False if explicit_no else (
+            self.requires and (
+                self.shard_signal
+                or bool(self.previous.get("requires_multi") and carry)
+            )
+        )
+        # Carried forward the same way `multi` is: a short continuation like
+        # "continue" carries no analysis wording of its own, but the task it
+        # continues is still the analysis task that started it.
+        self.analysis = self.evaluation_signal or bool(
+            self.previous.get("analysis_signal") and carry
+        )
+        # Execution clears delegation at a much lower bar than `requires`
+        # above: a stated budget at or above EXECUTION_WINDOW_SHARE (rather
+        # than the full DELEGATION_WINDOW_SHARE), or in-depth-research
+        # wording, pushes even a turn otherwise too small for `requires` to a
+        # worker. Anything that already set `requires` clears this lower bar
+        # automatically.
+        self.execution = False if explicit_no else (
+            self.requires or self.research_signal
+            or self.tokens >= self.execution_threshold
+            or bool(self.previous.get("execution_signal") and carry)
+        )
+        if not self.requires:
+            self.min_agents = 0
+        elif self.multi:
+            self.min_agents = 2
+        else:
+            self.min_agents = 1
+
+    def _build_reasons(self) -> list[str]:
+        reasons: list[str] = []
+        if self.evaluation_signal:
+            reasons.append("analysis, review, or verification wording")
+        if self.research_signal:
+            reasons.append("in-depth research wording")
+        if self.count >= 3:
+            reasons.append(f"explicit unit count {self.count}")
+        if self.bulk_signal and self.count < 3:
+            reasons.append("bulk/high-volume wording")
+        if self.token_signal:
+            reasons.append(
+                f"stated budget of {self.tokens} tokens, at or above the "
+                f"{self.threshold}-token threshold "
+                f"({int(DELEGATION_WINDOW_SHARE * 100)}% of a "
+                f"{context_window(self.context_env)}-token window)"
+            )
+        elif self.size_signal:
+            reasons.append("large-task wording or a long, detailed brief")
+        if self.step_signal:
+            reasons.append(
+                f"multi-step work ({self.steps} steps enumerated)"
+                if self.steps >= STEP_DELEGATION_THRESHOLD else "multi-step wording"
+            )
+        if self.shard_signal:
+            reasons.append("independent/separable subsystem wording")
+        if self.carry:
+            reasons.append("continuation of an unfinished delegated turn")
+        return reasons
+
+    def classify(self) -> dict[str, Any]:
+        self._compute_signals()
+        self._decide()
+        reasons = self._build_reasons()
+        return {
+            "requires_delegation": self.requires,
+            "requires_multi": self.multi,
+            "analysis_signal": self.analysis,
+            "execution_signal": self.execution,
+            "min_agents": self.min_agents,
+            "token_threshold": self.threshold,
+            "execution_token_threshold": self.execution_threshold,
+            "classification_reasons": reasons,
+            "explicit_no_delegation": self.explicit_no,
+            "explicit_authorization": self.explicit_authorization,
+            "carry_forward": self.carry,
+        }
+
+
 def classify(
     prompt: str,
     previous: dict[str, Any],
     *,
-    capacity: int | None = None,
-    continuation_prefix: str | None = None,
     context_env: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """Decide whether a turn must be delegated, and to how many workers.
-
-    `capacity` is the host's concurrent-subagent limit when it has one, and
-    caps `min_agents` so the hook never demands more workers than the runtime
-    will start. `continuation_prefix` marks a turn the protocol itself relayed,
-    which continues the previous turn's obligations regardless of length.
-    """
-    text = (prompt or "").strip()
-    lower = text.lower()
-    words = re.findall(r"\b[\w'-]+\b", lower)
-
-    explicit_no = any(re.search(pattern, lower) for pattern in NO_DELEGATION_PATTERNS)
-    action = contains_any(lower, ACTION_WORDS)
-    evaluation_signal = contains_any(lower, EVALUATION_WORDS)
-    research_signal = contains_any(lower, RESEARCH_WORDS)
-    count = explicit_count(lower)
-    bulk_signal = contains_any(lower, BULK_WORDS) or count >= 3
-    tokens = explicit_tokens(lower)
-    steps = step_count(lower)
-    threshold = token_threshold(context_env)
-    execution_threshold = token_threshold(context_env, EXECUTION_WINDOW_SHARE)
-    token_signal = tokens >= threshold
-    size_signal = (
-        token_signal
-        or contains_any(lower, SIZE_WORDS)
-        or len(words) >= LONG_BRIEF_WORDS
-    )
-    step_signal = (
-        contains_any(lower, MULTI_STEP_WORDS) or steps >= STEP_DELEGATION_THRESHOLD
-    )
-    multiple_signal = "multiple" in lower and contains_any(lower, SHARD_WORDS)
-    independent_signal = "independent" in lower and contains_any(lower, SHARD_WORDS)
-
-    distinct_domains = sum(
-        1 for family in DOMAIN_FAMILIES if any(token in lower for token in family)
-    )
-    cross_domain_signal = distinct_domains >= 2 and (
-        " and " in lower or "," in lower or "/" in lower or "across" in lower
-    )
-
-    shard_signal = (
-        independent_signal
-        or multiple_signal
-        or cross_domain_signal
-        or contains_any(lower, SEPARABLE_PHRASES)
-    )
-
-    followup = len(words) <= FOLLOWUP_MAX_WORDS and any(
-        re.search(pattern, lower) for pattern in FOLLOWUP_PATTERNS
-    )
-    relayed = bool(continuation_prefix) and text.startswith(continuation_prefix)
-    carry = (
-        bool(previous.get("requires_delegation"))
-        and not bool(previous.get("completed"))
-        and (followup or relayed)
-    )
-    requires = False if explicit_no else (
-        (action and (bulk_signal or shard_signal or size_signal or step_signal))
-        or evaluation_signal
-        or token_signal
-        or carry
-    )
-    multi = False if explicit_no else (
-        requires and (shard_signal or bool(previous.get("requires_multi") and carry))
-    )
-    # Carried forward the same way `multi` is: a short continuation like
-    # "continue" carries no analysis wording of its own, but the task it
-    # continues is still the analysis task that started it.
-    analysis = evaluation_signal or bool(previous.get("analysis_signal") and carry)
-    # Execution clears delegation at a much lower bar than `requires` above: a
-    # stated budget at or above EXECUTION_WINDOW_SHARE (rather than the full
-    # DELEGATION_WINDOW_SHARE), or in-depth-research wording, pushes even a
-    # turn otherwise too small for `requires` to a worker. Anything that
-    # already set `requires` clears this lower bar automatically.
-    execution = False if explicit_no else (
-        requires or research_signal or tokens >= execution_threshold
-        or bool(previous.get("execution_signal") and carry)
-    )
-
-    reasons: list[str] = []
-    if evaluation_signal:
-        reasons.append("analysis, review, or verification wording")
-    if research_signal:
-        reasons.append("in-depth research wording")
-    if count >= 3:
-        reasons.append(f"explicit unit count {count}")
-    if bulk_signal and count < 3:
-        reasons.append("bulk/high-volume wording")
-    if token_signal:
-        reasons.append(
-            f"stated budget of {tokens} tokens, at or above the {threshold}-token "
-            f"threshold ({int(DELEGATION_WINDOW_SHARE * 100)}% of a "
-            f"{context_window(context_env)}-token window)"
-        )
-    elif size_signal:
-        reasons.append("large-task wording or a long, detailed brief")
-    if step_signal:
-        reasons.append(
-            f"multi-step work ({steps} steps enumerated)"
-            if steps >= STEP_DELEGATION_THRESHOLD else "multi-step wording"
-        )
-    if shard_signal:
-        reasons.append("independent/separable subsystem wording")
-    if carry:
-        reasons.append("continuation of an unfinished delegated turn")
-
-    if not requires:
-        min_agents = 0
-    elif multi and (capacity is None or capacity >= 2):
-        min_agents = 2
-    else:
-        min_agents = 1
-
-    result: dict[str, Any] = {
-        "requires_delegation": requires,
-        "requires_multi": multi,
-        "analysis_signal": analysis,
-        "execution_signal": execution,
-        "min_agents": min_agents,
-        "token_threshold": threshold,
-        "execution_token_threshold": execution_threshold,
-        "classification_reasons": reasons,
-        "explicit_no_delegation": explicit_no,
-        "carry_forward": carry,
-    }
-    if capacity is not None:
-        result["concurrency_capacity"] = capacity
-    return result
+    """Decide whether a turn must be delegated, and to how many workers."""
+    return _TurnClassifier(prompt, previous, context_env).classify()
 
 
-def state_is_current(data: Any) -> bool:
-    """Whether stored turn state was written by this version of the protocol.
-
-    State that predates the running protocol is discarded rather than migrated.
-    It describes one turn's delegation evidence, so the cost of dropping it is a
-    re-classification, while the cost of misreading a renamed or re-meant key is
-    enforcing the wrong policy for the rest of the session.
-    """
-    return isinstance(data, dict) and data.get("protocol_version") == PROTOCOL_VERSION
-
-
-def reap_state(root: Path, keep: str = "", ttl: int = STATE_TTL_SECONDS) -> int:
-    """Delete session state untouched for `ttl` seconds. Returns files removed.
-
-    `keep` names the session currently running, which is never swept regardless
-    of age -- a long session's state is old by mtime while still being the state
-    in force. Sweeping is best effort: a racing hook may be writing the very
-    entry being removed, and losing that race costs a re-classification.
-    """
-    if not root.is_dir():
-        return 0
-    cutoff = time.time() - max(0, ttl)
-    removed = 0
-    def belongs_to(name: str, session: str) -> bool:
-        return any(name == session + suffix for suffix in STATE_ENTRY_SUFFIXES) \
-            or name.startswith(session + ".json.")
-
-    for path in sorted(root.iterdir()):
-        if keep and belongs_to(path.name, keep):
-            continue
-        try:
-            if path.stat().st_mtime >= cutoff:
-                continue
-        except OSError:
-            continue
-        if path.is_dir():
-            shutil.rmtree(path, ignore_errors=True)
-            removed += 1
-        else:
-            try:
-                path.unlink()
-                removed += 1
-            except OSError:
-                pass
-    return removed

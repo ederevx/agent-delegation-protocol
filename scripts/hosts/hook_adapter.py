@@ -123,6 +123,7 @@ def _load(path: Path, mode: str) -> dict[str, Any]:
         "observed": list(state.get("observed", [])),
         "peak_active": int(state.get("peak_active", 0)),
         "completed": bool(state.get("completed")),
+        "pending_authorization": bool(state.get("pending_authorization")),
         "mode": mode,
     }
 
@@ -156,9 +157,60 @@ def _is_worker_session(host: str, payload: dict[str, Any]) -> bool:
     return host == "claude" and isinstance(worker, str) and bool(worker.strip())
 
 
-def _delegating(payload: dict[str, Any]) -> bool:
+def _delegating(payload: dict[str, Any], classifier: Any) -> bool:
     name = str(payload.get("tool_name") or payload.get("toolName") or "")
-    return name.strip().lower() in {"agent", "task"}
+    return bool(classifier.AGENT_TOOL_NAME.match(name.strip()))
+
+
+def _agent_type(payload: dict[str, Any]) -> str | None:
+    """The declared worker-profile name Claude records for this session.
+
+    Distinct from `_worker`, which identifies a specific worker instance
+    (its agent/task id) rather than which tier profile spawned it. Only
+    meaningful once `_is_worker_session` has already established the
+    session belongs to a worker at all -- `agent_type` alone (with no
+    `agent_id`) also occurs on a parent launched with `--agent` and must
+    not be mistaken for a worker session by itself.
+    """
+    value = payload.get("agent_type")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _requested_tier(payload: dict[str, Any]) -> str | None:
+    """Which profile an Agent/Task call is trying to spawn, from its own args."""
+    tool = payload.get("tool_input") or payload.get("toolInput") or {}
+    if isinstance(tool, dict):
+        value = tool.get("subagent_type")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _tier_violation(payload: dict[str, Any], classifier: Any) -> str | None:
+    """Reason a worker session's own Agent/Task call must be denied.
+
+    Returns None when the call is permitted: the caller's own tier
+    (from `agent_type`) must be known and strictly above the requested
+    target tier (from the tool call's own `subagent_type` argument).
+    Missing or unrecognized tier information on either side fails closed.
+    """
+    caller_name = _agent_type(payload)
+    caller = classifier.worker_tier_rank(caller_name)
+    if caller is None:
+        return (
+            "Leaf-tier workers execute the assigned task directly; "
+            "delegating to a further subagent is not permitted."
+        )
+    lower = classifier.lower_tiers(caller)
+    if not lower:
+        return f"{caller_name} is the lowest tier and cannot delegate further."
+    target = classifier.worker_tier_rank(_requested_tier(payload))
+    if target is not None and target < caller:
+        return None
+    return (
+        f"a {caller_name} may only delegate to a strictly lower tier "
+        f"({', '.join(lower)}), not to itself or higher."
+    )
 
 
 def _mutating(payload: dict[str, Any], classifier: Any) -> bool:
@@ -236,14 +288,167 @@ def _deny(reason: str) -> dict[str, Any]:
     }
 
 
-def _bypass(home: Path) -> bool:
-    """The user may suspend all ADP enforcement with this persistent marker.
+class _SkipSave(Exception):
+    """Raised by a handler to signal the in-flight state must not be persisted."""
 
-    An assistant may create or remove it only on explicit user instruction,
-    never merely because a gate blocks work. Other protocols and host
-    permissions are outside this ADP-only override.
+
+class TurnEventHandler:
+    """Applies one normalized hook event against a single turn's saved state.
+
+    Each `handle_*` method owns exactly one event's decision logic; `handle`
+    is the dispatcher and the only place that knows the event-name-to-method
+    mapping. `state` is mutated in place by design, matching the previous
+    function's behavior of updating the caller-owned dict directly.
     """
-    return (home / ".delegation-protocol" / "bypass").is_file()
+
+    def __init__(self, host: str, classifier: Any, mode: str,
+                 state: dict[str, Any]) -> None:
+        self.host = host
+        self.classifier = classifier
+        self.mode = mode
+        self.state = state
+        self.lifecycle = LifecycleState(
+            mode,
+            set(state["active"]),
+            set(state["finished"]),
+            set(state["concurrent"]),
+        )
+
+    def handle(self, event: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        handlers = {
+            "prompt": self._handle_prompt,
+            "worker-start": self._handle_worker_start,
+            "worker-complete": self._handle_worker_complete,
+            "worker-release": self._handle_worker_release,
+            "session-end": self._handle_session_end,
+            "pre-mutation": self._handle_pre_mutation,
+            "turn-stop": self._handle_turn_stop,
+        }
+        handler = handlers.get(event)
+        output = handler(payload) if handler else None
+        self.state.update({
+            "active": sorted(self.lifecycle.active),
+            "finished": sorted(self.lifecycle.finished),
+            "concurrent": sorted(self.lifecycle.concurrent),
+            "mode": self.mode,
+        })
+        return output
+
+    def _handle_prompt(self, payload: dict[str, Any]) -> None:
+        prompt = payload.get("prompt") or payload.get("user_prompt") or ""
+        if self.classifier.RELAYED_MESSAGE.match(str(prompt)):
+            # A relayed worker/peer message or a background task's own
+            # notification, not something the user typed -- leave
+            # whatever obligation is already in flight untouched rather
+            # than classifying its text or resetting evidence collected
+            # so far (see RELAYED_MESSAGE's own docstring).
+            raise _SkipSave()
+        decision = self.classifier.classify(
+            str(prompt),
+            self.state,
+            context_env=("CLAUDE_CODE_MAX_CONTEXT_TOKENS",)
+            if self.host == "claude" else ("CODEX_MAX_CONTEXT_TOKENS",),
+        )
+        carry = bool(decision.get("carry_forward"))
+        if not carry:
+            self.lifecycle = LifecycleState(self.mode)
+            self.state["observed"] = []
+            self.state["peak_active"] = 0
+        self.state.update({
+            "requires_delegation": bool(decision["requires_delegation"]),
+            "requires_multi": bool(decision["requires_multi"]),
+            "analysis_signal": bool(decision.get("analysis_signal")),
+            "execution_signal": bool(decision.get("execution_signal")),
+            "min_agents": int(decision["min_agents"]),
+            "completed": False,
+            # A one-shot authorization is set fresh from this prompt's own
+            # text only -- never carried from the previous turn's value --
+            # so it cannot silently persist across turns. It is consumed
+            # (cleared) the first time it overrides a denial in
+            # `_handle_pre_mutation`, or cleared unused at `_handle_turn_stop`.
+            "pending_authorization": bool(decision.get("explicit_authorization")),
+        })
+        return None
+
+    def _handle_worker_start(self, payload: dict[str, Any]) -> None:
+        worker = _worker(payload)
+        if worker:
+            self.lifecycle.start(worker)
+            observed = set(self.state["observed"])
+            observed.add(worker)
+            self.state["observed"] = sorted(observed)
+            self.state["peak_active"] = max(
+                self.state["peak_active"], len(self.lifecycle.concurrent)
+            )
+        return None
+
+    def _handle_worker_complete(self, payload: dict[str, Any]) -> None:
+        worker = _worker(payload)
+        if worker:
+            self.lifecycle.complete(worker)
+        return None
+
+    def _handle_worker_release(self, payload: dict[str, Any]) -> None:
+        worker = _worker(payload)
+        if worker:
+            self.lifecycle.release(worker)
+        return None
+
+    def _handle_session_end(self, payload: dict[str, Any]) -> None:
+        self.lifecycle.end_session()
+        self.state["completed"] = True
+        return None
+
+    def _handle_pre_mutation(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        reason: str | None = None
+        if _mutating(payload, self.classifier):
+            reason = _unmet(self.state) or _execution_unmet(self.state)
+        elif _context_pulling(payload, self.classifier, self.state):
+            if self.state.get("analysis_signal"):
+                # No floor escape here, unlike the branch below: once
+                # a turn is analysis-flagged, the parent never pulls
+                # content into its own context for the rest of the
+                # turn, no matter how many workers have started.
+                # Analysis stays reserved for delegated agents.
+                reason = (
+                    "Analysis is reserved for delegated agents; "
+                    "route this to a worker instead of pulling "
+                    "content into the parent's own context."
+                )
+            else:
+                floor = max(self.state["min_agents"], 1) if self.state["requires_delegation"] else 1
+                observed = len(set(self.state["observed"]))
+                if observed < floor:
+                    reason = (
+                        "Route this to a worker before pulling content "
+                        f"into context (requires at least {floor} "
+                        "lifecycle-visible worker(s))."
+                    )
+        if reason is None:
+            return None
+        if self.state.get("pending_authorization"):
+            # Consumed here, once: this specific denial is the one
+            # subsequent decision the user's explicit authorization named.
+            # Enforcement reverts to normal for every action after this one,
+            # including an immediate repeat of the same tool call.
+            self.state["pending_authorization"] = False
+            return None
+        return _deny(reason)
+
+    def _handle_turn_stop(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        # An authorization granted but never consumed by a blocked action
+        # must not survive past the turn it was granted in.
+        self.state["pending_authorization"] = False
+        reason = _unmet(self.state)
+        if reason:
+            return {"decision": "block", "reason": reason}
+        if self.mode == "explicit_release" and self.lifecycle.finished:
+            return {
+                "decision": "block",
+                "reason": "Release completed workers before ending this turn.",
+            }
+        self.state["completed"] = True
+        return None
 
 
 def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -254,120 +459,22 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
     if session is None:
         return None
     home = _home(host)
-    if _bypass(home):
-        return None
+    classifier = _classifier(home)
     if event in {"prompt", "pre-mutation", "turn-stop"} and _is_worker_session(host, payload):
         # Worker tool calls can share their parent's session_id. They must
         # neither enforce parent delegation floors nor rewrite parent state.
-        if event == "pre-mutation" and _delegating(payload):
-            return _deny(
-                "Leaf-tier workers execute the assigned task directly; "
-                "delegating to a further subagent is not permitted."
-            )
+        if event == "pre-mutation" and _delegating(payload, classifier):
+            reason = _tier_violation(payload, classifier)
+            return _deny(reason) if reason else None
         return None
     path, lock = _paths(home, session)
     mode = _release_mode(home)
-    classifier = _classifier(home)
     with _locked(lock):
         state = _load(path, mode)
-        lifecycle = LifecycleState(
-            mode,
-            set(state["active"]),
-            set(state["finished"]),
-            set(state["concurrent"]),
-        )
-        output = None
-        if event == "prompt":
-            prompt = payload.get("prompt") or payload.get("user_prompt") or ""
-            if classifier.RELAYED_MESSAGE.match(str(prompt)):
-                # A relayed worker/peer message or a background task's own
-                # notification, not something the user typed -- leave
-                # whatever obligation is already in flight untouched rather
-                # than classifying its text or resetting evidence collected
-                # so far (see RELAYED_MESSAGE's own docstring).
-                return None
-            decision = classifier.classify(
-                str(prompt),
-                state,
-                context_env=("CLAUDE_CODE_MAX_CONTEXT_TOKENS",)
-                if host == "claude" else ("CODEX_MAX_CONTEXT_TOKENS",),
-            )
-            carry = bool(decision.get("carry_forward"))
-            if not carry:
-                lifecycle = LifecycleState(mode)
-                state["observed"] = []
-                state["peak_active"] = 0
-            state.update({
-                "requires_delegation": bool(decision["requires_delegation"]),
-                "requires_multi": bool(decision["requires_multi"]),
-                "analysis_signal": bool(decision.get("analysis_signal")),
-                "execution_signal": bool(decision.get("execution_signal")),
-                "min_agents": int(decision["min_agents"]),
-                "completed": False,
-            })
-        elif event == "worker-start":
-            worker = _worker(payload)
-            if worker:
-                lifecycle.start(worker)
-                observed = set(state["observed"])
-                observed.add(worker)
-                state["observed"] = sorted(observed)
-                state["peak_active"] = max(
-                    state["peak_active"], len(lifecycle.concurrent)
-                )
-        elif event == "worker-complete":
-            worker = _worker(payload)
-            if worker:
-                lifecycle.complete(worker)
-        elif event == "worker-release":
-            worker = _worker(payload)
-            if worker:
-                lifecycle.release(worker)
-        elif event == "session-end":
-            lifecycle.end_session()
-            state["completed"] = True
-        elif event == "pre-mutation":
-            if _mutating(payload, classifier):
-                reason = _unmet(state) or _execution_unmet(state)
-                if reason:
-                    output = _deny(reason)
-            elif _context_pulling(payload, classifier, state):
-                if state.get("analysis_signal"):
-                    # No floor escape here, unlike the branch below: once
-                    # a turn is analysis-flagged, the parent never pulls
-                    # content into its own context for the rest of the
-                    # turn, no matter how many workers have started.
-                    # Analysis stays reserved for delegated agents.
-                    output = _deny(
-                        "Analysis is reserved for delegated agents; "
-                        "route this to a worker instead of pulling "
-                        "content into the parent's own context."
-                    )
-                else:
-                    floor = max(state["min_agents"], 1) if state["requires_delegation"] else 1
-                    observed = len(set(state["observed"]))
-                    if observed < floor:
-                        output = _deny(
-                            "Route this to a worker before pulling content "
-                            f"into context (requires at least {floor} "
-                            "lifecycle-visible worker(s))."
-                        )
-        elif event == "turn-stop":
-            reason = _unmet(state)
-            if reason:
-                output = {"decision": "block", "reason": reason}
-            elif mode == "explicit_release" and lifecycle.finished:
-                output = {
-                    "decision": "block",
-                    "reason": "Release completed workers before ending this turn.",
-                }
-            else:
-                state["completed"] = True
-        state.update({
-            "active": sorted(lifecycle.active),
-            "finished": sorted(lifecycle.finished),
-            "concurrent": sorted(lifecycle.concurrent),
-            "mode": mode,
-        })
+        handler = TurnEventHandler(host, classifier, mode, state)
+        try:
+            output = handler.handle(event, payload)
+        except _SkipSave:
+            return None
         _save(path, state)
         return output

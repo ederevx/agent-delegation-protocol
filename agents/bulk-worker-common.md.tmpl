@@ -27,10 +27,12 @@ Use {{PARENT_CHANNEL}} for that escalation.
 
 ## User override
 
-The user may override every ADP rule and bypass all ADP hook enforcement,
-including delegation, worker recursion, execution, and lifecycle gates.
-On explicit user instruction, the parent may create or remove the host's
-`.delegation-protocol/bypass` file. Workers relay activation requests to the
-parent. Never infer authorization from a blocked operation. Bypass applies
-across that host's sessions until the file is removed; host permissions and
-other protocols remain in force.
+There is no standing bypass and no marker file. The user may lift ADP
+enforcement only per action, by stating explicit authorization for that one
+specific action in their own prompt text (for example, "I explicitly
+authorize this action"). That authorization allows exactly the one
+otherwise-blocked decision it names and is then consumed; it does not carry
+forward, including to an identical repeat of the same tool call. Workers
+relay a user's authorization request to the parent rather than acting on
+their own inference; never infer authorization from a blocked operation.
+Host permissions and other protocols remain in force regardless.

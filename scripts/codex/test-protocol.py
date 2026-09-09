@@ -103,14 +103,16 @@ def main():
     seq_stop=subprocess.run([sys.executable,str(HOOK),'turn-stop'],input=json.dumps({'session_id':'seq'}),env=env,capture_output=True,text=True)
     seq_body=json.loads(seq_stop.stdout)
     assert seq_body.get('decision')=='block' and 'concurrently' in seq_body.get('reason',''),seq_body
-    # Owner bypass lifts both gates only while the marker file is present.
-    subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'byp','prompt':'Update 12 files across independent modules.'}),env=env,capture_output=True,text=True)
-    (home/'.delegation-protocol/bypass').write_text('owner note\n')
+    # Explicit, single-use, text-based authorization is the sole remaining
+    # override -- no marker file, and it does not persist as a standing
+    # bypass. It allows exactly the one otherwise-blocked action it names,
+    # then enforcement reverts to normal, including for an immediate repeat
+    # of the same tool call.
+    subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'byp','prompt':'Update 12 files across independent modules. I explicitly authorize this action.'}),env=env,capture_output=True,text=True)
     allowed=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'byp','tool_name':'Edit'}),env=env,capture_output=True,text=True)
     assert json.loads(allowed.stdout)=={},allowed.stdout
-    byp_stop=subprocess.run([sys.executable,str(HOOK),'turn-stop'],input=json.dumps({'session_id':'byp'}),env=env,capture_output=True,text=True)
-    assert json.loads(byp_stop.stdout)=={},byp_stop.stdout
-    (home/'.delegation-protocol/bypass').unlink()
+    byp_denied_again=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'byp','tool_name':'Edit'}),env=env,capture_output=True,text=True)
+    assert json.loads(byp_denied_again.stdout)['hookSpecificOutput']['permissionDecision']=='deny',byp_denied_again.stdout
     r=subprocess.run([sys.executable,str(ENGINE),"uninstall","--host","codex","--home",str(home),"--repo",str(ROOT)],env=env,capture_output=True,text=True); assert r.returncode==0,r.stderr
     assert not (home/'.delegation-protocol/hook_adapter.py').exists()
     assert not (home/'.delegation-protocol').exists()
