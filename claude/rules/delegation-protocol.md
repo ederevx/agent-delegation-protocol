@@ -120,8 +120,8 @@ five most recent commits so the two schemes are fully parallel there —
 `v1.3`=`protocol-v10`, `v1.4`=`protocol-v11`. `protocol-v1` through
 `protocol-v6` predate the backfill and have no `v1.x` counterpart.
 `protocol-v*` is retired as of this rule: every tag cut from here forward
-uses `v1.x` only, continuing from `v1.4` (the next tag is `v1.5`, not a
-restart). Every existing tag under either scheme is retained unchanged as
+uses `v1.x` only, continuing the sequence from the latest existing `v1.x`
+tag (check `git tag -l 'v1.*' | sort -V`), never a restart. Every existing tag under either scheme is retained unchanged as
 history — none are renamed, moved, or deleted — so a checkout pinned to a
 `protocol-v*`-only tag (`protocol-v1` through `protocol-v6`) predates this
 rule, which is expected, not a mismatch to reconcile.
