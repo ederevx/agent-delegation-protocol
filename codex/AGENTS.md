@@ -31,6 +31,17 @@ directly whenever its model lineup changes (it knows its own capability tiers
 better than external documentation), and update this note and the mirrored
 Claude-side note in `claude/rules/delegation-protocol.md` together.
 
+## Recursive delegation
+
+A delegated worker may spawn another worker, but only a strictly lower tier
+than its own: `balanced-worker` may spawn `bulk-worker`, never itself or
+another `balanced-worker`. `bulk-worker` is already the lowest tier and
+cannot delegate further. The parent/main agent is not part of this ordering
+at all — it is always the highest tier regardless of which model it runs on,
+and is exempt from this constraint, free to spawn any tier as today. Because
+a chain can only move strictly downward, its depth is bounded by the number
+of tiers and no cycle is possible.
+
 ## Conflict boundary
 
 Native shared-workspace workers can see current working-tree changes; isolated
