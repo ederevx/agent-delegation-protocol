@@ -99,9 +99,16 @@ rule, which is expected, not a mismatch to reconcile.
 
 ## Owner bypass
 
-The user may unconditionally lift any hook-enforced convention here —
-delegation or release — by creating
-`<host-config-dir>/.delegation-protocol/bypass`; presence alone is enough,
-its contents are just an optional note. Agents must never create, edit, or
-script around this file themselves; it exists solely for the human owner to
-invoke by hand.
+The user may override all ADP rules and disable all ADP hook enforcement,
+including delegation, recursion, and lifecycle requirements. On explicit user
+authorization, an assistant may create or remove
+`<host-config-dir>/.delegation-protocol/bypass`; agents must never enable
+bypass autonomously or infer authorization from a blocked operation.
+
+The marker defaults to `~/.claude/.delegation-protocol/bypass` for Claude and
+`~/.codex/.delegation-protocol/bypass` for Codex; `CLAUDE_CONFIG_DIR` and
+`CODEX_HOME` select the respective host configuration directory. Its presence
+alone activates bypass for all sessions of that host, and it persists until
+removed; contents are an optional note. While present, all ADP rules are
+waived and its hooks permit every event. Removing it restores ADP enforcement.
+This authority does not override host permissions or other protocols.

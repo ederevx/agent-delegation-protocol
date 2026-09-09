@@ -102,6 +102,22 @@ dismissal warning. Claude uses `automatic_release`; a foreground result clears
 its lifecycle automatically. The hook adapter gates parent mutation and turn
 completion on observed delegation and concurrent fan-out when required.
 
+## Owner bypass
+
+The user may override all ADP rules and disable all ADP hook enforcement,
+including delegation, recursion, and lifecycle requirements. On explicit user
+authorization, an assistant may create or remove
+`<host-config-dir>/.delegation-protocol/bypass`; agents must never enable
+bypass autonomously or infer authorization from a blocked operation.
+
+The marker defaults to `~/.claude/.delegation-protocol/bypass` for Claude and
+`~/.codex/.delegation-protocol/bypass` for Codex; `CLAUDE_CONFIG_DIR` and
+`CODEX_HOME` select the respective host configuration directory. Its presence
+alone activates bypass for all sessions of that host, and it persists until
+removed; contents are an optional note. While present, all ADP rules are
+waived and its hooks permit every event. Removing it restores ADP enforcement.
+This authority does not override host permissions or other protocols.
+
 ## Verify
 
 These tests use disposable homes and do not change live configuration.
