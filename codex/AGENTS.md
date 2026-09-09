@@ -49,3 +49,19 @@ operation or block completion on one.
 Resuming a worker session continues it on its original topic only. When the
 next task is a different topic from its original deployment, start a fresh
 worker instead of reusing the existing session.
+
+## Owner bypass
+
+The user may override all ADP rules and disable all ADP hook enforcement,
+including delegation, recursion, and lifecycle requirements. On explicit user
+authorization, an assistant may create or remove
+`<host-config-dir>/.delegation-protocol/bypass`; agents must never enable
+bypass autonomously or infer authorization from a blocked operation.
+
+The marker defaults to `~/.claude/.delegation-protocol/bypass` for Claude and
+`~/.codex/.delegation-protocol/bypass` for Codex; `CLAUDE_CONFIG_DIR` and
+`CODEX_HOME` select the respective host configuration directory. Its presence
+alone activates bypass for all sessions of that host, and it persists until
+removed; contents are an optional note. While present, all ADP rules are
+waived and its hooks permit every event. Removing it restores ADP enforcement.
+This authority does not override host permissions or other protocols.

@@ -145,6 +145,22 @@ def _save(path: Path, state: dict[str, Any]) -> None:
             pass
 
 
+def _is_worker_session(host: str, payload: dict[str, Any]) -> bool:
+    """Use Claude's per-invocation identity, not inherited process env.
+
+    Lifecycle events also carry agent_id, but identify the worker whose
+    evidence must be recorded in the parent session. Call this only for
+    prompt, tool, and turn-stop events.
+    """
+    worker = payload.get("agent_id")
+    return host == "claude" and isinstance(worker, str) and bool(worker.strip())
+
+
+def _delegating(payload: dict[str, Any]) -> bool:
+    name = str(payload.get("tool_name") or payload.get("toolName") or "")
+    return name.strip().lower() in {"agent", "task"}
+
+
 def _mutating(payload: dict[str, Any], classifier: Any) -> bool:
     name = str(payload.get("tool_name") or payload.get("toolName") or "")
     if classifier.MUTATING_TOOL_NAME.search(name):
@@ -221,11 +237,12 @@ def _deny(reason: str) -> dict[str, Any]:
 
 
 def _bypass(home: Path) -> bool:
-    """Global convention: the user may unconditionally lift any
-    hook-enforced convention -- the delegation requirement, the release
-    gate, the commit/tag gate -- by creating this marker file by hand.
-    Agents must never create, edit, or script around it themselves; it
-    exists solely for the human owner to invoke directly."""
+    """The user may suspend all ADP enforcement with this persistent marker.
+
+    An assistant may create or remove it only on explicit user instruction,
+    never merely because a gate blocks work. Other protocols and host
+    permissions are outside this ADP-only override.
+    """
     return (home / ".delegation-protocol" / "bypass").is_file()
 
 
@@ -237,6 +254,17 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
     if session is None:
         return None
     home = _home(host)
+    if _bypass(home):
+        return None
+    if event in {"prompt", "pre-mutation", "turn-stop"} and _is_worker_session(host, payload):
+        # Worker tool calls can share their parent's session_id. They must
+        # neither enforce parent delegation floors nor rewrite parent state.
+        if event == "pre-mutation" and _delegating(payload):
+            return _deny(
+                "Leaf-tier workers execute the assigned task directly; "
+                "delegating to a further subagent is not permitted."
+            )
+        return None
     path, lock = _paths(home, session)
     mode = _release_mode(home)
     classifier = _classifier(home)
@@ -299,46 +327,42 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
             lifecycle.end_session()
             state["completed"] = True
         elif event == "pre-mutation":
-            if not _bypass(home):
-                if _mutating(payload, classifier):
-                    reason = _unmet(state) or _execution_unmet(state)
-                    if reason:
-                        output = _deny(reason)
-                elif _context_pulling(payload, classifier, state):
-                    if state.get("analysis_signal"):
-                        # No floor escape here, unlike the branch below: once
-                        # a turn is analysis-flagged, the parent never pulls
-                        # content into its own context for the rest of the
-                        # turn, no matter how many workers have started.
-                        # Analysis stays reserved for delegated agents.
-                        output = _deny(
-                            "Analysis is reserved for delegated agents; "
-                            "route this to a worker instead of pulling "
-                            "content into the parent's own context."
-                        )
-                    else:
-                        floor = max(state["min_agents"], 1) if state["requires_delegation"] else 1
-                        observed = len(set(state["observed"]))
-                        if observed < floor:
-                            output = _deny(
-                                "Route this to a worker before pulling content "
-                                f"into context (requires at least {floor} "
-                                "lifecycle-visible worker(s))."
-                            )
-        elif event == "turn-stop":
-            if _bypass(home):
-                state["completed"] = True
-            else:
-                reason = _unmet(state)
+            if _mutating(payload, classifier):
+                reason = _unmet(state) or _execution_unmet(state)
                 if reason:
-                    output = {"decision": "block", "reason": reason}
-                elif mode == "explicit_release" and lifecycle.finished:
-                    output = {
-                        "decision": "block",
-                        "reason": "Release completed workers before ending this turn.",
-                    }
+                    output = _deny(reason)
+            elif _context_pulling(payload, classifier, state):
+                if state.get("analysis_signal"):
+                    # No floor escape here, unlike the branch below: once
+                    # a turn is analysis-flagged, the parent never pulls
+                    # content into its own context for the rest of the
+                    # turn, no matter how many workers have started.
+                    # Analysis stays reserved for delegated agents.
+                    output = _deny(
+                        "Analysis is reserved for delegated agents; "
+                        "route this to a worker instead of pulling "
+                        "content into the parent's own context."
+                    )
                 else:
-                    state["completed"] = True
+                    floor = max(state["min_agents"], 1) if state["requires_delegation"] else 1
+                    observed = len(set(state["observed"]))
+                    if observed < floor:
+                        output = _deny(
+                            "Route this to a worker before pulling content "
+                            f"into context (requires at least {floor} "
+                            "lifecycle-visible worker(s))."
+                        )
+        elif event == "turn-stop":
+            reason = _unmet(state)
+            if reason:
+                output = {"decision": "block", "reason": reason}
+            elif mode == "explicit_release" and lifecycle.finished:
+                output = {
+                    "decision": "block",
+                    "reason": "Release completed workers before ending this turn.",
+                }
+            else:
+                state["completed"] = True
         state.update({
             "active": sorted(lifecycle.active),
             "finished": sorted(lifecycle.finished),
