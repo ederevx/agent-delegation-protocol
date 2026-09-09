@@ -123,6 +123,7 @@ def _load(path: Path, mode: str) -> dict[str, Any]:
         "observed": list(state.get("observed", [])),
         "peak_active": int(state.get("peak_active", 0)),
         "completed": bool(state.get("completed")),
+        "pending_authorization": bool(state.get("pending_authorization")),
         "mode": mode,
     }
 
@@ -236,16 +237,6 @@ def _deny(reason: str) -> dict[str, Any]:
     }
 
 
-def _bypass(home: Path) -> bool:
-    """The user may suspend all ADP enforcement with this persistent marker.
-
-    An assistant may create or remove it only on explicit user instruction,
-    never merely because a gate blocks work. Other protocols and host
-    permissions are outside this ADP-only override.
-    """
-    return (home / ".delegation-protocol" / "bypass").is_file()
-
-
 class _SkipSave(Exception):
     """Raised by a handler to signal the in-flight state must not be persisted."""
 
@@ -319,6 +310,12 @@ class TurnEventHandler:
             "execution_signal": bool(decision.get("execution_signal")),
             "min_agents": int(decision["min_agents"]),
             "completed": False,
+            # A one-shot authorization is set fresh from this prompt's own
+            # text only -- never carried from the previous turn's value --
+            # so it cannot silently persist across turns. It is consumed
+            # (cleared) the first time it overrides a denial in
+            # `_handle_pre_mutation`, or cleared unused at `_handle_turn_stop`.
+            "pending_authorization": bool(decision.get("explicit_authorization")),
         })
         return None
 
@@ -352,32 +349,45 @@ class TurnEventHandler:
         return None
 
     def _handle_pre_mutation(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        reason: str | None = None
         if _mutating(payload, self.classifier):
             reason = _unmet(self.state) or _execution_unmet(self.state)
-            return _deny(reason) if reason else None
-        if _context_pulling(payload, self.classifier, self.state):
+        elif _context_pulling(payload, self.classifier, self.state):
             if self.state.get("analysis_signal"):
                 # No floor escape here, unlike the branch below: once
                 # a turn is analysis-flagged, the parent never pulls
                 # content into its own context for the rest of the
                 # turn, no matter how many workers have started.
                 # Analysis stays reserved for delegated agents.
-                return _deny(
+                reason = (
                     "Analysis is reserved for delegated agents; "
                     "route this to a worker instead of pulling "
                     "content into the parent's own context."
                 )
-            floor = max(self.state["min_agents"], 1) if self.state["requires_delegation"] else 1
-            observed = len(set(self.state["observed"]))
-            if observed < floor:
-                return _deny(
-                    "Route this to a worker before pulling content "
-                    f"into context (requires at least {floor} "
-                    "lifecycle-visible worker(s))."
-                )
-        return None
+            else:
+                floor = max(self.state["min_agents"], 1) if self.state["requires_delegation"] else 1
+                observed = len(set(self.state["observed"]))
+                if observed < floor:
+                    reason = (
+                        "Route this to a worker before pulling content "
+                        f"into context (requires at least {floor} "
+                        "lifecycle-visible worker(s))."
+                    )
+        if reason is None:
+            return None
+        if self.state.get("pending_authorization"):
+            # Consumed here, once: this specific denial is the one
+            # subsequent decision the user's explicit authorization named.
+            # Enforcement reverts to normal for every action after this one,
+            # including an immediate repeat of the same tool call.
+            self.state["pending_authorization"] = False
+            return None
+        return _deny(reason)
 
     def _handle_turn_stop(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        # An authorization granted but never consumed by a blocked action
+        # must not survive past the turn it was granted in.
+        self.state["pending_authorization"] = False
         reason = _unmet(self.state)
         if reason:
             return {"decision": "block", "reason": reason}
@@ -398,8 +408,6 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
     if session is None:
         return None
     home = _home(host)
-    if _bypass(home):
-        return None
     classifier = _classifier(home)
     if event in {"prompt", "pre-mutation", "turn-stop"} and _is_worker_session(host, payload):
         # Worker tool calls can share their parent's session_id. They must
