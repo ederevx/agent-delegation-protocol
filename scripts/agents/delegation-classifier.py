@@ -293,6 +293,164 @@ def step_count(text: str) -> int:
     return max(ordered, listed)
 
 
+class _TurnClassifier:
+    """One turn's classification, split into signal/decision/reason stages.
+
+    `_compute_signals` extracts every independent wording/size/shape signal
+    from the prompt text. `_decide` combines those signals (plus carry-over
+    from the previous turn) into the actual requires/multi/analysis/execution
+    booleans. `_build_reasons` renders the human-readable explanation of
+    `_decide`'s outcome. Each stage only reads state set up by the ones
+    before it, matching the original function's top-to-bottom data flow.
+    """
+
+    def __init__(self, prompt: str, previous: dict[str, Any],
+                 context_env: tuple[str, ...]) -> None:
+        self.previous = previous
+        self.context_env = context_env
+        self.text = (prompt or "").strip()
+        self.lower = self.text.lower()
+        self.words = re.findall(r"\b[\w'-]+\b", self.lower)
+
+    def _compute_signals(self) -> None:
+        lower, words = self.lower, self.words
+        self.explicit_no = any(
+            re.search(pattern, lower) for pattern in NO_DELEGATION_PATTERNS
+        )
+        self.action = contains_any(lower, ACTION_WORDS)
+        self.evaluation_signal = contains_any(lower, EVALUATION_WORDS)
+        self.research_signal = contains_any(lower, RESEARCH_WORDS)
+        self.count = explicit_count(lower)
+        self.bulk_signal = contains_any(lower, BULK_WORDS) or self.count >= 3
+        self.tokens = explicit_tokens(lower)
+        self.steps = step_count(lower)
+        self.threshold = token_threshold(self.context_env)
+        self.execution_threshold = token_threshold(
+            self.context_env, EXECUTION_WINDOW_SHARE
+        )
+        self.token_signal = self.tokens >= self.threshold
+        self.size_signal = (
+            self.token_signal
+            or contains_any(lower, SIZE_WORDS)
+            or len(words) >= LONG_BRIEF_WORDS
+        )
+        self.step_signal = (
+            contains_any(lower, MULTI_STEP_WORDS)
+            or self.steps >= STEP_DELEGATION_THRESHOLD
+        )
+        multiple_signal = "multiple" in lower and contains_any(lower, SHARD_WORDS)
+        independent_signal = "independent" in lower and contains_any(lower, SHARD_WORDS)
+
+        distinct_domains = sum(
+            1 for family in DOMAIN_FAMILIES if any(token in lower for token in family)
+        )
+        cross_domain_signal = distinct_domains >= 2 and (
+            " and " in lower or "," in lower or "/" in lower or "across" in lower
+        )
+
+        self.shard_signal = (
+            independent_signal
+            or multiple_signal
+            or cross_domain_signal
+            or contains_any(lower, SEPARABLE_PHRASES)
+        )
+
+        followup = len(words) <= FOLLOWUP_MAX_WORDS and any(
+            re.search(pattern, lower) for pattern in FOLLOWUP_PATTERNS
+        )
+        self.carry = (
+            bool(self.previous.get("requires_delegation"))
+            and not bool(self.previous.get("completed"))
+            and followup
+        )
+
+    def _decide(self) -> None:
+        explicit_no, carry = self.explicit_no, self.carry
+        self.requires = False if explicit_no else (
+            (self.action and (self.bulk_signal or self.shard_signal
+                               or self.size_signal or self.step_signal))
+            or self.evaluation_signal
+            or self.token_signal
+            or carry
+        )
+        self.multi = False if explicit_no else (
+            self.requires and (
+                self.shard_signal
+                or bool(self.previous.get("requires_multi") and carry)
+            )
+        )
+        # Carried forward the same way `multi` is: a short continuation like
+        # "continue" carries no analysis wording of its own, but the task it
+        # continues is still the analysis task that started it.
+        self.analysis = self.evaluation_signal or bool(
+            self.previous.get("analysis_signal") and carry
+        )
+        # Execution clears delegation at a much lower bar than `requires`
+        # above: a stated budget at or above EXECUTION_WINDOW_SHARE (rather
+        # than the full DELEGATION_WINDOW_SHARE), or in-depth-research
+        # wording, pushes even a turn otherwise too small for `requires` to a
+        # worker. Anything that already set `requires` clears this lower bar
+        # automatically.
+        self.execution = False if explicit_no else (
+            self.requires or self.research_signal
+            or self.tokens >= self.execution_threshold
+            or bool(self.previous.get("execution_signal") and carry)
+        )
+        if not self.requires:
+            self.min_agents = 0
+        elif self.multi:
+            self.min_agents = 2
+        else:
+            self.min_agents = 1
+
+    def _build_reasons(self) -> list[str]:
+        reasons: list[str] = []
+        if self.evaluation_signal:
+            reasons.append("analysis, review, or verification wording")
+        if self.research_signal:
+            reasons.append("in-depth research wording")
+        if self.count >= 3:
+            reasons.append(f"explicit unit count {self.count}")
+        if self.bulk_signal and self.count < 3:
+            reasons.append("bulk/high-volume wording")
+        if self.token_signal:
+            reasons.append(
+                f"stated budget of {self.tokens} tokens, at or above the "
+                f"{self.threshold}-token threshold "
+                f"({int(DELEGATION_WINDOW_SHARE * 100)}% of a "
+                f"{context_window(self.context_env)}-token window)"
+            )
+        elif self.size_signal:
+            reasons.append("large-task wording or a long, detailed brief")
+        if self.step_signal:
+            reasons.append(
+                f"multi-step work ({self.steps} steps enumerated)"
+                if self.steps >= STEP_DELEGATION_THRESHOLD else "multi-step wording"
+            )
+        if self.shard_signal:
+            reasons.append("independent/separable subsystem wording")
+        if self.carry:
+            reasons.append("continuation of an unfinished delegated turn")
+        return reasons
+
+    def classify(self) -> dict[str, Any]:
+        self._compute_signals()
+        self._decide()
+        reasons = self._build_reasons()
+        return {
+            "requires_delegation": self.requires,
+            "requires_multi": self.multi,
+            "analysis_signal": self.analysis,
+            "execution_signal": self.execution,
+            "min_agents": self.min_agents,
+            "token_threshold": self.threshold,
+            "execution_token_threshold": self.execution_threshold,
+            "classification_reasons": reasons,
+            "explicit_no_delegation": self.explicit_no,
+            "carry_forward": self.carry,
+        }
+
+
 def classify(
     prompt: str,
     previous: dict[str, Any],
@@ -300,123 +458,6 @@ def classify(
     context_env: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Decide whether a turn must be delegated, and to how many workers."""
-    text = (prompt or "").strip()
-    lower = text.lower()
-    words = re.findall(r"\b[\w'-]+\b", lower)
-
-    explicit_no = any(re.search(pattern, lower) for pattern in NO_DELEGATION_PATTERNS)
-    action = contains_any(lower, ACTION_WORDS)
-    evaluation_signal = contains_any(lower, EVALUATION_WORDS)
-    research_signal = contains_any(lower, RESEARCH_WORDS)
-    count = explicit_count(lower)
-    bulk_signal = contains_any(lower, BULK_WORDS) or count >= 3
-    tokens = explicit_tokens(lower)
-    steps = step_count(lower)
-    threshold = token_threshold(context_env)
-    execution_threshold = token_threshold(context_env, EXECUTION_WINDOW_SHARE)
-    token_signal = tokens >= threshold
-    size_signal = (
-        token_signal
-        or contains_any(lower, SIZE_WORDS)
-        or len(words) >= LONG_BRIEF_WORDS
-    )
-    step_signal = (
-        contains_any(lower, MULTI_STEP_WORDS) or steps >= STEP_DELEGATION_THRESHOLD
-    )
-    multiple_signal = "multiple" in lower and contains_any(lower, SHARD_WORDS)
-    independent_signal = "independent" in lower and contains_any(lower, SHARD_WORDS)
-
-    distinct_domains = sum(
-        1 for family in DOMAIN_FAMILIES if any(token in lower for token in family)
-    )
-    cross_domain_signal = distinct_domains >= 2 and (
-        " and " in lower or "," in lower or "/" in lower or "across" in lower
-    )
-
-    shard_signal = (
-        independent_signal
-        or multiple_signal
-        or cross_domain_signal
-        or contains_any(lower, SEPARABLE_PHRASES)
-    )
-
-    followup = len(words) <= FOLLOWUP_MAX_WORDS and any(
-        re.search(pattern, lower) for pattern in FOLLOWUP_PATTERNS
-    )
-    carry = (
-        bool(previous.get("requires_delegation"))
-        and not bool(previous.get("completed"))
-        and followup
-    )
-    requires = False if explicit_no else (
-        (action and (bulk_signal or shard_signal or size_signal or step_signal))
-        or evaluation_signal
-        or token_signal
-        or carry
-    )
-    multi = False if explicit_no else (
-        requires and (shard_signal or bool(previous.get("requires_multi") and carry))
-    )
-    # Carried forward the same way `multi` is: a short continuation like
-    # "continue" carries no analysis wording of its own, but the task it
-    # continues is still the analysis task that started it.
-    analysis = evaluation_signal or bool(previous.get("analysis_signal") and carry)
-    # Execution clears delegation at a much lower bar than `requires` above: a
-    # stated budget at or above EXECUTION_WINDOW_SHARE (rather than the full
-    # DELEGATION_WINDOW_SHARE), or in-depth-research wording, pushes even a
-    # turn otherwise too small for `requires` to a worker. Anything that
-    # already set `requires` clears this lower bar automatically.
-    execution = False if explicit_no else (
-        requires or research_signal or tokens >= execution_threshold
-        or bool(previous.get("execution_signal") and carry)
-    )
-
-    reasons: list[str] = []
-    if evaluation_signal:
-        reasons.append("analysis, review, or verification wording")
-    if research_signal:
-        reasons.append("in-depth research wording")
-    if count >= 3:
-        reasons.append(f"explicit unit count {count}")
-    if bulk_signal and count < 3:
-        reasons.append("bulk/high-volume wording")
-    if token_signal:
-        reasons.append(
-            f"stated budget of {tokens} tokens, at or above the {threshold}-token "
-            f"threshold ({int(DELEGATION_WINDOW_SHARE * 100)}% of a "
-            f"{context_window(context_env)}-token window)"
-        )
-    elif size_signal:
-        reasons.append("large-task wording or a long, detailed brief")
-    if step_signal:
-        reasons.append(
-            f"multi-step work ({steps} steps enumerated)"
-            if steps >= STEP_DELEGATION_THRESHOLD else "multi-step wording"
-        )
-    if shard_signal:
-        reasons.append("independent/separable subsystem wording")
-    if carry:
-        reasons.append("continuation of an unfinished delegated turn")
-
-    if not requires:
-        min_agents = 0
-    elif multi:
-        min_agents = 2
-    else:
-        min_agents = 1
-
-    result: dict[str, Any] = {
-        "requires_delegation": requires,
-        "requires_multi": multi,
-        "analysis_signal": analysis,
-        "execution_signal": execution,
-        "min_agents": min_agents,
-        "token_threshold": threshold,
-        "execution_token_threshold": execution_threshold,
-        "classification_reasons": reasons,
-        "explicit_no_delegation": explicit_no,
-        "carry_forward": carry,
-    }
-    return result
+    return _TurnClassifier(prompt, previous, context_env).classify()
 
 
