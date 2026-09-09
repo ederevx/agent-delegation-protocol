@@ -25,14 +25,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-# Hook state uses the protocol-v2 schema and is discarded on any mismatch.
-PROTOCOL_VERSION = 2
-
-# How long an untouched v2 session JSON document may sit before a sweep removes
-# it. Host adapters own no sidecar marker directories.
-STATE_TTL_SECONDS = 7 * 24 * 3600
-
-STATE_ENTRY_SUFFIXES = (".json",)
 
 BULK_WORDS = (
     "bulk", "batch", "high-volume", "high volume", "many files", "many modules",
@@ -204,6 +196,16 @@ CONTEXT_PULLING_TOOL_NAME = re.compile(
     re.IGNORECASE,
 )
 
+# The delegation tool itself (Claude's "Agent"/"Task"). Matched as a tight
+# exact name rather than the loose substring style used by
+# MUTATING_TOOL_NAME/CONTEXT_PULLING_TOOL_NAME above, since "agent" and
+# "task" are common English words/tool-name fragments that would
+# false-positive under substring matching against unrelated tool names.
+# Used by `_is_worker_session`/pre-mutation handling in hook_adapter.py to
+# stop a leaf-tier worker's own session from spawning a further subagent,
+# independent of whatever the delegation/context-pulling gates above decide.
+AGENT_TOOL_NAME = re.compile(r"^(?:agent|task)$", re.IGNORECASE)
+
 # A turn opened by a relayed worker or peer message continues the obligations of
 # the turn already in flight. Its text is a worker's words, not the user's, so
 # classifying it would judge a report as if the user had typed it, and resetting
@@ -295,17 +297,9 @@ def classify(
     prompt: str,
     previous: dict[str, Any],
     *,
-    capacity: int | None = None,
-    continuation_prefix: str | None = None,
     context_env: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """Decide whether a turn must be delegated, and to how many workers.
-
-    `capacity` is the host's concurrent-subagent limit when it has one, and
-    caps `min_agents` so the hook never demands more workers than the runtime
-    will start. `continuation_prefix` marks a turn the protocol itself relayed,
-    which continues the previous turn's obligations regardless of length.
-    """
+    """Decide whether a turn must be delegated, and to how many workers."""
     text = (prompt or "").strip()
     lower = text.lower()
     words = re.findall(r"\b[\w'-]+\b", lower)
@@ -349,11 +343,10 @@ def classify(
     followup = len(words) <= FOLLOWUP_MAX_WORDS and any(
         re.search(pattern, lower) for pattern in FOLLOWUP_PATTERNS
     )
-    relayed = bool(continuation_prefix) and text.startswith(continuation_prefix)
     carry = (
         bool(previous.get("requires_delegation"))
         and not bool(previous.get("completed"))
-        and (followup or relayed)
+        and followup
     )
     requires = False if explicit_no else (
         (action and (bulk_signal or shard_signal or size_signal or step_signal))
@@ -407,7 +400,7 @@ def classify(
 
     if not requires:
         min_agents = 0
-    elif multi and (capacity is None or capacity >= 2):
+    elif multi:
         min_agents = 2
     else:
         min_agents = 1
@@ -424,53 +417,6 @@ def classify(
         "explicit_no_delegation": explicit_no,
         "carry_forward": carry,
     }
-    if capacity is not None:
-        result["concurrency_capacity"] = capacity
     return result
 
 
-def state_is_current(data: Any) -> bool:
-    """Whether stored turn state was written by this version of the protocol.
-
-    State that predates the running protocol is discarded rather than migrated.
-    It describes one turn's delegation evidence, so the cost of dropping it is a
-    re-classification, while the cost of misreading a renamed or re-meant key is
-    enforcing the wrong policy for the rest of the session.
-    """
-    return isinstance(data, dict) and data.get("protocol_version") == PROTOCOL_VERSION
-
-
-def reap_state(root: Path, keep: str = "", ttl: int = STATE_TTL_SECONDS) -> int:
-    """Delete session state untouched for `ttl` seconds. Returns files removed.
-
-    `keep` names the session currently running, which is never swept regardless
-    of age -- a long session's state is old by mtime while still being the state
-    in force. Sweeping is best effort: a racing hook may be writing the very
-    entry being removed, and losing that race costs a re-classification.
-    """
-    if not root.is_dir():
-        return 0
-    cutoff = time.time() - max(0, ttl)
-    removed = 0
-    def belongs_to(name: str, session: str) -> bool:
-        return any(name == session + suffix for suffix in STATE_ENTRY_SUFFIXES) \
-            or name.startswith(session + ".json.")
-
-    for path in sorted(root.iterdir()):
-        if keep and belongs_to(path.name, keep):
-            continue
-        try:
-            if path.stat().st_mtime >= cutoff:
-                continue
-        except OSError:
-            continue
-        if path.is_dir():
-            shutil.rmtree(path, ignore_errors=True)
-            removed += 1
-        else:
-            try:
-                path.unlink()
-                removed += 1
-            except OSError:
-                pass
-    return removed
