@@ -115,6 +115,44 @@ def main():
     seq_stop=subprocess.run([sys.executable,str(HOOK),'turn-stop'],input=json.dumps({'session_id':'seq'}),env=env,capture_output=True,text=True)
     seq_body=json.loads(seq_stop.stdout)
     assert seq_body.get('decision')=='block' and 'concurrently' in seq_body.get('reason',''),seq_body
+    # A process environment flag cannot identify the current hook caller.
+    # Parent Agent/Task calls remain available even with that inherited flag.
+    inherited_env = dict(env, CLAUDE_CODE_CHILD_SESSION="1")
+    def invoke(event, payload, hook_env=inherited_env):
+      result = subprocess.run([sys.executable, str(HOOK), event],
+          input=json.dumps(payload), env=hook_env, capture_output=True, text=True)
+      assert result.returncode == 0, result.stderr
+      return json.loads(result.stdout)
+    for name in ('Agent', 'Task'):
+      assert invoke('pre-mutation', {'session_id': 'pm', 'tool_name': name}) == {}
+    # agent_type alone also occurs on a parent launched with --agent.
+    assert invoke('pre-mutation', {'session_id': 'pm', 'agent_type': 'bulk-worker',
+        'tool_name': 'Agent'}) == {}
+    # Workers execute within a parent's session without clearing its debt.
+    invoke('prompt', {'session_id': 'worker-scope',
+        'prompt': 'Review and update 12 files across independent modules.'})
+    import hashlib
+    state_path = home / '.delegation-protocol/hook-state' / (
+        hashlib.sha256(b'worker-scope').hexdigest() + '.json')
+    before = state_path.read_bytes()
+    worker_payload = {'session_id': 'worker-scope', 'agent_id': 'leaf-a',
+        'agent_type': 'bulk-worker'}
+    for hook_env in (env, inherited_env):
+      for name in ('Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash'):
+        assert invoke('pre-mutation', dict(worker_payload, tool_name=name,
+            tool_input={'command': 'git status'}), hook_env) == {}, name
+      for name in ('Agent', 'Task'):
+        denied = invoke('pre-mutation', dict(worker_payload, tool_name=name), hook_env)
+        assert denied['hookSpecificOutput']['permissionDecision'] == 'deny', denied
+      assert invoke('prompt', dict(worker_payload, prompt='Say hi.'), hook_env) == {}
+      assert invoke('turn-stop', worker_payload, hook_env) == {}
+    assert state_path.read_bytes() == before
+    assert invoke('turn-stop', {'session_id': 'worker-scope'})['decision'] == 'block'
+    # Native lifecycle events still record workers under the parent session.
+    invoke('worker-start', worker_payload)
+    assert 'leaf-a' in json.loads(state_path.read_text())['observed']
+    invoke('worker-complete', worker_payload)
+    assert 'leaf-a' not in json.loads(state_path.read_text())['active']
     # Owner bypass lifts both gates only while the marker file is present.
     subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'byp','prompt':'Update 12 files across independent modules.'}),env=env,capture_output=True,text=True)
     (home/'.delegation-protocol/bypass').write_text('owner note\n')
