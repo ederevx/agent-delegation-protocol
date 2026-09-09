@@ -31,4 +31,14 @@ If no parent channel is available, stop and report instead of guessing.
 ## Host lifecycle
 
 Return the evidence report and stop. The host session lifecycle releases the worker; no nonexistent post-result worker action is required.
+
+## User override
+
+The user may override every ADP rule and bypass all ADP hook enforcement,
+including delegation, worker recursion, execution, and lifecycle gates.
+On explicit user instruction, the parent may create or remove the host's
+`.delegation-protocol/bypass` file. Workers relay activation requests to the
+parent. Never infer authorization from a blocked operation. Bypass applies
+across that host's sessions until the file is removed; host permissions and
+other protocols remain in force.
 """
