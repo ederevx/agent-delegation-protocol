@@ -77,6 +77,21 @@ def same_link(path: Path, source: Path) -> bool:
     )
 
 
+def create_symlink(destination: Path, source: Path) -> None:
+    """Create a managed link with actionable Windows privilege guidance."""
+    try:
+        destination.symlink_to(source, target_is_directory=source.is_dir())
+    except OSError as error:
+        if getattr(error, "winerror", None) == 1314:
+            raise SystemExit(
+                f"cannot create required symbolic link: {destination}. "
+                "Windows denied symbolic-link creation (WinError 1314). "
+                "Enable Developer Mode or rerun this installer from an "
+                "elevated PowerShell."
+            ) from None
+        raise
+
+
 def atomic_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -217,7 +232,7 @@ def install_codex_policy(
     if policy["mode"] == "direct":
         created = not same_link(agents, protocol)
         if created:
-            agents.symlink_to(protocol)
+            create_symlink(agents, protocol)
 
         def rollback_direct() -> None:
             if created and same_link(agents, protocol):
@@ -239,7 +254,7 @@ def install_codex_policy(
             os.replace(override, saved_override)
             moved_override = True
         if not reinstall:
-            override.symlink_to(composed)
+            create_symlink(override, composed)
     except BaseException:
         if same_link(override, composed):
             override.unlink(missing_ok=True)
@@ -364,7 +379,7 @@ def install(repo: Path, home: Path, host: str) -> None:
                 if same_link(destination, source):
                     continue
                 changed.append((destination, None, destination.exists() or destination.is_symlink()))
-                destination.symlink_to(source, target_is_directory=source.is_dir())
+                create_symlink(destination, source)
             else:
                 expected_digest = resource_digest(source, kind)
                 if destination.exists() and digest(destination) == expected_digest:
