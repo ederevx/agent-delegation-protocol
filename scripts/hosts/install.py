@@ -139,14 +139,18 @@ def resources(repo: Path, home: Path, host: str) -> list[tuple[Path, Path, str]]
     if host == "claude":
         return [
             (repo / "claude/rules/delegation-protocol.md", home / "rules/delegation-protocol.md", "link"),
-            (repo / "claude/agents/bulk-worker.md", home / "agents/bulk-worker.md", "link"),
+            (repo / "claude/agents/frontier-worker.md", home / "agents/frontier-worker.md", "link"),
             (repo / "claude/agents/balanced-worker.md", home / "agents/balanced-worker.md", "link"),
+            (repo / "claude/agents/bulk-worker.md", home / "agents/bulk-worker.md", "link"),
+            (repo / "claude/agents/quick-worker.md", home / "agents/quick-worker.md", "link"),
             (repo / "claude/hooks/delegation-enforcer.py", home / "hooks/delegation-enforcer.py", "link"),
             *common,
         ]
     return [
-        (repo / "codex/agents/bulk_worker.toml", home / "agents/bulk_worker.toml", "copy"),
+        (repo / "codex/agents/frontier_worker.toml", home / "agents/frontier_worker.toml", "link"),
         (repo / "codex/agents/balanced-worker.toml", home / "agents/balanced-worker.toml", "link"),
+        (repo / "codex/agents/bulk_worker.toml", home / "agents/bulk_worker.toml", "copy"),
+        (repo / "codex/agents/quick_worker.toml", home / "agents/quick_worker.toml", "link"),
         (repo / "codex/hooks/delegation-enforcer.py", home / "hooks/delegation-enforcer.py", "link"),
         *common,
     ]

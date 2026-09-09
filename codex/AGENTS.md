@@ -4,8 +4,11 @@
 
 Keep the frontier Codex session responsible for planning, ambiguity,
 architecture, integration, conflict resolution, and final validation. Route
-routine bounded work needing little interpretation to `bulk_worker`; route
-bounded work needing moderate reasoning to `balanced_worker`.
+trivial, mechanical, single-step work to `quick_worker`; route routine bounded
+work needing little interpretation to `bulk_worker`; route bounded work
+needing moderate reasoning to `balanced_worker`; route bounded work needing
+near-parent reasoning, but not parent-level integration or planning, to
+`frontier_worker`.
 
 ## Required delegation
 
@@ -24,23 +27,31 @@ scheduler to route through.
 
 ## Model tiers
 
-`bulk_worker` runs `gpt-5.6-luna`; `balanced_worker` runs `gpt-5.6-terra`; the
-parent frontier session runs `gpt-6-astra`. These are explicit slugs, not
-aliases that auto-track new generations — re-verify them by asking Codex
-directly whenever its model lineup changes (it knows its own capability tiers
-better than external documentation), and update this note and the mirrored
-Claude-side note in `claude/rules/delegation-protocol.md` together.
+`quick_worker` runs `gpt-5.6-luna`; `bulk_worker` runs `gpt-5.6-terra`;
+`balanced_worker` runs `gpt-5.6-sol`; `frontier_worker` runs `gpt-6-astra`,
+the same slug as the parent frontier session. These are explicit slugs, not
+aliases that auto-track new generations — re-verified by asking Codex
+directly on 2026-09-09 (it knows its own capability tiers better than
+external documentation), and this note and the mirrored Claude-side note in
+`claude/rules/delegation-protocol.md` are updated together whenever that
+changes. Reasoning effort steps up one level per tier, from `low` at quick to
+`xhigh` at frontier: `model_reasoning_effort` runs `low` for `quick_worker`,
+`medium` for `bulk_worker`, `high` for `balanced_worker`, and `xhigh` for
+`frontier_worker`; the parent uses ordinary session effort.
 
 ## Recursive delegation
 
-A delegated worker may spawn another worker, but only a strictly lower tier
-than its own: `balanced-worker` may spawn `bulk-worker`, never itself or
-another `balanced-worker`. `bulk-worker` is already the lowest tier and
-cannot delegate further. The parent/main agent is not part of this ordering
-at all — it is always the highest tier regardless of which model it runs on,
-and is exempt from this constraint, free to spawn any tier as today. Because
-a chain can only move strictly downward, its depth is bounded by the number
-of tiers and no cycle is possible.
+The tier order, highest to lowest, is `frontier_worker` > `balanced_worker` >
+`bulk_worker` > `quick_worker`. A delegated worker may spawn another worker,
+but only a strictly lower tier than its own: `frontier_worker` may spawn
+`balanced_worker`, `bulk_worker`, or `quick_worker`; `balanced_worker` may
+spawn `bulk_worker` or `quick_worker`; `bulk_worker` may spawn only
+`quick_worker`; no tier may spawn itself or a higher tier. `quick_worker` is
+already the lowest tier and cannot delegate further. The parent/main agent is
+not part of this ordering at all — it is always the highest tier regardless of
+which model it runs on, and is exempt from this constraint, free to spawn any
+tier as today. Because a chain can only move strictly downward, its depth is
+bounded by the number of tiers and no cycle is possible.
 
 ## Conflict boundary
 

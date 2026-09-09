@@ -35,13 +35,17 @@ count. Nothing here talks to an external provider, gateway, or credential
 store — native agent concurrency is unconstrained except by the host's own
 capabilities.
 
-The generated low-tier workers handle bounded low-risk work that needs little
-interpretation, including mechanical edits, straightforward audits, extraction,
-repetitive processing, and text compression. Generated balanced workers handle
-the same bounded shapes when moderate reasoning is useful, plus more demanding
-local work. The balanced tier likewise overlaps the frontier parent at its upper
-edge. The parent chooses the lowest tier with enough reasoning ability and
-retains architecture, integration, conflict resolution, and final validation.
+Four generated worker tiers exist, lowest to highest: `quick-worker` handles
+trivial, mechanical, single-step work; `bulk-worker` handles bounded low-risk
+work that needs little interpretation, including mechanical edits,
+straightforward audits, extraction, repetitive processing, and text
+compression; `balanced-worker` handles the same bounded shapes when moderate
+reasoning is useful, plus more demanding local work; `frontier-worker` handles
+bounded work needing near-parent reasoning without taking over parent
+architecture or integration. Adjacent tiers deliberately overlap, and the
+highest tier likewise overlaps the frontier parent at its upper edge. The
+parent chooses the lowest tier with enough reasoning ability and retains
+architecture, integration, conflict resolution, and final validation.
 
 ## Repository layout
 

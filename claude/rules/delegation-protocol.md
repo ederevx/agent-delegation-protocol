@@ -2,12 +2,14 @@
 
 Claude Code keeps the strongest parent context for planning, ambiguity,
 architecture, difficult debugging, integration, conflict resolution, and final
-validation. Route routine bounded work needing little interpretation to
-`bulk-worker`. Route bounded work needing moderate reasoning to
-`balanced-worker` when the task has three or more distinct steps or reaches 25%
-of the active context window. Adjacent tiers intentionally overlap; choose the
-lowest tier with enough reasoning ability. Keep work that needs parent-level
-judgment with the parent.
+validation. Route trivial, mechanical, single-step work to `quick-worker`.
+Route routine bounded work needing little interpretation to `bulk-worker`.
+Route bounded work needing moderate reasoning to `balanced-worker` when the
+task has three or more distinct steps or reaches 25% of the active context
+window. Route bounded work needing near-parent reasoning, but not
+parent-level integration or planning, to `frontier-worker`. Adjacent tiers
+intentionally overlap; choose the lowest tier with enough reasoning ability.
+Keep work that needs parent-level judgment with the parent.
 
 Analysis stays fully reserved for delegated agents: once a turn is analysis
 (review, audit, verification, or similar), the parent does not perform that
@@ -33,26 +35,42 @@ request format, or scheduler to route through.
 
 ## Model tiers
 
-`bulk-worker` and `balanced-worker` bind to the `haiku` and `sonnet` model
-aliases, which track the current Claude generation automatically (Haiku 4.5
-and Sonnet 5 as of this writing); the parent stays on the frontier model for
-the active session (Opus 5). Codex has no alias layer, so its bindings are
-explicit slugs: `bulk_worker` → `gpt-5.6-luna`, `balanced_worker` →
-`gpt-5.6-terra`, parent → `gpt-6-astra`. Re-verify Codex's slugs by asking
-Codex directly whenever its lineup changes — it knows its own capability
-tiers better than external documentation — and update this note and
-`codex/AGENTS.md` together.
+Each tier binds to a Claude model alias and a Codex model slug:
+
+| tier              | Claude alias | Codex slug     |
+|-------------------|--------------|-----------------|
+| `frontier-worker` | `fable`      | `gpt-6-astra`   |
+| `balanced-worker` | `opus`       | `gpt-5.6-sol`   |
+| `bulk-worker`     | `sonnet`     | `gpt-5.6-terra` |
+| `quick-worker`    | `haiku`      | `gpt-5.6-luna`  |
+
+The Claude aliases track the current Claude generation automatically (Fable,
+Opus, Sonnet, and Haiku 5/4.5 as of this writing); the parent stays on the
+frontier model for the active session (Opus 5). Codex has no alias layer, so
+its bindings are explicit slugs. Codex's lineup was re-verified by asking
+Codex directly on 2026-09-09 — it knows its own capability tiers better than
+external documentation — and this note and `codex/AGENTS.md` are updated
+together whenever that changes. Reasoning effort steps up one level per tier,
+from `low` at quick to `xhigh` at frontier, the same ladder on both hosts:
+Claude's `effort` runs `low` for `quick-worker`, `medium` for `bulk-worker`,
+`high` for `balanced-worker`, and `xhigh` for `frontier-worker`; Codex's
+`model_reasoning_effort` runs `low` for `quick_worker`, `medium` for
+`bulk_worker`, `high` for `balanced_worker`, and `xhigh` for
+`frontier_worker`; the parent uses ordinary session effort in both hosts.
 
 ## Recursive delegation
 
-A delegated worker may spawn another worker, but only a strictly lower tier
-than its own: `balanced-worker` may spawn `bulk-worker`, never itself or
-another `balanced-worker`. `bulk-worker` is already the lowest tier and
-cannot delegate further. The parent/main agent is not part of this ordering
-at all — it is always the highest tier regardless of which model it runs on,
-and is exempt from this constraint, free to spawn any tier as today. Because
-a chain can only move strictly downward, its depth is bounded by the number
-of tiers and no cycle is possible.
+The tier order, highest to lowest, is `frontier-worker` > `balanced-worker` >
+`bulk-worker` > `quick-worker`. A delegated worker may spawn another worker,
+but only a strictly lower tier than its own: `frontier-worker` may spawn
+`balanced-worker`, `bulk-worker`, or `quick-worker`; `balanced-worker` may
+spawn `bulk-worker` or `quick-worker`; `bulk-worker` may spawn only
+`quick-worker`; no tier may spawn itself or a higher tier. `quick-worker` is
+already the lowest tier and cannot delegate further. The parent/main agent is
+not part of this ordering at all — it is always the highest tier regardless of
+which model it runs on, and is exempt from this constraint, free to spawn any
+tier as today. Because a chain can only move strictly downward, its depth is
+bounded by the number of tiers and no cycle is possible.
 
 ## Conflict boundary
 
