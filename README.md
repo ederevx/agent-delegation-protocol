@@ -121,12 +121,11 @@ This authority does not override host permissions or other protocols.
 ## Verify
 
 These tests use disposable homes and do not change live configuration.
-Isolation is asserted, not assumed: every store root resolves through
-`DELEGATION_CONFIG_HOME` and `DELEGATION_STATE_HOME`, the only overrides
-honoured on every platform. The per-platform fallbacks differ
-(`LOCALAPPDATA` on Windows, `XDG_CONFIG_HOME`/`XDG_STATE_HOME`
-elsewhere), so setting an XDG variable alone does not isolate a store on
-Windows.
+Isolation is asserted, not assumed: each host reads its own configuration
+directory. Claude resolves through `CLAUDE_CONFIG_DIR` (defaulting to
+`$HOME/.claude`), and Codex resolves through `CODEX_HOME` (defaulting to
+`$HOME/.codex`). The delegation protocol state is stored under the host's
+configuration directory in `.delegation-protocol/`.
 
 ```bash
 python3 scripts/agents/render-bulk-workers.py --check
