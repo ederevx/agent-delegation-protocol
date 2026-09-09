@@ -72,13 +72,10 @@ def test_same_link_paths() -> None:
 
 
 def test_bypass_not_creatable_by_product_code() -> None:
-    """The owner bypass marker must stay a human-only, hand-created file.
+    """ADP product code must not activate its own bypass automatically.
 
-    Only `hook_adapter.py` may know about it at all, and only to read it
-    (`Path.is_file()`); nothing shipped may write, touch, or otherwise
-    fabricate it. A future change that lets any agent-facing code create or
-    script around the marker should fail this check and force explicit
-    review rather than landing silently.
+    The user or an explicitly authorized assistant controls the marker.
+    Only the adapter reads it; installers and helpers must not create it.
     """
     root = Path(__file__).resolve().parents[2]
     allowed_readers = {root / "scripts/hosts/hook_adapter.py"}
@@ -98,7 +95,53 @@ def test_bypass_not_creatable_by_product_code() -> None:
     assert not offenders, f"unexpected bypass reference outside hook_adapter.py: {offenders}"
 
 
+def test_total_bypass() -> None:
+    import os
+    import hook_adapter
+
+    with tempfile.TemporaryDirectory(prefix="adp-bypass-") as raw:
+        root = Path(raw)
+        homes = {host: root / host for host in ("claude", "codex")}
+        with patch.dict(os.environ, {
+            "CLAUDE_CONFIG_DIR": str(homes["claude"]),
+            "CODEX_HOME": str(homes["codex"]),
+        }):
+            for host, home in homes.items():
+                marker = home / ".delegation-protocol/bypass"
+                marker.parent.mkdir(parents=True)
+                # Preserve even corrupt state and a busy lock under bypass.
+                state, lock = hook_adapter._paths(home, "s")
+                lock.mkdir(parents=True)
+                state.write_text("invalid state")
+                marker.write_text("explicit owner request")
+                with patch.object(hook_adapter, "_classifier",
+                                  side_effect=RuntimeError("broken classifier")):
+                    for event in ("prompt", "pre-mutation", "turn-stop",
+                                  "worker-start", "worker-complete",
+                                  "worker-release", "session-end"):
+                        for tool in ("Read", "Edit", "Bash", "Agent", "Task"):
+                            for worker in (None, "leaf-a"):
+                                assert hook_adapter.run(host, event, {
+                                    "session_id": "s", "agent_id": worker,
+                                    "tool_name": tool,
+                                    "prompt": "Review and update 12 files",
+                                }) is None
+                    assert state.read_text() == "invalid state"
+                    assert lock.is_dir()
+                    other = "codex" if host == "claude" else "claude"
+                    assert not hook_adapter._bypass(homes[other])
+                    marker.unlink()
+                    try:
+                        hook_adapter.run(host, "pre-mutation", {
+                            "session_id": "s", "tool_name": "Read"})
+                    except RuntimeError as error:
+                        assert str(error) == "broken classifier"
+                    else:
+                        raise AssertionError("Removing bypass did not restore hooks")
+
+
 def main() -> None:
+    test_total_bypass()
     test_same_link_paths()
     test_bypass_not_creatable_by_product_code()
     with tempfile.TemporaryDirectory(prefix="protocol-hosts-") as raw:
