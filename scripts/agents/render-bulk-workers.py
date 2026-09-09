@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import sys
@@ -11,6 +12,21 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+CLASSIFIER_PATH = Path(__file__).resolve().parent / "delegation-classifier.py"
+
+
+def _load_classifier() -> Any:
+    specification = importlib.util.spec_from_file_location(
+        "protocol_v2_classifier", CLASSIFIER_PATH
+    )
+    if not specification or not specification.loader:
+        raise RuntimeError(f"cannot load classifier module: {CLASSIFIER_PATH}")
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
+AGENT_TOOL_NAME = _load_classifier().AGENT_TOOL_NAME
 TEMPLATE_PATH = REPO_ROOT / "agents" / "bulk-worker-common.md.tmpl"
 PROFILES_PATH = REPO_ROOT / "agents" / "bulk-worker-profiles.json"
 BALANCED_TEMPLATE_PATH = REPO_ROOT / "agents" / "balanced-worker-common.md.tmpl"
@@ -69,7 +85,7 @@ def render_claude(body: str, description: str, output: dict[str, Any]) -> str:
     # Leaf-tier workers must not be able to spawn further subagents (that is
     # the recursion this allowlist exists to close), so the delegation tool
     # itself is never permitted here regardless of what the profile lists.
-    if tools is not None and any(name.strip().lower() in {"agent", "task"} for name in tools):
+    if tools is not None and any(AGENT_TOOL_NAME.match(name.strip()) for name in tools):
         raise ValueError("output field 'tools' must not include the delegation tool (Agent/Task)")
     tools_line = f"tools: {', '.join(tools)}\n" if tools else ""
     return (

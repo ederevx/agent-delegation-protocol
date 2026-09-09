@@ -156,9 +156,9 @@ def _is_worker_session(host: str, payload: dict[str, Any]) -> bool:
     return host == "claude" and isinstance(worker, str) and bool(worker.strip())
 
 
-def _delegating(payload: dict[str, Any]) -> bool:
+def _delegating(payload: dict[str, Any], classifier: Any) -> bool:
     name = str(payload.get("tool_name") or payload.get("toolName") or "")
-    return name.strip().lower() in {"agent", "task"}
+    return bool(classifier.AGENT_TOOL_NAME.match(name.strip()))
 
 
 def _mutating(payload: dict[str, Any], classifier: Any) -> bool:
@@ -246,6 +246,150 @@ def _bypass(home: Path) -> bool:
     return (home / ".delegation-protocol" / "bypass").is_file()
 
 
+class _SkipSave(Exception):
+    """Raised by a handler to signal the in-flight state must not be persisted."""
+
+
+class TurnEventHandler:
+    """Applies one normalized hook event against a single turn's saved state.
+
+    Each `handle_*` method owns exactly one event's decision logic; `handle`
+    is the dispatcher and the only place that knows the event-name-to-method
+    mapping. `state` is mutated in place by design, matching the previous
+    function's behavior of updating the caller-owned dict directly.
+    """
+
+    def __init__(self, host: str, classifier: Any, mode: str,
+                 state: dict[str, Any]) -> None:
+        self.host = host
+        self.classifier = classifier
+        self.mode = mode
+        self.state = state
+        self.lifecycle = LifecycleState(
+            mode,
+            set(state["active"]),
+            set(state["finished"]),
+            set(state["concurrent"]),
+        )
+
+    def handle(self, event: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        handlers = {
+            "prompt": self._handle_prompt,
+            "worker-start": self._handle_worker_start,
+            "worker-complete": self._handle_worker_complete,
+            "worker-release": self._handle_worker_release,
+            "session-end": self._handle_session_end,
+            "pre-mutation": self._handle_pre_mutation,
+            "turn-stop": self._handle_turn_stop,
+        }
+        handler = handlers.get(event)
+        output = handler(payload) if handler else None
+        self.state.update({
+            "active": sorted(self.lifecycle.active),
+            "finished": sorted(self.lifecycle.finished),
+            "concurrent": sorted(self.lifecycle.concurrent),
+            "mode": self.mode,
+        })
+        return output
+
+    def _handle_prompt(self, payload: dict[str, Any]) -> None:
+        prompt = payload.get("prompt") or payload.get("user_prompt") or ""
+        if self.classifier.RELAYED_MESSAGE.match(str(prompt)):
+            # A relayed worker/peer message or a background task's own
+            # notification, not something the user typed -- leave
+            # whatever obligation is already in flight untouched rather
+            # than classifying its text or resetting evidence collected
+            # so far (see RELAYED_MESSAGE's own docstring).
+            raise _SkipSave()
+        decision = self.classifier.classify(
+            str(prompt),
+            self.state,
+            context_env=("CLAUDE_CODE_MAX_CONTEXT_TOKENS",)
+            if self.host == "claude" else ("CODEX_MAX_CONTEXT_TOKENS",),
+        )
+        carry = bool(decision.get("carry_forward"))
+        if not carry:
+            self.lifecycle = LifecycleState(self.mode)
+            self.state["observed"] = []
+            self.state["peak_active"] = 0
+        self.state.update({
+            "requires_delegation": bool(decision["requires_delegation"]),
+            "requires_multi": bool(decision["requires_multi"]),
+            "analysis_signal": bool(decision.get("analysis_signal")),
+            "execution_signal": bool(decision.get("execution_signal")),
+            "min_agents": int(decision["min_agents"]),
+            "completed": False,
+        })
+        return None
+
+    def _handle_worker_start(self, payload: dict[str, Any]) -> None:
+        worker = _worker(payload)
+        if worker:
+            self.lifecycle.start(worker)
+            observed = set(self.state["observed"])
+            observed.add(worker)
+            self.state["observed"] = sorted(observed)
+            self.state["peak_active"] = max(
+                self.state["peak_active"], len(self.lifecycle.concurrent)
+            )
+        return None
+
+    def _handle_worker_complete(self, payload: dict[str, Any]) -> None:
+        worker = _worker(payload)
+        if worker:
+            self.lifecycle.complete(worker)
+        return None
+
+    def _handle_worker_release(self, payload: dict[str, Any]) -> None:
+        worker = _worker(payload)
+        if worker:
+            self.lifecycle.release(worker)
+        return None
+
+    def _handle_session_end(self, payload: dict[str, Any]) -> None:
+        self.lifecycle.end_session()
+        self.state["completed"] = True
+        return None
+
+    def _handle_pre_mutation(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        if _mutating(payload, self.classifier):
+            reason = _unmet(self.state) or _execution_unmet(self.state)
+            return _deny(reason) if reason else None
+        if _context_pulling(payload, self.classifier, self.state):
+            if self.state.get("analysis_signal"):
+                # No floor escape here, unlike the branch below: once
+                # a turn is analysis-flagged, the parent never pulls
+                # content into its own context for the rest of the
+                # turn, no matter how many workers have started.
+                # Analysis stays reserved for delegated agents.
+                return _deny(
+                    "Analysis is reserved for delegated agents; "
+                    "route this to a worker instead of pulling "
+                    "content into the parent's own context."
+                )
+            floor = max(self.state["min_agents"], 1) if self.state["requires_delegation"] else 1
+            observed = len(set(self.state["observed"]))
+            if observed < floor:
+                return _deny(
+                    "Route this to a worker before pulling content "
+                    f"into context (requires at least {floor} "
+                    "lifecycle-visible worker(s))."
+                )
+        return None
+
+    def _handle_turn_stop(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        reason = _unmet(self.state)
+        if reason:
+            return {"decision": "block", "reason": reason}
+        if self.mode == "explicit_release" and self.lifecycle.finished:
+            return {
+                "decision": "block",
+                "reason": "Release completed workers before ending this turn.",
+            }
+        self.state["completed"] = True
+        return None
+
+
 def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     """Apply one normalized hook event and return host-compatible feedback."""
     if host not in {"claude", "codex"} or not isinstance(payload, dict):
@@ -256,10 +400,11 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
     home = _home(host)
     if _bypass(home):
         return None
+    classifier = _classifier(home)
     if event in {"prompt", "pre-mutation", "turn-stop"} and _is_worker_session(host, payload):
         # Worker tool calls can share their parent's session_id. They must
         # neither enforce parent delegation floors nor rewrite parent state.
-        if event == "pre-mutation" and _delegating(payload):
+        if event == "pre-mutation" and _delegating(payload, classifier):
             return _deny(
                 "Leaf-tier workers execute the assigned task directly; "
                 "delegating to a further subagent is not permitted."
@@ -267,107 +412,12 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         return None
     path, lock = _paths(home, session)
     mode = _release_mode(home)
-    classifier = _classifier(home)
     with _locked(lock):
         state = _load(path, mode)
-        lifecycle = LifecycleState(
-            mode,
-            set(state["active"]),
-            set(state["finished"]),
-            set(state["concurrent"]),
-        )
-        output = None
-        if event == "prompt":
-            prompt = payload.get("prompt") or payload.get("user_prompt") or ""
-            if classifier.RELAYED_MESSAGE.match(str(prompt)):
-                # A relayed worker/peer message or a background task's own
-                # notification, not something the user typed -- leave
-                # whatever obligation is already in flight untouched rather
-                # than classifying its text or resetting evidence collected
-                # so far (see RELAYED_MESSAGE's own docstring).
-                return None
-            decision = classifier.classify(
-                str(prompt),
-                state,
-                context_env=("CLAUDE_CODE_MAX_CONTEXT_TOKENS",)
-                if host == "claude" else ("CODEX_MAX_CONTEXT_TOKENS",),
-            )
-            carry = bool(decision.get("carry_forward"))
-            if not carry:
-                lifecycle = LifecycleState(mode)
-                state["observed"] = []
-                state["peak_active"] = 0
-            state.update({
-                "requires_delegation": bool(decision["requires_delegation"]),
-                "requires_multi": bool(decision["requires_multi"]),
-                "analysis_signal": bool(decision.get("analysis_signal")),
-                "execution_signal": bool(decision.get("execution_signal")),
-                "min_agents": int(decision["min_agents"]),
-                "completed": False,
-            })
-        elif event == "worker-start":
-            worker = _worker(payload)
-            if worker:
-                lifecycle.start(worker)
-                observed = set(state["observed"])
-                observed.add(worker)
-                state["observed"] = sorted(observed)
-                state["peak_active"] = max(
-                    state["peak_active"], len(lifecycle.concurrent)
-                )
-        elif event == "worker-complete":
-            worker = _worker(payload)
-            if worker:
-                lifecycle.complete(worker)
-        elif event == "worker-release":
-            worker = _worker(payload)
-            if worker:
-                lifecycle.release(worker)
-        elif event == "session-end":
-            lifecycle.end_session()
-            state["completed"] = True
-        elif event == "pre-mutation":
-            if _mutating(payload, classifier):
-                reason = _unmet(state) or _execution_unmet(state)
-                if reason:
-                    output = _deny(reason)
-            elif _context_pulling(payload, classifier, state):
-                if state.get("analysis_signal"):
-                    # No floor escape here, unlike the branch below: once
-                    # a turn is analysis-flagged, the parent never pulls
-                    # content into its own context for the rest of the
-                    # turn, no matter how many workers have started.
-                    # Analysis stays reserved for delegated agents.
-                    output = _deny(
-                        "Analysis is reserved for delegated agents; "
-                        "route this to a worker instead of pulling "
-                        "content into the parent's own context."
-                    )
-                else:
-                    floor = max(state["min_agents"], 1) if state["requires_delegation"] else 1
-                    observed = len(set(state["observed"]))
-                    if observed < floor:
-                        output = _deny(
-                            "Route this to a worker before pulling content "
-                            f"into context (requires at least {floor} "
-                            "lifecycle-visible worker(s))."
-                        )
-        elif event == "turn-stop":
-            reason = _unmet(state)
-            if reason:
-                output = {"decision": "block", "reason": reason}
-            elif mode == "explicit_release" and lifecycle.finished:
-                output = {
-                    "decision": "block",
-                    "reason": "Release completed workers before ending this turn.",
-                }
-            else:
-                state["completed"] = True
-        state.update({
-            "active": sorted(lifecycle.active),
-            "finished": sorted(lifecycle.finished),
-            "concurrent": sorted(lifecycle.concurrent),
-            "mode": mode,
-        })
+        handler = TurnEventHandler(host, classifier, mode, state)
+        try:
+            output = handler.handle(event, payload)
+        except _SkipSave:
+            return None
         _save(path, state)
         return output
