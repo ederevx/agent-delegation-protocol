@@ -10,10 +10,7 @@ from pathlib import Path
 from typing import Any
 
 STATUS_PREFIX = "Delegation protocol v2:"
-CLAUDE_ENV_DEFAULTS = {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
-    "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "3",
-}
+CLAUDE_ENV_DEFAULTS: dict[str, str] = {}
 
 
 def quote(value: str) -> str:

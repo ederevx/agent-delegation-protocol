@@ -157,60 +157,6 @@ def _is_worker_session(host: str, payload: dict[str, Any]) -> bool:
     return host == "claude" and isinstance(worker, str) and bool(worker.strip())
 
 
-def _delegating(payload: dict[str, Any], classifier: Any) -> bool:
-    name = str(payload.get("tool_name") or payload.get("toolName") or "")
-    return bool(classifier.AGENT_TOOL_NAME.match(name.strip()))
-
-
-def _agent_type(payload: dict[str, Any]) -> str | None:
-    """The declared worker-profile name Claude records for this session.
-
-    Distinct from `_worker`, which identifies a specific worker instance
-    (its agent/task id) rather than which tier profile spawned it. Only
-    meaningful once `_is_worker_session` has already established the
-    session belongs to a worker at all -- `agent_type` alone (with no
-    `agent_id`) also occurs on a parent launched with `--agent` and must
-    not be mistaken for a worker session by itself.
-    """
-    value = payload.get("agent_type")
-    return value.strip() if isinstance(value, str) and value.strip() else None
-
-
-def _requested_tier(payload: dict[str, Any]) -> str | None:
-    """Which profile an Agent/Task call is trying to spawn, from its own args."""
-    tool = payload.get("tool_input") or payload.get("toolInput") or {}
-    if isinstance(tool, dict):
-        value = tool.get("subagent_type")
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
-
-
-def _tier_violation(payload: dict[str, Any], classifier: Any) -> str | None:
-    """Reason a worker session's own Agent/Task call must be denied.
-
-    Returns None when the call is permitted: the caller's own tier
-    (from `agent_type`) must be known and strictly above the requested
-    target tier (from the tool call's own `subagent_type` argument).
-    Missing or unrecognized tier information on either side fails closed.
-    """
-    caller_name = _agent_type(payload)
-    caller = classifier.worker_tier_rank(caller_name)
-    if caller is None:
-        return (
-            "Leaf-tier workers execute the assigned task directly; "
-            "delegating to a further subagent is not permitted."
-        )
-    lower = classifier.lower_tiers(caller)
-    if not lower:
-        return f"{caller_name} is the lowest tier and cannot delegate further."
-    target = classifier.worker_tier_rank(_requested_tier(payload))
-    if target is not None and target < caller:
-        return None
-    return (
-        f"a {caller_name} may only delegate to a strictly lower tier "
-        f"({', '.join(lower)}), not to itself or higher."
-    )
 
 
 def _mutating(payload: dict[str, Any], classifier: Any) -> bool:
@@ -463,9 +409,8 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
     if event in {"prompt", "pre-mutation", "turn-stop"} and _is_worker_session(host, payload):
         # Worker tool calls can share their parent's session_id. They must
         # neither enforce parent delegation floors nor rewrite parent state.
-        if event == "pre-mutation" and _delegating(payload, classifier):
-            reason = _tier_violation(payload, classifier)
-            return _deny(reason) if reason else None
+        # Recursive delegation (whether and to what a worker itself may
+        # delegate) is left to the model's own judgment, not hook-enforced.
         return None
     path, lock = _paths(home, session)
     mode = _release_mode(home)
