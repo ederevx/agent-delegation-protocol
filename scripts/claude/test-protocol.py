@@ -153,6 +153,33 @@ def main():
     assert 'leaf-a' in json.loads(state_path.read_text())['observed']
     invoke('worker-complete', worker_payload)
     assert 'leaf-a' not in json.loads(state_path.read_text())['active']
+    # Recursive delegation: a worker may spawn another worker only of a
+    # strictly lower tier than its own, identified by the caller's own
+    # `agent_type` and the Agent/Task call's own `subagent_type` argument.
+    balanced_payload = {'session_id': 'tier', 'agent_id': 'mid-a',
+        'agent_type': 'balanced-worker'}
+    # balanced-worker -> bulk-worker: strictly lower tier, allowed.
+    tier_allowed = invoke('pre-mutation', dict(balanced_payload, tool_name='Agent',
+        tool_input={'subagent_type': 'bulk-worker'}), env)
+    assert tier_allowed == {}, tier_allowed
+    # balanced-worker -> balanced-worker: same tier as itself, denied.
+    tier_same_denied = invoke('pre-mutation', dict(balanced_payload, tool_name='Agent',
+        tool_input={'subagent_type': 'balanced-worker'}), env)
+    assert tier_same_denied['hookSpecificOutput']['permissionDecision'] == 'deny', tier_same_denied
+    # bulk-worker is already the lowest tier and cannot delegate at all,
+    # regardless of what tier it names as the target.
+    bulk_payload = {'session_id': 'tier', 'agent_id': 'leaf-b',
+        'agent_type': 'bulk-worker'}
+    for target in ('bulk-worker', 'balanced-worker'):
+      tier_bulk_denied = invoke('pre-mutation', dict(bulk_payload, tool_name='Agent',
+          tool_input={'subagent_type': target}), env)
+      assert tier_bulk_denied['hookSpecificOutput']['permissionDecision'] == 'deny', tier_bulk_denied
+    # The parent (non-worker session, no agent_id) is unaffected by any of
+    # this: it may still spawn either tier freely, as before.
+    for target in ('bulk-worker', 'balanced-worker'):
+      parent_allowed = invoke('pre-mutation', {'session_id': 'pm', 'tool_name': 'Agent',
+          'tool_input': {'subagent_type': target}}, env)
+      assert parent_allowed == {}, parent_allowed
     # Explicit, single-use, text-based authorization is the sole remaining
     # override -- no marker file, and it does not persist as a standing
     # bypass. It allows exactly the one otherwise-blocked action it names,

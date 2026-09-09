@@ -26,7 +26,9 @@ def _load_classifier() -> Any:
     return module
 
 
-AGENT_TOOL_NAME = _load_classifier().AGENT_TOOL_NAME
+_CLASSIFIER = _load_classifier()
+AGENT_TOOL_NAME = _CLASSIFIER.AGENT_TOOL_NAME
+WORKER_TIER_RANK = _CLASSIFIER.WORKER_TIER_RANK
 TEMPLATE_PATH = REPO_ROOT / "agents" / "bulk-worker-common.md.tmpl"
 PROFILES_PATH = REPO_ROOT / "agents" / "bulk-worker-profiles.json"
 BALANCED_TEMPLATE_PATH = REPO_ROOT / "agents" / "balanced-worker-common.md.tmpl"
@@ -82,11 +84,20 @@ def render_claude(body: str, description: str, output: dict[str, Any]) -> str:
     if tools is not None and (not isinstance(tools, list) or not tools or
                                not all(isinstance(item, str) and item for item in tools)):
         raise ValueError("output field 'tools', when present, must be a non-empty string list")
-    # Leaf-tier workers must not be able to spawn further subagents (that is
-    # the recursion this allowlist exists to close), so the delegation tool
-    # itself is never permitted here regardless of what the profile lists.
-    if tools is not None and any(AGENT_TOOL_NAME.match(name.strip()) for name in tools):
-        raise ValueError("output field 'tools' must not include the delegation tool (Agent/Task)")
+    # The lowest worker tier must never be able to spawn further subagents at
+    # all (see WORKER_TIER_RANK / WORKER_TIERS in delegation-classifier.py),
+    # so the delegation tool itself is rejected here for that tier
+    # regardless of what its profile lists. A higher tier (e.g.
+    # balanced-worker) may legitimately list it, since the hook-level tier
+    # check enforces the strictly-lower-tier rule at call time instead.
+    is_lowest_tier = WORKER_TIER_RANK.get(output["name"]) == 1
+    if is_lowest_tier and tools is not None and any(
+        AGENT_TOOL_NAME.match(name.strip()) for name in tools
+    ):
+        raise ValueError(
+            f"output field 'tools' for lowest-tier profile {output['name']!r} "
+            "must not include the delegation tool (Agent/Task)"
+        )
     tools_line = f"tools: {', '.join(tools)}\n" if tools else ""
     return (
         "---\n"
