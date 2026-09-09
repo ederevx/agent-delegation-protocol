@@ -73,6 +73,44 @@ def test_same_link_paths() -> None:
         )
 
 
+def test_windows_symlink_privilege_error() -> None:
+    with tempfile.TemporaryDirectory(prefix="adp-symlink-error-") as raw:
+        root = Path(raw)
+        repo = fixture(root)
+        home = root / "codex-home"
+        error = OSError("symbolic-link privilege is unavailable")
+        error.winerror = 1314
+        with patch.object(Path, "symlink_to", side_effect=error):
+            try:
+                install.install(repo, home, "codex")
+            except SystemExit as failure:
+                message = str(failure)
+            else:
+                raise AssertionError("WinError 1314 should stop installation")
+        assert "WinError 1314" in message
+        assert "Developer Mode" in message
+        assert "elevated PowerShell" in message
+        assert str(home / "agents/frontier_worker.toml") in message
+        state = home / ".delegation-protocol"
+        assert not (state / "manifest.json").exists()
+        assert not (state / "install.lock").exists()
+        assert not (home / "hooks.json").exists()
+        assert not (home / "agents/frontier_worker.toml").exists()
+
+
+def test_other_symlink_errors_are_not_relabelled() -> None:
+    source = Path("source")
+    destination = Path("destination")
+    error = OSError("different filesystem error")
+    with patch.object(Path, "symlink_to", side_effect=error):
+        try:
+            install.create_symlink(destination, source)
+        except OSError as failure:
+            assert failure is error
+        else:
+            raise AssertionError("non-1314 OSError should propagate")
+
+
 def test_explicit_authorization_is_single_use() -> None:
     """The sole remaining override is per-action text, not a standing bypass.
 
@@ -119,6 +157,8 @@ def test_explicit_authorization_is_single_use() -> None:
 def main() -> None:
     test_explicit_authorization_is_single_use()
     test_same_link_paths()
+    test_windows_symlink_privilege_error()
+    test_other_symlink_errors_are_not_relabelled()
     with tempfile.TemporaryDirectory(prefix="protocol-hosts-") as raw:
         root, repo = Path(raw), None
         repo = fixture(root)

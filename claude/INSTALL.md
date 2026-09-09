@@ -22,10 +22,13 @@ bash scripts/claude/install.sh
 .\scripts\claude\install.ps1
 ```
 
-Python 3.11 or newer is required for the local hook and protocol client. The
-installer validates the Claude home, destination types, protocol metadata, and
-settings before mutation. Existing settings, rules, and unrelated handlers are
-preserved; conflicts stop installation without partial activation.
+Python 3.11 or newer is required for the local hook and protocol client. Native
+Windows also requires symbolic-link support through Developer Mode or an
+elevated PowerShell. If Windows denies link creation, the installer stops
+transactionally and reports how to satisfy that requirement before retrying.
+The installer validates the Claude home, destination types, protocol metadata,
+and settings before mutation. Existing settings, rules, and unrelated handlers
+are preserved; conflicts stop installation without partial activation.
 
 ## Installed surface
 

@@ -24,7 +24,9 @@ bash scripts/codex/install.sh
 
 Python 3.11 or newer is required. Set `CODEX_PYTHON` when automatic discovery
 cannot find a suitable interpreter. Native Windows also requires symbolic-link
-support through Developer Mode or an elevated shell.
+support through Developer Mode or an elevated PowerShell. If Windows denies
+link creation, the installer stops transactionally and reports how to satisfy
+that requirement before retrying.
 
 The installer validates `$CODEX_HOME`, destination types, protocol metadata,
 and hook configuration before mutation. Existing unrelated instructions,
