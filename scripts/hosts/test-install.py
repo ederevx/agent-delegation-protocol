@@ -30,10 +30,12 @@ class FakeWindowsLink:
 def fixture(root: Path) -> Path:
     repo = root / "repo"
     for path in (
-        "claude/rules/delegation-protocol.md", "claude/agents/bulk-worker.md",
-        "claude/agents/balanced-worker.md",
+        "claude/rules/delegation-protocol.md", "claude/agents/frontier-worker.md",
+        "claude/agents/balanced-worker.md", "claude/agents/bulk-worker.md",
+        "claude/agents/quick-worker.md",
         "claude/hooks/delegation-enforcer.py", "codex/AGENTS.md",
-        "codex/agents/bulk_worker.toml", "codex/agents/balanced-worker.toml",
+        "codex/agents/frontier_worker.toml", "codex/agents/balanced-worker.toml",
+        "codex/agents/bulk_worker.toml", "codex/agents/quick_worker.toml",
         "codex/hooks/delegation-enforcer.py",
         "scripts/hosts/hook_adapter.py", "scripts/hosts/lifecycle.py",
         "scripts/agents/delegation-classifier.py",

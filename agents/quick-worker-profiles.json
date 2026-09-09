@@ -1,0 +1,47 @@
+{
+  "schema_version": 2,
+  "description": "Lowest-tier worker for trivial, mechanical, single-step work through native host delegation.",
+  "profiles": {
+    "claude": {
+      "host_name": "Claude",
+      "parent_channel": "`SendMessage` (use `ListAgents` to identify the parent)",
+      "scope_contract": [
+        "Accept only trivial, mechanical, single-step work that needs no interpretation: a single well-specified edit, a direct lookup, formatting, or a one-line command. This tier deliberately overlaps the bulk tier for the simplest routine tasks; use it when the assignment is a single bounded step. Return anything with multiple steps, material ambiguity, architecture, integration, security-sensitive judgment, or final validation to the parent."
+      ],
+      "conflict_contract": [
+        "Use the same parent escalation path for an operation outside the assigned ownership; a single-use permission never becomes a standing grant."
+      ],
+      "lifecycle_contract": [
+        "Return the evidence report through the foreground Agent result or `SendMessage` for a named background teammate. Claude automatically releases a foreground Agent when its result returns; do not issue a stop operation for that completed worker."
+      ],
+      "output": {
+        "path": "claude/agents/quick-worker.md",
+        "format": "claude-markdown",
+        "name": "quick-worker",
+        "model": "haiku",
+        "effort": "low",
+        "tools": ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "WebFetch", "WebSearch", "NotebookEdit", "SendMessage"]
+      }
+    },
+    "codex": {
+      "host_name": "Codex",
+      "parent_channel": "the collaboration channel available to the worker",
+      "scope_contract": [
+        "Accept only trivial, mechanical, single-step work that needs no interpretation: a single well-specified edit, a direct lookup, formatting, or a one-line command. This tier deliberately overlaps the bulk tier for the simplest routine tasks; use it when the assignment is a single bounded step. Return anything with multiple steps, material ambiguity, architecture, integration, security-sensitive judgment, or final validation to the parent."
+      ],
+      "conflict_contract": [
+        "If no parent channel is available, stop and report instead of guessing."
+      ],
+      "lifecycle_contract": [
+        "Return the evidence report and stop. The host session lifecycle releases the worker; no nonexistent post-result worker action is required."
+      ],
+      "output": {
+        "path": "codex/agents/quick_worker.toml",
+        "format": "codex-toml",
+        "name": "quick_worker",
+        "model": "gpt-5.6-luna",
+        "reasoning_effort": "low"
+      }
+    }
+  }
+}

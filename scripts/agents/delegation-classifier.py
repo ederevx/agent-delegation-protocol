@@ -237,7 +237,9 @@ AGENT_TOOL_NAME = re.compile(r"^(?:agent|task)$", re.IGNORECASE)
 # above every tier here and is completely exempt from this constraint.
 # Adding a future tier is a one-line append to this tuple; nothing else
 # needs to change.
-WORKER_TIERS: tuple[str, ...] = ("bulk-worker", "balanced-worker")
+WORKER_TIERS: tuple[str, ...] = (
+    "quick-worker", "bulk-worker", "balanced-worker", "frontier-worker",
+)
 WORKER_TIER_RANK: dict[str, int] = {
     name: rank for rank, name in enumerate(WORKER_TIERS, start=1)
 }

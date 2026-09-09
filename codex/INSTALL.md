@@ -43,8 +43,10 @@ the prior override, when one existed, and never replaces unrelated instructions.
 The active home also receives the worker and protocol-owned links:
 
 ```text
-$CODEX_HOME/agents/bulk_worker.toml
+$CODEX_HOME/agents/frontier_worker.toml
 $CODEX_HOME/agents/balanced-worker.toml
+$CODEX_HOME/agents/bulk_worker.toml
+$CODEX_HOME/agents/quick_worker.toml
 $CODEX_HOME/hooks/delegation-enforcer.py
 $CODEX_HOME/.delegation-protocol/delegation-classifier.py
 $CODEX_HOME/.delegation-protocol/hook_adapter.py

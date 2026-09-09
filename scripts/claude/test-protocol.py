@@ -13,8 +13,10 @@ def main():
     assert r.returncode==0,r.stderr
     m=json.loads((home/'.delegation-protocol/manifest.json').read_text()); assert m['version']==3 and m['release']=='automatic_release'
     assert (home/'.delegation-protocol/hook_adapter.py').is_symlink()
-    assert (home/'agents/bulk-worker.md').is_symlink()
+    assert (home/'agents/frontier-worker.md').is_symlink()
     assert (home/'agents/balanced-worker.md').is_symlink()
+    assert (home/'agents/bulk-worker.md').is_symlink()
+    assert (home/'agents/quick-worker.md').is_symlink()
     # Only native lifecycle events (plus the documented Agent-failure signal)
     # ever wire to worker-start/worker-complete -- no arbitrary tool call
     # (which is how ACP/AALP traffic would otherwise reach the hook) can ever
@@ -156,27 +158,57 @@ def main():
     # Recursive delegation: a worker may spawn another worker only of a
     # strictly lower tier than its own, identified by the caller's own
     # `agent_type` and the Agent/Task call's own `subagent_type` argument.
+    # Four-tier order, highest first: frontier-worker, balanced-worker,
+    # bulk-worker, quick-worker.
+    ALL_TIERS = ('frontier-worker', 'balanced-worker', 'bulk-worker', 'quick-worker')
+    frontier_payload = {'session_id': 'tier', 'agent_id': 'top-a',
+        'agent_type': 'frontier-worker'}
+    # frontier-worker -> balanced-worker/bulk-worker/quick-worker: strictly
+    # lower tier, allowed.
+    for target in ('balanced-worker', 'bulk-worker', 'quick-worker'):
+      tier_allowed = invoke('pre-mutation', dict(frontier_payload, tool_name='Agent',
+          tool_input={'subagent_type': target}), env)
+      assert tier_allowed == {}, (target, tier_allowed)
+    # frontier-worker -> frontier-worker: same tier as itself, denied.
+    tier_top_same_denied = invoke('pre-mutation', dict(frontier_payload, tool_name='Agent',
+        tool_input={'subagent_type': 'frontier-worker'}), env)
+    assert tier_top_same_denied['hookSpecificOutput']['permissionDecision'] == 'deny', tier_top_same_denied
     balanced_payload = {'session_id': 'tier', 'agent_id': 'mid-a',
         'agent_type': 'balanced-worker'}
-    # balanced-worker -> bulk-worker: strictly lower tier, allowed.
-    tier_allowed = invoke('pre-mutation', dict(balanced_payload, tool_name='Agent',
-        tool_input={'subagent_type': 'bulk-worker'}), env)
-    assert tier_allowed == {}, tier_allowed
-    # balanced-worker -> balanced-worker: same tier as itself, denied.
-    tier_same_denied = invoke('pre-mutation', dict(balanced_payload, tool_name='Agent',
-        tool_input={'subagent_type': 'balanced-worker'}), env)
-    assert tier_same_denied['hookSpecificOutput']['permissionDecision'] == 'deny', tier_same_denied
-    # bulk-worker is already the lowest tier and cannot delegate at all,
-    # regardless of what tier it names as the target.
+    # balanced-worker -> bulk-worker/quick-worker: strictly lower tier, allowed.
+    for target in ('bulk-worker', 'quick-worker'):
+      tier_allowed = invoke('pre-mutation', dict(balanced_payload, tool_name='Agent',
+          tool_input={'subagent_type': target}), env)
+      assert tier_allowed == {}, (target, tier_allowed)
+    # balanced-worker -> balanced-worker/frontier-worker: same tier or higher,
+    # denied.
+    for target in ('balanced-worker', 'frontier-worker'):
+      tier_same_denied = invoke('pre-mutation', dict(balanced_payload, tool_name='Agent',
+          tool_input={'subagent_type': target}), env)
+      assert tier_same_denied['hookSpecificOutput']['permissionDecision'] == 'deny', tier_same_denied
     bulk_payload = {'session_id': 'tier', 'agent_id': 'leaf-b',
         'agent_type': 'bulk-worker'}
-    for target in ('bulk-worker', 'balanced-worker'):
+    # bulk-worker -> quick-worker: strictly lower tier, allowed.
+    tier_bulk_allowed = invoke('pre-mutation', dict(bulk_payload, tool_name='Agent',
+        tool_input={'subagent_type': 'quick-worker'}), env)
+    assert tier_bulk_allowed == {}, tier_bulk_allowed
+    # bulk-worker -> bulk-worker/balanced-worker/frontier-worker: same tier or
+    # higher, denied.
+    for target in ('bulk-worker', 'balanced-worker', 'frontier-worker'):
       tier_bulk_denied = invoke('pre-mutation', dict(bulk_payload, tool_name='Agent',
           tool_input={'subagent_type': target}), env)
       assert tier_bulk_denied['hookSpecificOutput']['permissionDecision'] == 'deny', tier_bulk_denied
+    # quick-worker is already the lowest tier and cannot delegate at all,
+    # regardless of what tier it names as the target.
+    quick_payload = {'session_id': 'tier', 'agent_id': 'leaf-q',
+        'agent_type': 'quick-worker'}
+    for target in ALL_TIERS:
+      tier_quick_denied = invoke('pre-mutation', dict(quick_payload, tool_name='Agent',
+          tool_input={'subagent_type': target}), env)
+      assert tier_quick_denied['hookSpecificOutput']['permissionDecision'] == 'deny', tier_quick_denied
     # The parent (non-worker session, no agent_id) is unaffected by any of
-    # this: it may still spawn either tier freely, as before.
-    for target in ('bulk-worker', 'balanced-worker'):
+    # this: it may still spawn any tier freely, as before.
+    for target in ALL_TIERS:
       parent_allowed = invoke('pre-mutation', {'session_id': 'pm', 'tool_name': 'Agent',
           'tool_input': {'subagent_type': target}}, env)
       assert parent_allowed == {}, parent_allowed
@@ -195,8 +227,10 @@ def main():
     assert old.returncode != 0 and 'tagged v2 uninstaller' in old.stderr
     (home/'.delegation-protocol/manifest.json').write_text(json.dumps(m))
     r=subprocess.run([sys.executable,str(ENGINE),"uninstall","--host","claude","--home",str(home),"--repo",str(ROOT)],env=env,capture_output=True,text=True); assert r.returncode==0,r.stderr
-    assert not (home/'agents/bulk-worker.md').exists()
+    assert not (home/'agents/frontier-worker.md').exists()
     assert not (home/'agents/balanced-worker.md').exists()
+    assert not (home/'agents/bulk-worker.md').exists()
+    assert not (home/'agents/quick-worker.md').exists()
     # Settings manager preserves unrelated values and hooks, rejects invalid
     # JSON without replacing the user's file, and uninstall preserves both
     # across removal of only the protocol's own hook entries.

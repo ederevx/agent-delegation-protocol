@@ -1,8 +1,8 @@
 ---
 name: balanced-worker
 description: Mid-tier worker for bounded work that needs moderate reasoning but not parent-level architecture or integration.
-model: sonnet
-effort: xhigh
+model: opus
+effort: high
 tools: Read, Write, Edit, Bash, Grep, Glob, WebFetch, WebSearch, NotebookEdit, SendMessage, Agent
 ---
 

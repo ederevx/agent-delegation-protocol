@@ -34,19 +34,24 @@ links:
 
 ```text
 $CLAUDE_CONFIG_DIR/rules/delegation-protocol.md
-$CLAUDE_CONFIG_DIR/agents/bulk-worker.md
+$CLAUDE_CONFIG_DIR/agents/frontier-worker.md
 $CLAUDE_CONFIG_DIR/agents/balanced-worker.md
+$CLAUDE_CONFIG_DIR/agents/bulk-worker.md
+$CLAUDE_CONFIG_DIR/agents/quick-worker.md
 $CLAUDE_CONFIG_DIR/hooks/delegation-enforcer.py
 $CLAUDE_CONFIG_DIR/.delegation-protocol/delegation-classifier.py
 $CLAUDE_CONFIG_DIR/.delegation-protocol/hook_adapter.py
 $CLAUDE_CONFIG_DIR/.delegation-protocol/lifecycle.py
 ```
 
-The bulk worker handles bounded low-risk work through the low tier. The
-balanced worker overlaps it for assignments where moderate reasoning is useful,
-without taking over parent architecture or integration. Both are ordinary
-native subagents; the protocol observes their lifecycle, it does not launch or
-route them.
+The quick worker handles trivial, mechanical, single-step work through the
+lowest tier. The bulk worker overlaps it for bounded low-risk work that needs
+little interpretation. The balanced worker overlaps the bulk tier for
+assignments where moderate reasoning is useful. The frontier worker overlaps
+the balanced tier for bounded work needing near-parent reasoning, without
+taking over parent architecture or integration. All four are ordinary native
+subagents; the protocol observes their lifecycle, it does not launch or route
+them.
 
 ## Settings and lifecycle
 

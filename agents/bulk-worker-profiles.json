@@ -18,9 +18,9 @@
         "path": "claude/agents/bulk-worker.md",
         "format": "claude-markdown",
         "name": "bulk-worker",
-        "model": "haiku",
-        "effort": "max",
-        "tools": ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "WebFetch", "WebSearch", "NotebookEdit", "SendMessage"]
+        "model": "sonnet",
+        "effort": "medium",
+        "tools": ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "WebFetch", "WebSearch", "NotebookEdit", "SendMessage", "Agent"]
       }
     },
     "codex": {
@@ -39,8 +39,8 @@
         "path": "codex/agents/bulk_worker.toml",
         "format": "codex-toml",
         "name": "bulk_worker",
-        "model": "gpt-5.6-luna",
-        "reasoning_effort": "xhigh"
+        "model": "gpt-5.6-terra",
+        "reasoning_effort": "medium"
       }
     }
   }
