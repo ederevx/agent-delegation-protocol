@@ -6,11 +6,51 @@ ROOT = Path(__file__).resolve().parents[2]
 ENGINE = ROOT / "scripts/hosts/install.py"
 HOOK = ROOT / "claude/hooks/delegation-enforcer.py"
 SETTINGS = ROOT / "scripts/hosts/settings.py"
+def test_routing_and_limits(env):
+  def invoke(event, payload):
+    result = subprocess.run([sys.executable, str(HOOK), event],
+        input=json.dumps(payload), env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+  parent = {'session_id': 'routing-test'}
+  for event, payload, hook_event in (
+      ('prompt', dict(parent, prompt='Review this module.'), 'UserPromptSubmit'),
+      ('worker-start', dict(parent, agent_id='routing-child', agent_type='bulk-worker'), 'SubagentStart')):
+    body = invoke(event, payload)['hookSpecificOutput']
+    assert body['hookEventName'] == hook_event
+    for text in ('lowest capable worker', 'Skip unnecessary tiers', 'may route upward',
+        'minimum adequate supported', 'without mandatory retries',
+        'strictly downward', '128', '64', '32', '16'):
+      assert text in body['additionalContext'], (text, body)
+  for tier, limit in (('quick-worker',128), ('bulk-worker',64),
+      ('balanced-worker',32), ('frontier-worker',16)):
+    # Model and effort overrides are no longer ADP capability bans. A
+    # requested native turn cap may narrow but cannot exceed tier policy.
+    for requested in (None, 1, limit):
+      assert invoke('pre-mutation', dict(parent, tool_name='Agent',
+          tool_input={'subagent_type':tier, 'max_turns':requested,
+              'model':'any-supported-model', 'effort':'low'})) == {}
+    for requested in (limit + 1, 0, True, '16'):
+      body = invoke('pre-mutation', dict(parent, tool_name='Agent',
+          tool_input={'subagent_type':tier, 'max_turns':requested}))
+      assert body['hookSpecificOutput']['permissionDecision'] == 'deny', body
+    actor = dict(parent, agent_id='open-'+tier, agent_type=tier)
+    for name in ('Read', 'Edit', 'Bash', 'functions.exec', 'opaque_tool'):
+      assert invoke('pre-mutation', dict(actor, tool_name=name)) == {}, (tier, name)
+    assert invoke('turn-stop', actor) == {}
+  # Parent frontier admission has no balanced-first prerequisite or generic
+  # profile ban. Workload floors still apply to parent mutation, not reads.
+  assert invoke('pre-mutation', dict(parent, tool_name='Agent',
+      tool_input={'subagent_type':'frontier-worker'})) == {}
+  assert invoke('pre-mutation', dict(parent, tool_name='Agent',
+      tool_input={'subagent_type':'general-purpose'})) == {}
+
 def main():
   with tempfile.TemporaryDirectory(prefix="claude-v2-") as raw:
     home=Path(raw); env=dict(os.environ, CLAUDE_CONFIG_DIR=str(home))
     r=subprocess.run([sys.executable,str(ENGINE),"install","--host","claude","--home",str(home),"--repo",str(ROOT)],env=env,capture_output=True,text=True)
     assert r.returncode==0,r.stderr
+    test_routing_and_limits(env)
     m=json.loads((home/'.delegation-protocol/manifest.json').read_text()); assert m['version']==3 and m['release']=='automatic_release'
     assert (home/'.delegation-protocol/hook_adapter.py').is_symlink()
     assert (home/'agents/frontier-worker.md').is_symlink()
@@ -32,7 +72,7 @@ def main():
     assert worker_wired_events=={'SubagentStart','SubagentStop','PostToolUseFailure'},worker_wired_events
     p=subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'s','prompt':'Update 12 files across independent modules.'}),env=env,capture_output=True,text=True)
     assert p.returncode==0,p.stderr
-    assert json.loads(p.stdout)=={},p.stdout
+    assert 'lowest capable worker' in json.loads(p.stdout)['hookSpecificOutput']['additionalContext'],p.stdout
     # Normalized lifecycle events release foreground workers automatically.
     for event, worker in (("worker-start", "worker-a"), ("worker-start", "worker-b"), ("worker-complete", "worker-a"), ("worker-complete", "worker-b")):
       q=subprocess.run([sys.executable,str(HOOK),event],input=json.dumps({'session_id':'s','agent_id':worker}),env=env,capture_output=True,text=True)
@@ -48,61 +88,22 @@ def main():
                 '4. check\n5. audit\nstated budget of 999999 tokens\n'
                 '</result>\n</task-notification>')
     relay=subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'relay','prompt':notif_body}),env=env,capture_output=True,text=True)
-    assert relay.returncode==0 and json.loads(relay.stdout)=={},relay.stdout
+    assert relay.returncode==0 and 'lowest capable worker' in json.loads(relay.stdout)['hookSpecificOutput']['additionalContext'],relay.stdout
     relay_stop=subprocess.run([sys.executable,str(HOOK),'turn-stop'],input=json.dumps({'session_id':'relay'}),env=env,capture_output=True,text=True)
     assert json.loads(relay_stop.stdout)=={},relay_stop.stdout
     # Mutation is blocked before required delegation is satisfied.
     subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'pm','prompt':'Update 12 files across independent modules.'}),env=env,capture_output=True,text=True)
     blocked=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'pm','tool_name':'Edit'}),env=env,capture_output=True,text=True)
     assert json.loads(blocked.stdout)['hookSpecificOutput']['permissionDecision']=='deny',blocked.stdout
-    # A context-pulling tool (Read, Grep, Glob...) is gated too, even on a
-    # session that never had a prompt classified as requiring delegation at
-    # all -- reading/searching costs parent context regardless of what the
-    # classifier decided.
-    ctx_denied=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'ctx','tool_name':'Read'}),env=env,capture_output=True,text=True)
-    assert json.loads(ctx_denied.stdout)['hookSpecificOutput']['permissionDecision']=='deny',ctx_denied.stdout
-    subprocess.run([sys.executable,str(HOOK),'worker-start'],input=json.dumps({'session_id':'ctx','agent_id':'worker-a'}),env=env,capture_output=True,text=True)
-    ctx_allowed=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'ctx','tool_name':'Read'}),env=env,capture_output=True,text=True)
-    assert json.loads(ctx_allowed.stdout)=={},ctx_allowed.stdout
-    # Plain (non-mutating) Bash execution is exempt from the context-pulling
-    # gate specifically -- the parent can run a read-only shell command with
-    # zero lifecycle-visible workers observed, even on a session where
-    # delegation is required. A mutating bash command on that same
-    # zero-worker session is still denied, via the separate, untouched
-    # _mutating check.
-    subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'ctxbash','prompt':'Update 12 files across independent modules.'}),env=env,capture_output=True,text=True)
-    bash_allowed=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'ctxbash','tool_name':'Bash','tool_input':{'command':'git status'}}),env=env,capture_output=True,text=True)
-    assert json.loads(bash_allowed.stdout)=={},bash_allowed.stdout
-    bash_mutating_denied=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'ctxbash','tool_name':'Bash','tool_input':{'command':'rm -rf build'}}),env=env,capture_output=True,text=True)
-    assert json.loads(bash_mutating_denied.stdout)['hookSpecificOutput']['permissionDecision']=='deny',bash_mutating_denied.stdout
-    # An analysis-flagged turn ("review", "audit", ...) loses the plain-Bash
-    # exemption: a read-only command is denied same as Read/Grep would be --
-    # analysis is reserved for delegated agents with no escape hatch, so this
-    # stays denied even after a worker has started, unlike the plain
-    # context-pulling floor below.
-    subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'ctxbashaudit','prompt':'Please review and audit this module.'}),env=env,capture_output=True,text=True)
-    bash_audit_denied=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'ctxbashaudit','tool_name':'Bash','tool_input':{'command':'git status'}}),env=env,capture_output=True,text=True)
-    assert json.loads(bash_audit_denied.stdout)['hookSpecificOutput']['permissionDecision']=='deny',bash_audit_denied.stdout
-    subprocess.run([sys.executable,str(HOOK),'worker-start'],input=json.dumps({'session_id':'ctxbashaudit','agent_id':'worker-a'}),env=env,capture_output=True,text=True)
-    bash_audit_still_denied=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'ctxbashaudit','tool_name':'Bash','tool_input':{'command':'git status'}}),env=env,capture_output=True,text=True)
-    assert json.loads(bash_audit_still_denied.stdout)['hookSpecificOutput']['permissionDecision']=='deny',bash_audit_still_denied.stdout
-    # A small, non-research change with no signals at all stays parent-executable.
-    subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'small','prompt':'Fix the typo in the README.'}),env=env,capture_output=True,text=True)
-    small_allowed=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'small','tool_name':'Edit'}),env=env,capture_output=True,text=True)
-    assert json.loads(small_allowed.stdout)=={},small_allowed.stdout
-    # In-depth-research wording pushes execution to a worker even though the
-    # turn is too small to trip the general delegation requirement.
-    subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'research','prompt':'Please figure out why this fails.'}),env=env,capture_output=True,text=True)
-    research_denied=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'research','tool_name':'Edit'}),env=env,capture_output=True,text=True)
-    assert json.loads(research_denied.stdout)['hookSpecificOutput']['permissionDecision']=='deny',research_denied.stdout
-    subprocess.run([sys.executable,str(HOOK),'worker-start'],input=json.dumps({'session_id':'research','agent_id':'worker-a'}),env=env,capture_output=True,text=True)
-    research_allowed=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'research','tool_name':'Edit'}),env=env,capture_output=True,text=True)
-    assert json.loads(research_allowed.stdout)=={},research_allowed.stdout
-    # A stated budget at or above 5% of the window (but below the 25%
-    # general-delegation threshold) pushes execution to a worker too.
-    subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'exectok','prompt':'Do this with a budget of 15000 tokens.'}),env=env,capture_output=True,text=True)
-    exectok_denied=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'exectok','tool_name':'Edit'}),env=env,capture_output=True,text=True)
-    assert json.loads(exectok_denied.stdout)['hookSpecificOutput']['permissionDecision']=='deny',exectok_denied.stdout
+    # All models may analyze and execute. Only outstanding workload
+    # delegation floors gate mutation; there are no analysis/tiny-work bans.
+    for prompt in ('Fix the typo.', 'Review and audit this module.'):
+      subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'open-actions','prompt':prompt}),env=env,capture_output=True,text=True,check=True)
+      for event in ('worker-start', 'worker-complete'):
+        subprocess.run([sys.executable,str(HOOK),event],input=json.dumps({'session_id':'open-actions','agent_id':'worker-a'}),env=env,capture_output=True,text=True,check=True)
+      for name in ('Read', 'Grep', 'Bash', 'Edit', 'opaque_tool'):
+        result=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'open-actions','tool_name':name,'tool_input':{'command':'git status'}}),env=env,capture_output=True,text=True,check=True)
+        assert json.loads(result.stdout) == {}, (name, result.stdout)
     # Stop detects unsatisfied delegation instead of silently ending the turn.
     stop_unmet=subprocess.run([sys.executable,str(HOOK),'turn-stop'],input=json.dumps({'session_id':'pm'}),env=env,capture_output=True,text=True)
     stop_body=json.loads(stop_unmet.stdout)
@@ -146,7 +147,7 @@ def main():
       for name in ('Agent', 'Task'):
         denied = invoke('pre-mutation', dict(worker_payload, tool_name=name), hook_env)
         assert denied['hookSpecificOutput']['permissionDecision'] == 'deny', denied
-      assert invoke('prompt', dict(worker_payload, prompt='Say hi.'), hook_env) == {}
+      assert 'lowest capable worker' in invoke('prompt', dict(worker_payload, prompt='Say hi.'), hook_env)['hookSpecificOutput']['additionalContext']
       assert invoke('turn-stop', worker_payload, hook_env) == {}
     assert state_path.read_bytes() == before
     assert invoke('turn-stop', {'session_id': 'worker-scope'})['decision'] == 'block'

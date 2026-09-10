@@ -46,11 +46,8 @@ DEFAULT_CONTEXT_WINDOW = 200_000
 STEP_DELEGATION_THRESHOLD = 3
 LONG_BRIEF_WORDS = 150
 
-# Execution (mutating work) is reserved for delegated agents by a lower bar
-# than the general delegation threshold above: a much smaller share of the
-# window is enough to push execution to a worker, on the theory that even a
-# "small" edit is cheap to hand off while a genuinely small one still clears
-# this bar. Same window-relative reasoning as DELEGATION_WINDOW_SHARE.
+# Retained execution-size diagnostic; it no longer imposes an independent
+# parent execution prohibition. Workload delegation uses the threshold above.
 EXECUTION_WINDOW_SHARE = 0.05
 
 # A continuation is short by construction. The two halves disagreed here (12
@@ -195,38 +192,9 @@ MUTATING_TOOL_NAME = re.compile(
     re.IGNORECASE,
 )
 
-# Any tool that pulls file, search, or command content into the parent's own
-# context costs that context the same way whether or not it mutates anything
-# -- so it is judged by the tool call itself, independent of how the turn's
-# prompt text was classified. Matched loosely by substring, same style as
-# MUTATING_TOOL_NAME, since host tool names vary and a name is only one of
-# the two signals used -- see `_context_pulling` in hook_adapter.py for the
-# command-field signal that covers exec-shaped tools regardless of their
-# name. Claude's "Bash" is deliberately excluded from this regex: plain
-# (non-mutating) shell execution is exempted from this gate by an explicit
-# tool-name check in `_context_pulling` itself, so the parent can run direct
-# user orders as shell commands without a worker having started first --
-# but only while the turn's `analysis_signal` (above) is false. A turn
-# carrying "analysis, review, or verification wording" loses that exemption:
-# `_context_pulling` falls through to the command-field signal below, the
-# same path Codex's "exec_command" always takes, since analysis work is
-# exactly the case this gate exists to cover. A mutating bash command is
-# unaffected either way, still caught by the separate `_mutating` check.
-CONTEXT_PULLING_TOOL_NAME = re.compile(
-    r"(?:read|grep|glob|webfetch|websearch)",
-    re.IGNORECASE,
-)
-
-# The delegation tool itself (Claude's "Agent"/"Task"). Matched as a tight
-# exact name rather than the loose substring style used by
-# MUTATING_TOOL_NAME/CONTEXT_PULLING_TOOL_NAME above, since "agent" and
-# "task" are common English words/tool-name fragments that would
-# false-positive under substring matching against unrelated tool names.
-# Used by `_is_worker_session`/pre-mutation handling in hook_adapter.py to
-# decide whether a worker's own session may spawn a further subagent at
-# all, and if so at what tier -- see WORKER_TIERS below -- independent of
-# whatever the delegation/context-pulling gates above decide.
-AGENT_TOOL_NAME = re.compile(r"^(?:agent|task)$", re.IGNORECASE)
+# Exact native delegation aliases avoid matching unrelated opaque tools.
+# Workers may delegate only to lower tiers, independently of tool budgets.
+AGENT_TOOL_NAME = re.compile(r"^(?:(?:collaboration|functions)\.)?(?:agent|task|spawn_agent)$", re.IGNORECASE)
 
 # Worker tiers, lowest first. A worker may delegate (via the Agent/Task tool)
 # only to a strictly lower tier than its own -- never to itself or to a
@@ -235,8 +203,7 @@ AGENT_TOOL_NAME = re.compile(r"^(?:agent|task)$", re.IGNORECASE)
 # possible. The lowest tier can never delegate further. The parent/main
 # agent is not a member of this mapping at all: it is always implicitly
 # above every tier here and is completely exempt from this constraint.
-# Adding a future tier is a one-line append to this tuple; nothing else
-# needs to change.
+# Adding a tier also requires its budget and native profiles.
 WORKER_TIERS: tuple[str, ...] = (
     "quick-worker", "bulk-worker", "balanced-worker", "frontier-worker",
 )
@@ -245,11 +212,40 @@ WORKER_TIER_RANK: dict[str, int] = {
 }
 
 
-def worker_tier_rank(name: str | None) -> int | None:
-    """Rank of a worker tier name (lowest=1), or None if unknown/not a tier."""
+WORKER_TURN_LIMITS = {
+    "quick-worker": 128,
+    "bulk-worker": 64,
+    "balanced-worker": 32,
+    "frontier-worker": 16,
+}
+
+ROUTING_POLICY = (
+    "Choose the lowest capable worker: quick, then bulk, balanced, frontier. "
+    "Skip unnecessary tiers; escalate when evidence shows more reasoning is "
+    "needed, without mandatory retries. Choose the minimum adequate supported "
+    "reasoning effort. Workers report escalation needs to the parent, which "
+    "may route upward; worker subdelegation remains strictly downward. "
+    "All tiers may analyze and execute. Worker budgets are "
+    + ", ".join(f"{tier.removesuffix('-worker')} {limit}"
+                for tier, limit in WORKER_TURN_LIMITS.items())
+    + ". Claude uses native maxTurns; Codex has advisory "
+    "agentic-turn budgets and a separate hard budget of hook-covered tool "
+    "calls per identified worker lifetime, including resumes. At exhaustion, "
+    "return the evidence report and remaining work instead of continuing."
+)
+
+
+def canonical_worker_name(name: str | None) -> str | None:
+    """Normalize native host spellings without guessing an unknown tier."""
     if not isinstance(name, str):
         return None
-    return WORKER_TIER_RANK.get(name.strip())
+    normalized = name.strip().replace("_", "-")
+    return normalized if normalized in WORKER_TIER_RANK else None
+
+
+def worker_tier_rank(name: str | None) -> int | None:
+    """Rank of a worker tier name (lowest=1), or None if unknown/not a tier."""
+    return WORKER_TIER_RANK.get(canonical_worker_name(name))
 
 
 def lower_tiers(rank: int) -> tuple[str, ...]:

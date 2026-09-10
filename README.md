@@ -1,11 +1,10 @@
 # Agent Delegation Protocol
 
-The protocol answers one question: did the host actually perform native
-delegation before the parent is allowed to mutate or finish its turn? It has
-no scheduler, provider catalog, or transport of its own. The parent retains
-planning, judgment, integration, conflict resolution, and final validation;
-selected work is bounded work the parent hands to native subagents the host
-already knows how to run.
+The protocol enforces native delegation and worker budgets on Codex and Claude.
+The parent retains planning, judgment, integration, conflict resolution, and
+final validation. All tiers can analyze and execute with their normal tools,
+subject to workload delegation rules and worker budgets. ADP has no scheduler,
+provider catalog, or transport of its own.
 
 This is a clean break from the earlier scheduler-based generation of this
 protocol. It has no compatibility runtime, request-file transport, managed
@@ -22,7 +21,7 @@ deterministic classifier ── requires_delegation / requires_multi / min_agent
       ▼
 host-native subagent lifecycle (SubagentStart / SubagentStop)
       │
-      ├── PreToolUse gate ── blocks parent mutation until delegation evidence exists
+      ├── PreToolUse gate ── checks delegation and Codex tool-call budgets
       │
       └── Stop gate ── blocks turn completion until delegation evidence exists
 ```
@@ -35,17 +34,45 @@ count. Nothing here talks to an external provider, gateway, or credential
 store — native agent concurrency is unconstrained except by the host's own
 capabilities.
 
-Four generated worker tiers exist, lowest to highest: `quick-worker` handles
-trivial, mechanical, single-step work; `bulk-worker` handles bounded low-risk
-work that needs little interpretation, including mechanical edits,
-straightforward audits, extraction, repetitive processing, and text
-compression; `balanced-worker` handles the same bounded shapes when moderate
-reasoning is useful, plus more demanding local work; `frontier-worker` handles
-bounded work needing near-parent reasoning without taking over parent
-architecture or integration. Adjacent tiers deliberately overlap, and the
-highest tier likewise overlaps the frontier parent at its upper edge. The
-parent chooses the lowest tier with enough reasoning ability and retains
-architecture, integration, conflict resolution, and final validation.
+Route work from the lowest capable tier upward: quick for trivial mechanical
+work, bulk for routine bounded work, balanced for moderate reasoning, and
+frontier for demanding reasoning. Escalate when evidence shows a higher tier
+is needed; there is no compulsory attempt or retry at every lower tier.
+Workers request upward escalation through the parent because worker recursion
+remains strictly downward. Choose the minimum adequate supported reasoning
+effort; the low/medium/high/xhigh tier defaults remain available and can be
+overridden. The common classifier's `ROUTING_POLICY` supplies generated worker
+instructions and context injected at `UserPromptSubmit` and `SubagentStart`.
+
+## Worker budgets
+
+| Tier | Agentic-turn budget | Codex hook-covered tool-call budget |
+|------|---------------------|--------------------------------------|
+| quick | 128 | 128 |
+| bulk | 64 | 64 |
+| balanced | 32 | 32 |
+| frontier | 16 | 16 |
+
+An agentic turn is a model round within a worker's task, not the entire task,
+a parent prompt, or an individual tool call. One turn can produce several
+tool calls. Claude enforces agentic rounds through native `maxTurns` on each
+worker invocation; resuming a worker may start a fresh native budget. The hook
+rejects explicit `max_turns` above the tier cap and accepts lower values.
+
+Codex has two separate mechanisms: generated instructions set an advisory
+agentic-turn budget, and the shared hook enforces a hard budget of intercepted
+tool-call attempts, including attempts later denied by another hook or the
+host. Equal numbers do not make these equivalent units. The Codex ledger is
+keyed by worker id and persists across resumes and new parent prompts. Its
+budget is pinned at the first native start or tool hook; an identified worker
+with an unknown or missing tier gets a conservative limit of 16. Later type
+changes cannot raise or reset it. Repeated events with the same tool-call id
+count once; events without a call id count on each hook invocation. Corrupt,
+unwritable, or locked ledgers deny further covered calls. Workers can still
+return a plain final report and stop after exhaustion, but cannot make more
+covered tool calls.
+The common `WORKER_TURN_LIMITS` defines these per-worker values; parent
+sessions are not capped. All tiers retain their normal tools before the cap.
 
 ## Repository layout
 
@@ -75,9 +102,18 @@ matching `SubagentStop` (or, on Claude, a foreground Agent result) closes it.
 decides, purely from the prompt, whether delegation is required at all and
 how many concurrent workers it must reach.
 
-`PreToolUse` denies an eligible parent mutation until that evidence exists.
-`Stop` denies turn completion the same way. Neither gate consults a catalog,
-lane, or credential store — there is nothing external left to consult.
+`PreToolUse` checks parent delegation evidence and Codex worker tool-call
+budgets; `Stop` checks required delegation evidence. Native lifecycle identity
+is needed to attribute a tool call to a worker budget. Missing worker identity
+or missing hook events limit what the ledger can enforce.
+
+Hooks enforce only calls delivered to them and are not a security sandbox.
+Codex's `write_stdin` input and polling have no `PreToolUse` hook, specialized
+tool paths may bypass interception, and hosted WebSearch does not emit hooks;
+see [Codex tool coverage](https://learn.chatgpt.com/docs/hooks#tool-coverage).
+Protocol tests verify supplied hook events; they do not prove interception of
+every live host tool. The advisory agentic-turn budget remains separate from
+this partial tool-call coverage.
 
 ## Install one host
 
@@ -103,8 +139,8 @@ and preserves unrelated configuration.
 
 Codex uses `session_release`; a completed worker never creates an impossible
 dismissal warning. Claude uses `automatic_release`; a foreground result clears
-its lifecycle automatically. The hook adapter gates parent mutation and turn
-completion on observed delegation and concurrent fan-out when required.
+its lifecycle automatically. The hook adapter checks worker budgets, observed
+delegation, and concurrent fan-out when required.
 
 ## Owner bypass
 
@@ -124,6 +160,7 @@ configuration directory in `.delegation-protocol/`.
 
 ```bash
 python3 scripts/agents/render-bulk-workers.py --check
+python3 scripts/agents/test-render-workers.py
 python3 scripts/hosts/test-install.py
 python3 scripts/hosts/test-lifecycle.py
 python3 scripts/codex/test-protocol.py

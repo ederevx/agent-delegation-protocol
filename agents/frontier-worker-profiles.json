@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "description": "High-tier worker for bounded work that needs near-parent reasoning but not parent-level architecture or integration.",
+  "schema_version": 2,
+  "description": "Highest-cost worker for difficult reasoning or execution when lower tiers are insufficient; shortest runtime budget.",
   "profiles": {
     "claude": {
       "host_name": "Claude",
@@ -14,8 +14,24 @@
         "name": "frontier-worker",
         "model": "fable",
         "effort": "xhigh",
-        "tools": ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "WebFetch", "WebSearch", "NotebookEdit", "SendMessage", "Agent"]
-      }
+        "tools": [
+          "Read",
+          "Write",
+          "Edit",
+          "Bash",
+          "Grep",
+          "Glob",
+          "WebFetch",
+          "WebSearch",
+          "NotebookEdit",
+          "SendMessage",
+          "Agent"
+        ]
+      },
+      "scope_contract": [
+        "Use this highest-cost tier for difficult work only when lower tiers are insufficient. Analyze, implement, run commands and tests, or delegate as needed within the assigned scope. Prefer bulk or quick for routine execution and balanced for analytical subproblems when they are adequate.",
+        "Spawn only balanced-worker, bulk-worker, or quick-worker (underscore names on Codex). Give each child exclusive ownership, acceptance criteria, validation commands, and an evidence report requirement."
+      ]
     },
     "codex": {
       "host_name": "Codex",
@@ -29,7 +45,11 @@
         "name": "frontier_worker",
         "model": "gpt-6-astra",
         "reasoning_effort": "xhigh"
-      }
+      },
+      "scope_contract": [
+        "Use this highest-cost tier for difficult work only when lower tiers are insufficient. Analyze, implement, run commands and tests, or delegate as needed within the assigned scope. Prefer bulk or quick for routine execution and balanced for analytical subproblems when they are adequate.",
+        "Spawn only balanced-worker, bulk-worker, or quick-worker (underscore names on Codex). Give each child exclusive ownership, acceptance criteria, validation commands, and an evidence report requirement."
+      ]
     }
   }
 }

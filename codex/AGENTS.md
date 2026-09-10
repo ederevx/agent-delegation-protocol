@@ -2,28 +2,32 @@
 
 ## Purpose
 
-Keep the frontier Codex session responsible for planning, ambiguity,
-architecture, integration, conflict resolution, and final validation. Route
-trivial, mechanical, single-step work to `quick_worker`; route routine bounded
-work needing little interpretation to `bulk_worker`; route bounded work
-needing moderate reasoning to `balanced_worker`; route bounded work needing
-near-parent reasoning, but not parent-level integration or planning, to
-`frontier_worker`.
+Keep the parent responsible for planning, ambiguity, architecture, integration,
+conflict resolution, and final validation. All tiers may analyze and execute
+with their normal tools, subject to delegation rules and worker budgets.
+
+Choose the lowest capable tier: `quick_worker` for trivial mechanical work,
+`bulk_worker` for routine bounded work, `balanced_worker` for moderate
+reasoning, and `frontier_worker` for demanding reasoning. Escalate when
+evidence requires it; do not force an attempt or retry at every lower tier.
+Workers request upward escalation through the parent, preserving strictly
+downward worker recursion. Use the minimum adequate supported reasoning
+effort; the existing tier defaults can be overridden.
 
 ## Required delegation
 
-Delegate work that has three or more distinct steps or is estimated at 25% or
-more of the active context window. Adjacent tiers intentionally overlap: choose
-the lowest tier with enough reasoning ability for the assignment. Keep difficult
-debugging, ambiguity, architecture, integration, and final validation with the
-parent. For independent workstreams, use concurrent workers when capacity
-permits. Give each worker exclusive ownership, acceptance criteria, validation
-commands, and a required evidence report. The parent is the integration
-authority.
+Delegate work with three or more distinct steps or estimated at 25% or more
+of the active context window. Keep parent-level judgment with the parent.
+For independent workstreams, use concurrent native workers when capacity
+permits. Give each worker exclusive ownership, acceptance criteria,
+validation commands, and a concise evidence report scoped to one topic.
+The parent remains the integration authority and evaluates workers' evidence.
+Do not repeat completed work merely to obtain the same information; review,
+verify, or correct worker claims when needed.
 
-Delegation is proven only by Codex's own native subagent lifecycle
-(`SubagentStart`/`SubagentStop`) — there is no request format, launcher, or
-scheduler to route through.
+Delegation is proven only by the host's native subagent lifecycle
+(`SubagentStart`/`SubagentStop`); there is no alternative request format,
+launcher, or scheduler.
 
 ## Model tiers
 
@@ -34,10 +38,10 @@ aliases that auto-track new generations — re-verified by asking Codex
 directly on 2026-09-09 (it knows its own capability tiers better than
 external documentation), and this note and the mirrored Claude-side note in
 `claude/rules/delegation-protocol.md` are updated together whenever that
-changes. Reasoning effort steps up one level per tier, from `low` at quick to
-`xhigh` at frontier: `model_reasoning_effort` runs `low` for `quick_worker`,
-`medium` for `bulk_worker`, `high` for `balanced_worker`, and `xhigh` for
-`frontier_worker`; the parent uses ordinary session effort.
+changes. Default reasoning effort steps up one level per tier, from `low` at
+quick to `xhigh` at frontier: `model_reasoning_effort` runs `low` for
+`quick_worker`, `medium` for `bulk_worker`, `high` for `balanced_worker`, and
+`xhigh` for `frontier_worker`; the parent uses ordinary session effort.
 
 ## Recursive delegation
 
@@ -64,13 +68,38 @@ the machine. The parent decides each request separately.
 ## Lifecycle
 
 Codex workers report their result and end their host session. The parent
-collects the report, integrates only verified evidence, and runs final
-repository-wide checks. Do not require an unavailable post-result worker
-operation or block completion on one.
+collects the report, integrates verified evidence, and completes final
+repository-wide validation before accepting the result. Do not require an
+unavailable post-result worker operation or block completion on one.
 
 Resuming a worker session continues it on its original topic only. When the
 next task is a different topic from its original deployment, start a fresh
 worker instead of reusing the existing session.
+
+## Worker budgets and routing
+
+Per-worker agentic-turn budgets are quick 128, bulk 64, balanced 32, and
+frontier 16. An agentic turn is one model round within a task, not a whole
+task, parent prompt, or tool call; one round may request multiple tools.
+Codex receives an advisory agentic-turn budget and a separate hard budget of
+hook-covered tool-call attempts using the same numbers. Attempts count even
+if another hook or the host later denies them. The ledger follows the worker
+id across resumes and new parent prompts. Its budget is pinned at the first
+native start or tool hook; an identified worker with an unknown or missing
+tier gets a conservative limit of 16. Later type changes cannot raise or
+reset it. A repeated tool-call id counts once; without a call id, each hook
+invocation counts. Corrupt, unwritable, or locked ledgers deny further calls.
+A plain final report and stopping remain allowed after exhaustion; further
+covered tool calls are denied. Parent sessions are not capped.
+
+The common `ROUTING_POLICY` supplies generated worker instructions and context
+injected at `UserPromptSubmit` and `SubagentStart`. All tiers retain their
+normal tools before the cap, with supported model and effort overrides.
+Native worker identity is needed for budget attribution. Hooks enforce only
+calls delivered to them, not a security sandbox: `write_stdin` has no
+`PreToolUse` hook, and specialized paths may bypass interception. Missing
+identity or events prevent complete tool accounting; the advisory turn budget
+is not a native hard turn cap.
 
 ## Owner bypass
 
