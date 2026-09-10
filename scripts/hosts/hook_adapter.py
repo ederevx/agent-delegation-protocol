@@ -147,14 +147,14 @@ def _save(path: Path, state: dict[str, Any]) -> None:
 
 
 def _is_worker_session(host: str, payload: dict[str, Any]) -> bool:
-    """Use Claude's per-invocation identity, not inherited process env.
+    """Use per-invocation native identity, not inherited process env.
 
     Lifecycle events also carry agent_id, but identify the worker whose
     evidence must be recorded in the parent session. Call this only for
     prompt, tool, and turn-stop events.
     """
-    worker = payload.get("agent_id")
-    return host == "claude" and isinstance(worker, str) and bool(worker.strip())
+    return any(isinstance(payload.get(key), str) and payload[key].strip()
+               for key in ("agent_id", "agentId"))
 
 
 def _delegating(payload: dict[str, Any], classifier: Any) -> bool:
@@ -172,7 +172,7 @@ def _agent_type(payload: dict[str, Any]) -> str | None:
     `agent_id`) also occurs on a parent launched with `--agent` and must
     not be mistaken for a worker session by itself.
     """
-    value = payload.get("agent_type")
+    value = payload.get("agent_type") or payload.get("agentType")
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
@@ -180,7 +180,7 @@ def _requested_tier(payload: dict[str, Any]) -> str | None:
     """Which profile an Agent/Task call is trying to spawn, from its own args."""
     tool = payload.get("tool_input") or payload.get("toolInput") or {}
     if isinstance(tool, dict):
-        value = tool.get("subagent_type")
+        value = tool.get("subagent_type") or tool.get("agent_type")
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
@@ -226,28 +226,6 @@ def _mutating(payload: dict[str, Any], classifier: Any) -> bool:
                 classifier.MUTATING_POWERSHELL.search(str(command)))
 
 
-def _context_pulling(payload: dict[str, Any], classifier: Any,
-                      state: dict[str, Any]) -> bool:
-    name = str(payload.get("tool_name") or payload.get("toolName") or "")
-    if name.strip().lower() == "bash" and not state.get("analysis_signal"):
-        # Plain (non-mutating) Bash execution is exempt from the
-        # context-pulling gate so the parent can run direct user orders as
-        # shell commands without a worker having started first -- but only
-        # while this turn carries no "analysis, review, or verification"
-        # wording. An analysis-flagged turn falls through to the
-        # command-field check below instead, same as any other exec-shaped
-        # tool. Mutating bash commands are still caught separately by
-        # `_mutating` above regardless, unaffected by this exemption since
-        # that check runs first in the elif-chain.
-        return False
-    if classifier.CONTEXT_PULLING_TOOL_NAME.search(name):
-        return True
-    tool = payload.get("tool_input") or payload.get("toolInput") or {}
-    if isinstance(tool, dict) and (tool.get("command") or tool.get("cmd")):
-        return True
-    return False
-
-
 def _unmet(state: dict[str, Any]) -> str | None:
     if not state["requires_delegation"]:
         return None
@@ -258,24 +236,6 @@ def _unmet(state: dict[str, Any]) -> str | None:
     if minimum > 1 and state["peak_active"] < minimum:
         return f"Launch at least {minimum} independent workers concurrently."
     return None
-
-
-def _execution_unmet(state: dict[str, Any]) -> str | None:
-    """Execution's own floor, independent of `_unmet` above.
-
-    `execution_signal` clears at a lower bar than `requires_delegation` (see
-    EXECUTION_WINDOW_SHARE in delegation-classifier.py), so a turn too small
-    to need general delegation can still be too big to execute inline. Only
-    a bare floor of one worker applies here -- no `min_agents`/concurrency
-    requirement, since those belong to the broader delegation decision, not
-    to this narrower one.
-    """
-    if not state.get("execution_signal") or state["observed"]:
-        return None
-    return (
-        "Execution beyond a small, non-research-requiring change is "
-        "reserved for delegated agents; route this to a worker first."
-    )
 
 
 def _deny(reason: str) -> dict[str, Any]:
@@ -334,7 +294,7 @@ class TurnEventHandler:
         })
         return output
 
-    def _handle_prompt(self, payload: dict[str, Any]) -> None:
+    def _handle_prompt(self, payload: dict[str, Any]) -> dict[str, Any]:
         prompt = payload.get("prompt") or payload.get("user_prompt") or ""
         if self.classifier.RELAYED_MESSAGE.match(str(prompt)):
             # A relayed worker/peer message or a background task's own
@@ -342,7 +302,7 @@ class TurnEventHandler:
             # whatever obligation is already in flight untouched rather
             # than classifying its text or resetting evidence collected
             # so far (see RELAYED_MESSAGE's own docstring).
-            raise _SkipSave()
+            return _routing_context("UserPromptSubmit", self.classifier)
         decision = self.classifier.classify(
             str(prompt),
             self.state,
@@ -368,11 +328,15 @@ class TurnEventHandler:
             # `_handle_pre_mutation`, or cleared unused at `_handle_turn_stop`.
             "pending_authorization": bool(decision.get("explicit_authorization")),
         })
-        return None
+        return _routing_context("UserPromptSubmit", self.classifier)
 
-    def _handle_worker_start(self, payload: dict[str, Any]) -> None:
+    def _handle_worker_start(self, payload: dict[str, Any]) -> dict[str, Any]:
         worker = _worker(payload)
         if worker:
+            if self.host == "codex":
+                # A native start pins the initial limit before any tool call.
+                # Corrupt ledgers remain untouched and deny at PreToolUse.
+                _worker_tool_budget(_home(self.host), payload, self.classifier, charge=False)
             self.lifecycle.start(worker)
             observed = set(self.state["observed"])
             observed.add(worker)
@@ -380,7 +344,7 @@ class TurnEventHandler:
             self.state["peak_active"] = max(
                 self.state["peak_active"], len(self.lifecycle.concurrent)
             )
-        return None
+        return _routing_context("SubagentStart", self.classifier)
 
     def _handle_worker_complete(self, payload: dict[str, Any]) -> None:
         worker = _worker(payload)
@@ -400,30 +364,11 @@ class TurnEventHandler:
         return None
 
     def _handle_pre_mutation(self, payload: dict[str, Any]) -> dict[str, Any] | None:
-        reason: str | None = None
-        if _mutating(payload, self.classifier):
-            reason = _unmet(self.state) or _execution_unmet(self.state)
-        elif _context_pulling(payload, self.classifier, self.state):
-            if self.state.get("analysis_signal"):
-                # No floor escape here, unlike the branch below: once
-                # a turn is analysis-flagged, the parent never pulls
-                # content into its own context for the rest of the
-                # turn, no matter how many workers have started.
-                # Analysis stays reserved for delegated agents.
-                reason = (
-                    "Analysis is reserved for delegated agents; "
-                    "route this to a worker instead of pulling "
-                    "content into the parent's own context."
-                )
-            else:
-                floor = max(self.state["min_agents"], 1) if self.state["requires_delegation"] else 1
-                observed = len(set(self.state["observed"]))
-                if observed < floor:
-                    reason = (
-                        "Route this to a worker before pulling content "
-                        f"into context (requires at least {floor} "
-                        "lifecycle-visible worker(s))."
-                    )
+        # Workload delegation applies regardless of model. Reading, analysis,
+        # and ordinary tool use have no tier-specific capability restrictions.
+        reason = _spawn_budget_violation(payload, self.classifier)
+        if reason is None and _mutating(payload, self.classifier):
+            reason = _unmet(self.state)
         if reason is None:
             return None
         if self.state.get("pending_authorization"):
@@ -451,21 +396,111 @@ class TurnEventHandler:
         return None
 
 
+def _routing_context(event: str, classifier: Any) -> dict[str, Any]:
+    return {"hookSpecificOutput": {
+        "hookEventName": event,
+        "additionalContext": classifier.ROUTING_POLICY,
+    }}
+
+
+def _spawn_budget_violation(payload: dict[str, Any], classifier: Any) -> str | None:
+    if not _delegating(payload, classifier):
+        return None
+    tool = payload.get("tool_input") or payload.get("toolInput") or {}
+    requested = tool.get("max_turns") if isinstance(tool, dict) else None
+    if requested is None:
+        return None
+    tier = classifier.canonical_worker_name(_requested_tier(payload))
+    limit = classifier.WORKER_TURN_LIMITS.get(tier, min(classifier.WORKER_TURN_LIMITS.values()))
+    if type(requested) is not int or not 1 <= requested <= limit:
+        return f"Requested max_turns must be a positive integer at most {limit} for this worker."
+    return None
+
+
+def _worker_tool_budget(home: Path, payload: dict[str, Any],
+                        classifier: Any, *, charge: bool = True) -> dict[str, Any] | None:
+    try:
+        return _worker_tool_budget_locked(home, payload, classifier, charge=charge)
+    except (OSError, ValueError, TypeError):
+        # Hook exceptions can be treated as non-blocking by the host. Return
+        # an explicit decision when persistence or lock acquisition fails.
+        return _deny("Worker tool-call budget could not be verified or saved; report the ledger/lock error to the parent without further tool calls.")
+
+
+def _worker_tool_budget_locked(home: Path, payload: dict[str, Any],
+                               classifier: Any, *, charge: bool = True) -> dict[str, Any] | None:
+    """Count distinct hook-covered Codex tool-call attempts per native worker.
+
+    This is not a model-turn counter or a count of successful tool executions.
+    Missing call ids count each hook invocation conservatively. The lifetime
+    ledger survives parent prompt resets and resumes. Unknown tiers receive
+    the smallest budget; missing native identity cannot establish a ledger.
+    """
+    worker = payload.get("agent_id") or payload.get("agentId")
+    if not isinstance(worker, str) or not worker.strip():
+        return None
+    path, lock = _paths(home, "worker-tool-budget:" + worker.strip())
+    with _locked(lock):
+        try:
+            ledger = json.loads(path.read_text())
+        except FileNotFoundError:
+            tier = classifier.canonical_worker_name(_agent_type(payload))
+            ledger = {"tier": tier, "limit": classifier.WORKER_TURN_LIMITS.get(
+                tier, min(classifier.WORKER_TURN_LIMITS.values())), "used": 0, "seen": []}
+        except (OSError, json.JSONDecodeError):
+            return _deny("Worker tool-call budget ledger is unreadable or corrupt; report this to the parent without continuing tool calls.")
+        if (not isinstance(ledger, dict) or type(ledger.get("limit")) is not int or
+                ledger["limit"] <= 0 or type(ledger.get("used")) is not int or
+                not 0 <= ledger["used"] <= ledger["limit"] or
+                not isinstance(ledger.get("seen"), list) or
+                not all(isinstance(item, str) for item in ledger["seen"])):
+            return _deny("Worker tool-call budget ledger is invalid; report this to the parent without resetting the budget.")
+        limit = ledger["limit"]
+        if not charge:
+            _save(path, ledger)
+            return None
+        seen = set(ledger["seen"])
+        used = ledger["used"]
+        call_id = payload.get("tool_use_id") or payload.get("toolUseId")
+        call_id = call_id.strip() if isinstance(call_id, str) else ""
+        if call_id and call_id in seen:
+            return None
+        if used >= limit:
+            return _deny(
+                f"Worker tool-call budget exhausted ({used}/{limit}; 0 remaining). "
+                "Return a plain final report with evidence and remaining work; "
+                "do not make further tool calls. Completion is permitted."
+            )
+        if call_id:
+            seen.add(call_id)
+        ledger.update(used=used + 1, seen=sorted(seen))
+        _save(path, ledger)
+    return None
+
+
 def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     """Apply one normalized hook event and return host-compatible feedback."""
     if host not in {"claude", "codex"} or not isinstance(payload, dict):
         return None
     session = _session(payload)
-    if session is None:
-        return None
     home = _home(host)
     classifier = _classifier(home)
     if event in {"prompt", "pre-mutation", "turn-stop"} and _is_worker_session(host, payload):
-        # Worker tool calls can share their parent's session_id. They must
-        # neither enforce parent delegation floors nor rewrite parent state.
-        if event == "pre-mutation" and _delegating(payload, classifier):
-            reason = _tier_violation(payload, classifier)
+        # Worker activity does not rewrite parent obligations. Tool budgets
+        # have their own persistent ledger and never block final completion.
+        if event == "prompt":
+            return _routing_context("UserPromptSubmit", classifier)
+        if event == "pre-mutation":
+            if host == "codex":
+                denial = _worker_tool_budget(home, payload, classifier)
+                if denial:
+                    return denial
+            reason = _spawn_budget_violation(payload, classifier)
+            if reason is None and _delegating(payload, classifier):
+                reason = _tier_violation(payload, classifier)
             return _deny(reason) if reason else None
+        return None
+    if session is None:
         return None
     path, lock = _paths(home, session)
     mode = _release_mode(home)

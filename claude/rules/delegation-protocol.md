@@ -1,37 +1,31 @@
 # Delegation Protocol
 
-Claude Code keeps the strongest parent context for planning, ambiguity,
-architecture, difficult debugging, integration, conflict resolution, and final
-validation. Route trivial, mechanical, single-step work to `quick-worker`.
-Route routine bounded work needing little interpretation to `bulk-worker`.
-Route bounded work needing moderate reasoning to `balanced-worker` when the
-task has three or more distinct steps or reaches 25% of the active context
-window. Route bounded work needing near-parent reasoning, but not
-parent-level integration or planning, to `frontier-worker`. Adjacent tiers
-intentionally overlap; choose the lowest tier with enough reasoning ability.
-Keep work that needs parent-level judgment with the parent.
+Keep the parent responsible for planning, ambiguity, architecture, integration,
+conflict resolution, and final validation. All tiers may analyze and execute
+with their normal tools, subject to delegation rules and worker budgets.
 
-Analysis stays fully reserved for delegated agents: once a turn is analysis
-(review, audit, verification, or similar), the parent does not perform that
-analysis itself, even after a worker has already started this turn — the
-parent plans, integrates, and validates the worker's findings, it does not
-duplicate the work. Execution stays reserved for delegated agents by default
-too, but with room for the parent to act directly: bounded execution that
-needs no in-depth research and stays under roughly 5% of the active context
-window may still be done by the parent inline.
+Choose the lowest capable tier: `quick-worker` for trivial mechanical work,
+`bulk-worker` for routine bounded work, `balanced-worker` for moderate
+reasoning, and `frontier-worker` for demanding reasoning. Escalate when
+evidence requires it; do not force an attempt or retry at every lower tier.
+Workers request upward escalation through the parent, preserving strictly
+downward worker recursion. Use the minimum adequate supported reasoning
+effort; the existing tier defaults can be overridden.
 
-For independent workstreams, use concurrent native subagents when capacity
-permits. Give each worker exclusive ownership, acceptance criteria, validation
-commands, and a concise evidence report, scoped to a single topic; a task
-that carries different context gets its own subagent rather than being
-folded into an existing worker's scope. The parent remains the single
-integration authority. A worker's report states findings or the completed
-result, not a raw dump of what it read or ran; the parent does not repeat a
-worker's completed task to re-obtain the same information, redoing it only to
-independently review, verify, or correct that worker's own claims. Delegation
-is proven only by the host's own native subagent lifecycle
-(`SubagentStart`/`SubagentStop`) — there is no other delegation channel,
-request format, or scheduler to route through.
+## Required delegation
+
+Delegate work with three or more distinct steps or estimated at 25% or more
+of the active context window. Keep parent-level judgment with the parent.
+For independent workstreams, use concurrent native workers when capacity
+permits. Give each worker exclusive ownership, acceptance criteria,
+validation commands, and a concise evidence report scoped to one topic.
+The parent remains the integration authority and evaluates workers' evidence.
+Do not repeat completed work merely to obtain the same information; review,
+verify, or correct worker claims when needed.
+
+Delegation is proven only by the host's native subagent lifecycle
+(`SubagentStart`/`SubagentStop`); there is no alternative request format,
+launcher, or scheduler.
 
 ## Model tiers
 
@@ -50,8 +44,8 @@ frontier model for the active session (Opus 5). Codex has no alias layer, so
 its bindings are explicit slugs. Codex's lineup was re-verified by asking
 Codex directly on 2026-09-09 — it knows its own capability tiers better than
 external documentation — and this note and `codex/AGENTS.md` are updated
-together whenever that changes. Reasoning effort steps up one level per tier,
-from `low` at quick to `xhigh` at frontier, the same ladder on both hosts:
+together whenever that changes. Default reasoning effort steps up one level
+per tier, from `low` at quick to `xhigh` at frontier, on both hosts:
 Claude's `effort` runs `low` for `quick-worker`, `medium` for `bulk-worker`,
 `high` for `balanced-worker`, and `xhigh` for `frontier-worker`; Codex's
 `model_reasoning_effort` runs `low` for `quick_worker`, `medium` for
@@ -92,9 +86,30 @@ it on its original topic only. When the next task is a different topic from
 what the worker was originally deployed on, spawn a fresh worker instead of
 reusing an existing one.
 
-Hooks enforce the deterministic delegation thresholds and request boundary.
-This rule supplies judgment for ambiguity and safety without duplicating
-provider or transport policy.
+## Worker budgets and routing
+
+Per-worker `maxTurns` values are quick 128, bulk 64, balanced 32, and frontier
+16. Claude enforces this native agentic-round cap per worker invocation. A
+turn is one model round within a task, not the whole task, a parent prompt,
+or a tool call; a round can request multiple tools. Resuming a worker may
+start a fresh native budget, so this is not a lifetime cap across resumes.
+Workers should report their result when reaching the cap and stop. Parent
+sessions are not capped. The hook rejects explicit `max_turns` above the tier
+cap and accepts lower values.
+
+Codex uses the same numbers for an advisory agentic-turn budget and a separate
+hard hook-covered tool-call budget, whose worker-id ledger survives resumes
+and new parent prompts. Those tool calls are not equivalent to Claude's
+native rounds: attempts count even if another hook or the host later denies
+them. Identified unknown-tier workers get a conservative limit of 16, pinned
+at the first native start or tool hook. Corrupt, unwritable, or locked ledgers
+deny further calls. Missing worker identity or hook coverage limits accounting.
+
+The common `ROUTING_POLICY` supplies generated worker instructions and context
+injected at `UserPromptSubmit` and `SubagentStart`. All tiers retain their
+normal tools before the cap, with supported model and effort overrides.
+Hooks enforce only intercepted events, not a security sandbox; deterministic
+delegation thresholds remain in force.
 
 ## Hook-supplying repo hygiene
 

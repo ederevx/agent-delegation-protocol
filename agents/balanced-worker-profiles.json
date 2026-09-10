@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "description": "Mid-tier worker for bounded work that needs moderate reasoning but not parent-level architecture or integration.",
+  "schema_version": 2,
+  "description": "Analysis-first worker that can also execute; use when lower tiers need more reasoning.",
   "profiles": {
     "claude": {
       "host_name": "Claude",
@@ -14,8 +14,24 @@
         "name": "balanced-worker",
         "model": "opus",
         "effort": "high",
-        "tools": ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "WebFetch", "WebSearch", "NotebookEdit", "SendMessage", "Agent"]
-      }
+        "tools": [
+          "Read",
+          "Write",
+          "Edit",
+          "Bash",
+          "Grep",
+          "Glob",
+          "WebFetch",
+          "WebSearch",
+          "NotebookEdit",
+          "SendMessage",
+          "Agent"
+        ]
+      },
+      "scope_contract": [
+        "Prefer analysis, diagnosis, task decomposition, and evidence review. This tier can perform both routine execution and difficult reasoning within its assigned scope. Delegate routine work to bulk or quick when that uses less compute; execute directly when appropriate. Ask the parent for a higher tier only when the reasoning requires it.",
+        "Spawn only bulk-worker or quick-worker (bulk_worker or quick_worker on Codex). Give each child exclusive ownership, acceptance criteria, validation commands, and an evidence report requirement."
+      ]
     },
     "codex": {
       "host_name": "Codex",
@@ -29,7 +45,11 @@
         "name": "balanced_worker",
         "model": "gpt-5.6-sol",
         "reasoning_effort": "high"
-      }
+      },
+      "scope_contract": [
+        "Prefer analysis, diagnosis, task decomposition, and evidence review. This tier can perform both routine execution and difficult reasoning within its assigned scope. Delegate routine work to bulk or quick when that uses less compute; execute directly when appropriate. Ask the parent for a higher tier only when the reasoning requires it.",
+        "Spawn only bulk-worker or quick-worker (bulk_worker or quick_worker on Codex). Give each child exclusive ownership, acceptance criteria, validation commands, and an evidence report requirement."
+      ]
     }
   }
 }

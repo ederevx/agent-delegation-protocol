@@ -129,9 +129,11 @@ def test_explicit_authorization_is_single_use() -> None:
                 "Update 12 files across independent modules. "
                 "I explicitly authorize this action."
             )
-            assert hook_adapter.run("claude", "prompt", {
+            routing = hook_adapter.run("claude", "prompt", {
                 "session_id": "s", "prompt": authorized_prompt,
-            }) is None
+            })["hookSpecificOutput"]
+            assert routing["hookEventName"] == "UserPromptSubmit", routing
+            assert "lowest capable worker" in routing["additionalContext"], routing
             # First blocked action after explicit authorization is allowed.
             assert hook_adapter.run("claude", "pre-mutation", {
                 "session_id": "s", "tool_name": "Edit",
@@ -144,9 +146,11 @@ def test_explicit_authorization_is_single_use() -> None:
             })
             assert denied["hookSpecificOutput"]["permissionDecision"] == "deny", denied
             # Without any authorization language, enforcement behaves as before.
-            assert hook_adapter.run("claude", "prompt", {
+            routing = hook_adapter.run("claude", "prompt", {
                 "session_id": "t", "prompt": "Update 12 files across independent modules.",
-            }) is None
+            })["hookSpecificOutput"]
+            assert routing["hookEventName"] == "UserPromptSubmit", routing
+            assert "lowest capable worker" in routing["additionalContext"], routing
             unauthorized_denied = hook_adapter.run("claude", "pre-mutation", {
                 "session_id": "t", "tool_name": "Edit",
             })
