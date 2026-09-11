@@ -60,7 +60,10 @@ instructions and context injected at `UserPromptSubmit` and `SubagentStart`.
 Both hosts also share a hard cap of 10 concurrently active workers per parent
 session, counting nested workers; the hook denies a spawn while the session's
 active set is full, and the parent waits for a worker to finish or fans out in
-smaller waves.
+smaller waves. Active means actively working: a worker counts from its native
+start until its native stop, plus spawns admitted but not yet started. Idle
+workers do not count, including one that has finished and is held or
+resumable; it counts again only while a resume is running.
 
 An agentic turn is a model round within a worker's task, not the entire task,
 a parent prompt, or an individual tool call. One turn can produce several

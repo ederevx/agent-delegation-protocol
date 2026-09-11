@@ -106,7 +106,15 @@ covered tool calls are denied. Parent sessions are not capped. Both hosts also
 share a hard cap of 10 concurrently active workers per parent session,
 counting nested workers; the hook denies a spawn while the session's active
 set is full, and the parent waits for a worker to finish or fans out in
-smaller waves.
+smaller waves. Active means actively working: a worker counts from its
+native start until its native stop, plus spawns admitted but not yet
+started. Idle workers do not count, including one that has finished and is
+held or resumable; it counts again only while a resume is running.
+
+Codex's native `agents.max_concurrent_threads_per_session` limit counts every
+open thread, idle ones included, and releases a slot only on explicit close or
+session end, so close finished threads you will not resume to keep idle
+threads from consuming native slots.
 
 The common `ROUTING_POLICY` supplies generated worker instructions and context
 injected at `UserPromptSubmit` and `SubagentStart`. All tiers retain their
