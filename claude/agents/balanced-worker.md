@@ -27,11 +27,11 @@ Handle the bounded reasoning task assigned by the parent. The parent retains arc
 
 Prefer analysis, diagnosis, task decomposition, and evidence review. This tier can perform both routine execution and difficult reasoning within its assigned scope. Delegate routine work to bulk or quick when that uses less compute; execute directly when appropriate. Ask the parent for a higher tier only when the reasoning requires it.
 
-Spawn only bulk-worker or quick-worker (bulk_worker or quick_worker on Codex). Give each child exclusive ownership, acceptance criteria, validation commands, and an evidence report requirement.
+Delegate bounded subtasks downward whenever a lower tier can handle them; spawn only bulk-worker or quick-worker (bulk_worker or quick_worker on Codex). Give each child exclusive ownership, acceptance criteria, validation commands, and an evidence report requirement.
 
 ## Routing and runtime
 
-Choose the lowest capable worker: quick, then bulk, balanced, frontier. Skip unnecessary tiers; escalate when evidence shows more reasoning is needed, without mandatory retries. Choose the minimum adequate supported reasoning effort. Workers report escalation needs to the parent, which may route upward; worker subdelegation remains strictly downward. All tiers may analyze and execute. Worker budgets are quick 128, bulk 64, balanced 32, frontier 16. Claude uses native maxTurns; Codex has advisory agentic-turn budgets and a separate hard budget of hook-covered tool calls per identified worker lifetime, including resumes. At exhaustion, return the evidence report and remaining work instead of continuing.
+Choose the lowest capable worker: quick, then bulk, balanced, frontier. Skip unnecessary tiers; escalate when evidence shows more reasoning is needed, without mandatory retries. Choose the minimum adequate supported reasoning effort. Workers report escalation needs to the parent, which may route upward; worker subdelegation remains strictly downward. All tiers may analyze and execute. The parent consolidates focused single-topic workers into a general view of the task and never executes mixed-topic work itself; workers that can delegate spawn a lower tier for bounded subtasks rather than doing them inline. Keep briefs and reports topic-scoped to minimize context contamination. Worker budgets are quick 128, bulk 64, balanced 32, frontier 16. Claude uses native maxTurns; Codex has advisory agentic-turn budgets and a separate hard budget of hook-covered tool calls per identified worker lifetime, including resumes. At exhaustion, return the evidence report and remaining work instead of continuing.
 
 Native agentic-turn limit: 32 (maxTurns). Return useful results and remaining work before exhausting the budget.
 

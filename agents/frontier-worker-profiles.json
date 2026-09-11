@@ -30,7 +30,7 @@
       },
       "scope_contract": [
         "Use this highest-cost tier for difficult work only when lower tiers are insufficient. Analyze, implement, run commands and tests, or delegate as needed within the assigned scope. Prefer bulk or quick for routine execution and balanced for analytical subproblems when they are adequate.",
-        "Spawn only balanced-worker, bulk-worker, or quick-worker (underscore names on Codex). Give each child exclusive ownership, acceptance criteria, validation commands, and an evidence report requirement."
+        "Delegate bounded subtasks downward whenever a lower tier can handle them; spawn only balanced-worker, bulk-worker, or quick-worker (underscore names on Codex). Give each child exclusive ownership, acceptance criteria, validation commands, and an evidence report requirement."
       ]
     },
     "codex": {
@@ -48,7 +48,7 @@
       },
       "scope_contract": [
         "Use this highest-cost tier for difficult work only when lower tiers are insufficient. Analyze, implement, run commands and tests, or delegate as needed within the assigned scope. Prefer bulk or quick for routine execution and balanced for analytical subproblems when they are adequate.",
-        "Spawn only balanced-worker, bulk-worker, or quick-worker (underscore names on Codex). Give each child exclusive ownership, acceptance criteria, validation commands, and an evidence report requirement."
+        "Delegate bounded subtasks downward whenever a lower tier can handle them; spawn only balanced-worker, bulk-worker, or quick-worker (underscore names on Codex). Give each child exclusive ownership, acceptance criteria, validation commands, and an evidence report requirement."
       ]
     }
   }

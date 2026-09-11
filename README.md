@@ -39,7 +39,11 @@ work, bulk for routine bounded work, balanced for moderate reasoning, and
 frontier for demanding reasoning. Escalate when evidence shows a higher tier
 is needed; there is no compulsory attempt or retry at every lower tier.
 Workers request upward escalation through the parent because worker recursion
-remains strictly downward. Choose the minimum adequate supported reasoning
+remains strictly downward. The parent's job is to consolidate worker evidence
+into a general view of the task: it reconciles focused single-topic workers
+instead of doing mixed-topic work itself, keeps topic-specific detail out of
+its own context, and every tier that can delegate pushes bounded subtasks
+down. Choose the minimum adequate supported reasoning
 effort; the low/medium/high/xhigh tier defaults remain available and can be
 overridden. The common classifier's `ROUTING_POLICY` supplies generated worker
 instructions and context injected at `UserPromptSubmit` and `SubagentStart`.

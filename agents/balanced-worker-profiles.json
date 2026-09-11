@@ -30,7 +30,7 @@
       },
       "scope_contract": [
         "Prefer analysis, diagnosis, task decomposition, and evidence review. This tier can perform both routine execution and difficult reasoning within its assigned scope. Delegate routine work to bulk or quick when that uses less compute; execute directly when appropriate. Ask the parent for a higher tier only when the reasoning requires it.",
-        "Spawn only bulk-worker or quick-worker (bulk_worker or quick_worker on Codex). Give each child exclusive ownership, acceptance criteria, validation commands, and an evidence report requirement."
+        "Delegate bounded subtasks downward whenever a lower tier can handle them; spawn only bulk-worker or quick-worker (bulk_worker or quick_worker on Codex). Give each child exclusive ownership, acceptance criteria, validation commands, and an evidence report requirement."
       ]
     },
     "codex": {
@@ -48,7 +48,7 @@
       },
       "scope_contract": [
         "Prefer analysis, diagnosis, task decomposition, and evidence review. This tier can perform both routine execution and difficult reasoning within its assigned scope. Delegate routine work to bulk or quick when that uses less compute; execute directly when appropriate. Ask the parent for a higher tier only when the reasoning requires it.",
-        "Spawn only bulk-worker or quick-worker (bulk_worker or quick_worker on Codex). Give each child exclusive ownership, acceptance criteria, validation commands, and an evidence report requirement."
+        "Delegate bounded subtasks downward whenever a lower tier can handle them; spawn only bulk-worker or quick-worker (bulk_worker or quick_worker on Codex). Give each child exclusive ownership, acceptance criteria, validation commands, and an evidence report requirement."
       ]
     }
   }
