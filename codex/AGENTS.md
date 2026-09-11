@@ -102,7 +102,11 @@ tier gets a conservative limit of 16. Later type changes cannot raise or
 reset it. A repeated tool-call id counts once; without a call id, each hook
 invocation counts. Corrupt, unwritable, or locked ledgers deny further calls.
 A plain final report and stopping remain allowed after exhaustion; further
-covered tool calls are denied. Parent sessions are not capped.
+covered tool calls are denied. Parent sessions are not capped. Both hosts also
+share a hard cap of 10 concurrently active workers per parent session,
+counting nested workers; the hook denies a spawn while the session's active
+set is full, and the parent waits for a worker to finish or fans out in
+smaller waves.
 
 The common `ROUTING_POLICY` supplies generated worker instructions and context
 injected at `UserPromptSubmit` and `SubagentStart`. All tiers retain their

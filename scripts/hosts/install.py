@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import ntpath
 import os
+import re
 import shutil
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Any, Callable
 
@@ -24,6 +27,16 @@ except ImportError:
     import settings
 
 VERSION = 3
+
+# Codex caps concurrently open spawned-agent threads per session through an
+# `[agents]` table key (legacy alias `max_threads`, which we never write and
+# never remove).  The protocol pins it to the same shared active-worker cap the
+# classifier advertises so one number governs both halves.
+CODEX_CONCURRENCY_TABLE = "agents"
+CODEX_CONCURRENCY_KEY = "max_concurrent_threads_per_session"
+CODEX_LEGACY_CONCURRENCY_KEY = "max_threads"
+CODEX_CONFIG_BACKUP = "config.toml.before-first-install"
+DEFAULT_ACTIVE_WORKERS = 10
 
 
 def _strip_windows_extended_prefix(value: str) -> str:
@@ -305,6 +318,367 @@ def uninstall_codex_policy(home: Path, manifest: dict[str, Any]) -> None:
     backup.unlink(missing_ok=True)
 
 
+def active_worker_cap() -> int:
+    """Return the shared active-worker cap published by the classifier.
+
+    The classifier is the single source of the number; this loader stays
+    defensive so a host installation never fails merely because the constant
+    moved or the module could not be executed here.
+    """
+    path = Path(__file__).resolve().parents[1] / "agents" / "delegation-classifier.py"
+    try:
+        specification = importlib.util.spec_from_file_location(
+            "protocol_active_worker_cap", path
+        )
+        if specification and specification.loader:
+            module = importlib.util.module_from_spec(specification)
+            specification.loader.exec_module(module)
+            value = getattr(module, "MAX_ACTIVE_WORKERS", None)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                return value
+    except Exception:
+        pass
+    return DEFAULT_ACTIVE_WORKERS
+
+
+def _split_lines(text: str) -> list[str]:
+    """Split on newlines only, keeping every byte (including CR) in place."""
+    return re.findall(r"[^\n]*\n|[^\n]+", text)
+
+
+def _newline(text: str) -> str:
+    return "\r\n" if "\r\n" in text else "\n"
+
+
+def _multiline_mask(lines: list[str]) -> list[bool]:
+    """Mark each line that begins inside a multiline basic/literal string.
+
+    A `[agents]`-looking line inside a triple-quoted basic or literal string is
+    data, not a table header, so the scanner must not see it.
+    """
+    mask: list[bool] = []
+    delimiter: str | None = None
+    for line in lines:
+        mask.append(delimiter is not None)
+        index = 0
+        while index < len(line):
+            if delimiter is not None:
+                if line.startswith(delimiter, index):
+                    delimiter, index = None, index + 3
+                elif delimiter == '"""' and line[index] == "\\":
+                    index += 2
+                else:
+                    index += 1
+                continue
+            character = line[index]
+            if character == "#":
+                break
+            if line.startswith('"""', index) or line.startswith("'''", index):
+                delimiter, index = line[index:index + 3], index + 3
+                continue
+            if character in "\"'":
+                index += 1
+                while index < len(line):
+                    if character == '"' and line[index] == "\\":
+                        index += 2
+                        continue
+                    if line[index] == character:
+                        index += 1
+                        break
+                    index += 1
+                continue
+            index += 1
+    return mask
+
+
+def _toml_table_header(line: str) -> bool:
+    return line.lstrip().startswith("[")
+
+
+def _toml_names_table(line: str, table: str) -> bool:
+    text = line.split("#", 1)[0].strip()
+    return text.replace(" ", "") == f"[{table}]"
+
+
+def _toml_assignment(key: str) -> re.Pattern[str]:
+    name = re.escape(key)
+    return re.compile(rf"""^\s*(?:{name}|"{name}"|'{name}')\s*=""")
+
+
+def _toml_scalar(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    raise ValueError(f"unsupported scalar for {CODEX_CONCURRENCY_KEY}: {value!r}")
+
+
+def _toml_table_span(
+    lines: list[str], mask: list[bool], table: str,
+) -> tuple[int, int] | None:
+    """Return the header index and end index of `table`, or None if absent."""
+    for index, line in enumerate(lines):
+        if mask[index] or not _toml_table_header(line):
+            continue
+        if not _toml_names_table(line, table):
+            continue
+        end = len(lines)
+        for following in range(index + 1, len(lines)):
+            if not mask[following] and _toml_table_header(lines[following]):
+                end = following
+                break
+        return index, end
+    return None
+
+
+def set_toml_table_key(
+    text: str, table: str, key: str, assignment: str,
+) -> tuple[str, str | None, bool]:
+    """Set one key inside `table`, preserving every other byte verbatim.
+
+    Returns the new text, the replaced assignment line (when one existed), and
+    whether the table header had to be created.
+    """
+    newline = _newline(text)
+    if not assignment.endswith("\n"):
+        assignment += newline
+    lines = _split_lines(text)
+    mask = _multiline_mask(lines)
+    span = _toml_table_span(lines, mask, table)
+    if span is None:
+        prefix = text
+        if prefix and not prefix.endswith("\n"):
+            prefix += newline
+        if prefix.strip():
+            prefix += newline
+        return prefix + f"[{table}]{newline}" + assignment, None, True
+    header, end = span
+    if not lines[header].endswith("\n"):
+        lines[header] += newline
+    pattern = _toml_assignment(key)
+    replaced: str | None = None
+    result = lines[:header + 1]
+    for index in range(header + 1, end):
+        if replaced is None and not mask[index] and pattern.match(lines[index]):
+            replaced = lines[index]
+            result.append(assignment)
+        else:
+            result.append(lines[index])
+    if replaced is None:
+        result.insert(header + 1, assignment)
+    result.extend(lines[end:])
+    return "".join(result), replaced, False
+
+
+def remove_toml_table_key(
+    text: str, table: str, key: str, drop_created_table: bool,
+) -> str:
+    """Drop one key from `table`, undoing a table this installer appended.
+
+    Only the bytes this installer could have added are removed: the assignment
+    line, and -- when the table was created by this installer and is now empty
+    -- its header plus the single blank separator line that preceded it.
+    """
+    lines = _split_lines(text)
+    mask = _multiline_mask(lines)
+    span = _toml_table_span(lines, mask, table)
+    if span is None:
+        return text
+    header, end = span
+    pattern = _toml_assignment(key)
+    body = [
+        line for index, line in enumerate(lines[header + 1:end], header + 1)
+        if mask[index] or not pattern.match(line)
+    ]
+    empty = all(not line.strip() or line.lstrip().startswith("#") for line in body)
+    if drop_created_table and empty:
+        start = header
+        if end >= len(lines) and start > 0 and not lines[start - 1].strip():
+            start -= 1
+        return "".join(lines[:start]) + "".join(body) + "".join(lines[end:])
+    return "".join(lines[:header + 1]) + "".join(body) + "".join(lines[end:])
+
+
+def _config_without_cap(text: str, key: str) -> dict[str, Any]:
+    """Parse `text` and remove the managed key, so only the rest can differ."""
+    data = tomllib.loads(text)
+    table = data.get(CODEX_CONCURRENCY_TABLE)
+    if isinstance(table, dict):
+        table = {name: value for name, value in table.items() if name != key}
+        if table:
+            data[CODEX_CONCURRENCY_TABLE] = table
+        else:
+            data.pop(CODEX_CONCURRENCY_TABLE, None)
+    return data
+
+
+def verify_codex_config(config: Path, before: str, key: str, expected: Any) -> None:
+    """Confirm the edited file differs from `before` only in the managed key.
+
+    Line editing alone cannot prove it touched the right place -- a header
+    spelled inside a multiline string looks identical to a real one -- so the
+    parsed result is compared both ways.
+    """
+    text = config.read_bytes().decode("utf-8")
+    data = tomllib.loads(text)
+    table = data.get(CODEX_CONCURRENCY_TABLE)
+    table = table if isinstance(table, dict) else {}
+    actual = table.get(key)
+    if actual != expected:
+        raise ValueError(f"{key} read back as {actual!r}, expected {expected!r}")
+    if _config_without_cap(text, key) != _config_without_cap(before, key):
+        raise ValueError(
+            f"the edit changed configuration outside {CODEX_CONCURRENCY_TABLE}.{key}"
+        )
+
+
+def _restore_codex_config(config: Path, prior: bytes | None) -> None:
+    if prior is None:
+        config.unlink(missing_ok=True)
+    else:
+        atomic_bytes(config, prior)
+
+
+def _codex_config_path(home: Path) -> Path:
+    config = home / "config.toml"
+    if config.is_symlink():
+        resolved = Path(os.path.realpath(config))
+        if resolved.exists() and not resolved.is_file():
+            raise SystemExit(f"unsafe Codex configuration path: {config}")
+        return resolved
+    if config.exists() and not config.is_file():
+        raise SystemExit(f"unsafe Codex configuration path: {config}")
+    return config
+
+
+def install_codex_concurrency(
+    home: Path, cap: int, manifest: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Pin Codex's per-session subagent concurrency to the protocol cap."""
+    config = _codex_config_path(home)
+    backup = home / ".delegation-protocol" / CODEX_CONFIG_BACKUP
+    key = CODEX_CONCURRENCY_KEY
+    prior = config.read_bytes() if config.is_file() else None
+    if prior is None:
+        text, data = "", {}
+    else:
+        try:
+            text = prior.decode("utf-8")
+            data = tomllib.loads(text)
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+            raise SystemExit(
+                f"refusing to edit unparsable Codex configuration: {config}: {error}"
+            ) from None
+    table = data.get(CODEX_CONCURRENCY_TABLE)
+    table = table if isinstance(table, dict) else {}
+    previous = table.get(key)
+
+    updated, replaced, table_created = set_toml_table_key(
+        text, CODEX_CONCURRENCY_TABLE, key, f"{key} = {_toml_scalar(cap)}",
+    )
+    payload = updated.encode("utf-8")
+    record = {"path": str(config), "key": key, "value": cap,
+              "previous": previous, "previous_line": replaced,
+              "table_created": table_created, "file_created": prior is None,
+              "installed_digest": hashlib.sha256(payload).hexdigest()}
+    owned = (manifest or {}).get("codex_config")
+    inherited = (
+        isinstance(owned, dict) and owned.get("path") == str(config) and
+        owned.get("key") == key and previous is not None and
+        previous == owned.get("value")
+    )
+    if inherited:
+        # A re-install must keep the ownership metadata of the first install;
+        # otherwise uninstall would "restore" the value this installer wrote.
+        record["previous"] = owned.get("previous")
+        record["previous_line"] = owned.get("previous_line")
+        record["table_created"] = bool(owned.get("table_created"))
+        record["file_created"] = bool(owned.get("file_created"))
+        # The preserved backup is only a safe restore target while the file is
+        # still exactly what the last install wrote.  Once the user has edited
+        # it, drop the digest so uninstall removes just our key instead of
+        # reinstating pre-install bytes over those edits.
+        recorded = owned.get("installed_digest")
+        if not (recorded and prior is not None and
+                hashlib.sha256(prior).hexdigest() == recorded):
+            record["installed_digest"] = None
+
+    atomic_bytes(config, payload)
+    try:
+        verify_codex_config(config, text, key, cap)
+    except (OSError, UnicodeDecodeError, ValueError,
+            tomllib.TOMLDecodeError) as error:
+        _restore_codex_config(config, prior)
+        raise SystemExit(
+            f"failed to set {CODEX_CONCURRENCY_TABLE}.{key} in {config}: {error}"
+        ) from None
+    if not inherited:
+        # The pre-install bytes are the only exact record of what to restore.
+        _restore_codex_config(backup, prior)
+    return record
+
+
+def uninstall_codex_concurrency(home: Path, manifest: dict[str, Any]) -> None:
+    """Undo the concurrency pin, leaving a user-changed value untouched."""
+    record = manifest.get("codex_config")
+    if not isinstance(record, dict):
+        return
+    key, path = record.get("key"), record.get("path")
+    if not key or not path:
+        return
+    config, backup = Path(path), home / ".delegation-protocol" / CODEX_CONFIG_BACKUP
+    if not config.is_file():
+        return
+    prior = config.read_bytes()
+    installed = record.get("installed_digest")
+    if installed and hashlib.sha256(prior).hexdigest() == installed:
+        # Untouched since installation: restore the exact pre-install bytes.
+        if record.get("file_created"):
+            config.unlink(missing_ok=True)
+            return
+        if backup.is_file():
+            atomic_bytes(config, backup.read_bytes())
+            return
+    try:
+        text = prior.decode("utf-8")
+        data = tomllib.loads(text)
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return
+    table = data.get(CODEX_CONCURRENCY_TABLE)
+    table = table if isinstance(table, dict) else {}
+    if table.get(key) != record.get("value"):
+        return
+    previous, previous_line = record.get("previous"), record.get("previous_line")
+    if previous is None:
+        updated = remove_toml_table_key(
+            text, CODEX_CONCURRENCY_TABLE, key, bool(record.get("table_created")),
+        )
+    elif isinstance(previous_line, str):
+        updated, _, _ = set_toml_table_key(
+            text, CODEX_CONCURRENCY_TABLE, key, previous_line,
+        )
+    else:
+        try:
+            restored = f"{key} = {_toml_scalar(previous)}"
+        except ValueError:
+            return
+        updated, _, _ = set_toml_table_key(
+            text, CODEX_CONCURRENCY_TABLE, key, restored,
+        )
+    if record.get("file_created") and not updated.strip():
+        config.unlink(missing_ok=True)
+        return
+    atomic_bytes(config, updated.encode("utf-8"))
+    try:
+        verify_codex_config(config, text, key, previous)
+    except (OSError, UnicodeDecodeError, ValueError,
+            tomllib.TOMLDecodeError) as error:
+        _restore_codex_config(config, prior)
+        raise SystemExit(
+            f"failed to restore {CODEX_CONCURRENCY_TABLE}.{key} in {config}: {error}"
+        ) from None
+
+
 def validate_codex_uninstall(home: Path, manifest: dict[str, Any]) -> None:
     policy = manifest.get("policy")
     if not isinstance(policy, dict) or policy.get("mode") != "composed":
@@ -370,6 +744,16 @@ def install(repo: Path, home: Path, host: str) -> None:
     prior_settings_backup = (
         settings_backup.read_bytes() if settings_backup.exists() else None
     )
+    codex_config_path = _codex_config_path(home) if host == "codex" else None
+    prior_codex_config = (
+        codex_config_path.read_bytes()
+        if codex_config_path is not None and codex_config_path.is_file()
+        else None
+    )
+    codex_config_backup = state / CODEX_CONFIG_BACKUP
+    prior_codex_config_backup = (
+        codex_config_backup.read_bytes() if codex_config_backup.exists() else None
+    )
     try:
         for directory in ((home / "rules" if host == "claude" else home), home / "agents", home / "hooks", state):
             directory.mkdir(parents=True, exist_ok=True)
@@ -388,9 +772,13 @@ def install(repo: Path, home: Path, host: str) -> None:
                 changed.append((destination, prior, prior is not None))
                 shutil.copy2(source, destination)
         policy = None
+        codex_config = None
         if host == "codex":
             policy, rollback_policy = install_codex_policy(
                 repo, home, prepare_codex_policy(repo, home, previous)
+            )
+            codex_config = install_codex_concurrency(
+                home, active_worker_cap(), previous
             )
         settings.install(
             host,
@@ -407,9 +795,14 @@ def install(repo: Path, home: Path, host: str) -> None:
                                for source, destination, kind in items}}
         if policy is not None:
             manifest["policy"] = policy
+        if codex_config is not None:
+            manifest["codex_config"] = codex_config
         atomic_json(manifest_path, manifest)
     except BaseException:
         rollback_policy()
+        if codex_config_path is not None:
+            _restore_codex_config(codex_config_path, prior_codex_config)
+            _restore_codex_config(codex_config_backup, prior_codex_config_backup)
         for destination, prior, existed in reversed(changed):
             if destination.is_symlink() or destination.is_file():
                 destination.unlink(missing_ok=True)
@@ -444,6 +837,10 @@ def uninstall(home: Path, host: str) -> None:
         validate_codex_uninstall(home, manifest)
     lock = acquire_lock(state)
     try:
+        if host == "codex":
+            # First, because a configuration this installer cannot undo safely
+            # stops the uninstall before anything else has been removed.
+            uninstall_codex_concurrency(home, manifest)
         settings.uninstall(host, home)
         if host == "codex":
             uninstall_codex_policy(home, manifest)

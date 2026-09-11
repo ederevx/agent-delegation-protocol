@@ -120,6 +120,8 @@ def _load(path: Path, mode: str) -> dict[str, Any]:
         "active": list(state.get("active", [])),
         "finished": list(state.get("finished", [])),
         "concurrent": list(state.get("concurrent", [])),
+        "pending_spawns": list(state.get("pending_spawns", [])),
+        "denied_spawns": list(state.get("denied_spawns", [])),
         "observed": list(state.get("observed", [])),
         "peak_active": int(state.get("peak_active", 0)),
         "completed": bool(state.get("completed")),
@@ -146,6 +148,12 @@ def _save(path: Path, state: dict[str, Any]) -> None:
             pass
 
 
+def _names_worker(payload: dict[str, Any]) -> bool:
+    """Whether this event identifies an actual worker, not merely a tool call."""
+    return any(isinstance(payload.get(key), str) and payload[key].strip()
+               for key in ("agent_id", "agentId"))
+
+
 def _is_worker_session(host: str, payload: dict[str, Any]) -> bool:
     """Use per-invocation native identity, not inherited process env.
 
@@ -153,8 +161,7 @@ def _is_worker_session(host: str, payload: dict[str, Any]) -> bool:
     evidence must be recorded in the parent session. Call this only for
     prompt, tool, and turn-stop events.
     """
-    return any(isinstance(payload.get(key), str) and payload[key].strip()
-               for key in ("agent_id", "agentId"))
+    return _names_worker(payload)
 
 
 def _delegating(payload: dict[str, Any], classifier: Any) -> bool:
@@ -238,6 +245,144 @@ def _unmet(state: dict[str, Any]) -> str | None:
     return None
 
 
+def _spawn_token(payload: dict[str, Any]) -> str:
+    """The tool-call id a spawn reservation is keyed by, or "" when absent."""
+    value = payload.get("tool_use_id") or payload.get("toolUseId")
+    return value.strip() if isinstance(value, str) and value.strip() else ""
+
+
+def _holds_reservation(state: dict[str, Any], payload: dict[str, Any]) -> bool:
+    """Whether this exact tool call already owns a slot in this session.
+
+    Only an exact tool-call id match counts. An anonymous reservation cannot
+    be attributed to any particular call, so it can never be claimed this way.
+    """
+    token = _spawn_token(payload)
+    return bool(token) and token in state.get("pending_spawns", [])
+
+
+def _active_cap_violation(state: dict[str, Any], classifier: Any,
+                          payload: dict[str, Any]) -> str | None:
+    """Reason a further worker spawn must be denied for an over-full session.
+
+    `concurrent` holds the workers genuinely in flight right now (see
+    `lifecycle.LifecycleState`), so a completed worker stops counting against
+    the cap even under a release mode that still holds it in `active`. Nested
+    workers run under their parent's `session_id`, so this one per-session set
+    already counts the whole delegation tree rather than a single level of it.
+
+    `pending_spawns` closes the window between an admitted spawn and the
+    `SubagentStart` that records it: without it, several spawn calls issued in
+    one round each read the same free slot and all pass. A reservation counts
+    against the cap exactly like a running worker until its start consumes it.
+
+    A re-delivery of a call that already holds a reservation is admitted
+    without consulting the cap at all: it is the same spawn, already paid for,
+    so re-testing it would deny an admitted call purely for being delivered
+    twice. Both the parent path and the nested-worker path go through here so
+    the two hosts and the two paths cannot drift apart.
+    """
+    if _holds_reservation(state, payload):
+        return None
+    running = (len(state.get("concurrent", []))
+               + len(state.get("pending_spawns", [])))
+    cap = classifier.MAX_ACTIVE_WORKERS
+    if running >= cap:
+        return (
+            f"Active worker cap reached ({running}/{cap}); wait for a running "
+            "worker to finish before spawning another."
+        )
+    return None
+
+
+def _reserve_spawn(state: dict[str, Any], payload: dict[str, Any]) -> None:
+    """Hold a slot for a spawn that was admitted but has not started yet.
+
+    A repeated delivery of the same tool-call id is the same spawn, not a
+    second one, so it reuses the reservation it already holds. A call with no
+    id cannot be matched later and is held as an anonymous entry instead,
+    consumed oldest-first by the next unmatched start.
+    """
+    if _holds_reservation(state, payload):
+        return
+    pending = list(state.get("pending_spawns", []))
+    pending.append(_spawn_token(payload))
+    state["pending_spawns"] = pending
+
+
+def _consume_reservation(state: dict[str, Any], payload: dict[str, Any]) -> None:
+    """Retire the reservation a starting worker was admitted under."""
+    pending = list(state.get("pending_spawns", []))
+    if not pending:
+        return
+    token = _spawn_token(payload)
+    if token and token in pending:
+        pending.remove(token)
+    else:
+        pending.pop(0)
+    state["pending_spawns"] = pending
+
+
+def _record_denied_spawn(state: dict[str, Any], payload: dict[str, Any]) -> bool:
+    """Remember a spawn this hook refused, so its failure is not double-counted.
+
+    A denied Agent call never took a slot, but the host may still report it as
+    a failed tool call. Without this ledger that report is indistinguishable
+    from a failed *admitted* spawn and would free someone else's slot.
+    Anonymous denials are not recorded: with no id they could never be matched
+    back to a failure event anyway.
+    """
+    token = _spawn_token(payload)
+    denied = list(state.get("denied_spawns", []))
+    if not token or token in denied:
+        return False
+    denied.append(token)
+    state["denied_spawns"] = denied
+    return True
+
+
+def _release_failed_reservation(state: dict[str, Any],
+                                payload: dict[str, Any]) -> None:
+    """Free the slot of a spawn that failed instead of producing a worker.
+
+    Claude wires `PostToolUseFailure` (matcher `Agent`) to the same
+    worker-complete event; that payload names the failed call by
+    `tool_use_id` and carries no `agent_id`, because no worker ever existed.
+
+    What is kept here is a count, not an identity map: `SubagentStart` carries
+    no `tool_use_id`, so a start consumes the oldest entry rather than its
+    own. With two spawns admitted, whichever starts first therefore consumes
+    the other's entry, and an exact-match-only release would find nothing left
+    to free when the other later fails -- leaving the started worker counted
+    twice, as running and as pending, until the next prompt. So the invariant
+    is `len(pending_spawns) == admitted - started - failed`, and an unmatched
+    failure pops the oldest entry by the same rule a start uses.
+
+    Two reports must decrement nothing. A failure for a spawn this hook itself
+    denied never took a slot; `denied_spawns` records those, and seeing one
+    here retires it without touching `pending_spawns`. And a genuine
+    `SubagentStop` names a worker that consumed its reservation back when it
+    started, so it is already accounted for -- only an event with no worker
+    identity at all is the failed-call report this unmatched pop is meant for.
+    """
+    token = _spawn_token(payload)
+    denied = list(state.get("denied_spawns", []))
+    if token and token in denied:
+        denied.remove(token)
+        state["denied_spawns"] = denied
+        return
+    pending = list(state.get("pending_spawns", []))
+    if not pending:
+        return
+    if token and token in pending:
+        pending.remove(token)
+    elif _names_worker(payload):
+        return
+    else:
+        pending.pop(0)
+    state["pending_spawns"] = pending
+
+
 def _deny(reason: str) -> dict[str, Any]:
     return {
         "hookSpecificOutput": {
@@ -310,8 +455,21 @@ class TurnEventHandler:
             if self.host == "claude" else ("CODEX_MAX_CONTEXT_TOKENS",),
         )
         carry = bool(decision.get("carry_forward"))
+        # A reservation only spans the gap between an admitted spawn and its
+        # start. By the time the user types again -- continuation or not --
+        # every spawn of the previous round has either started or failed, so
+        # anything still held here is a leak. Clearing it on both paths is
+        # also what bounds that leak on Codex, which has no failure hook.
+        self.state["pending_spawns"] = []
+        self.state["denied_spawns"] = []
         if not carry:
-            self.lifecycle = LifecycleState(self.mode)
+            # A new turn clears the previous turn's delegation evidence, but
+            # background workers still genuinely in flight are not evidence --
+            # they are running processes, and forgetting them would let the
+            # active-worker cap be reset simply by typing another prompt.
+            self.lifecycle = LifecycleState(
+                self.mode, concurrent=set(self.lifecycle.concurrent)
+            )
             self.state["observed"] = []
             self.state["peak_active"] = 0
         self.state.update({
@@ -338,6 +496,7 @@ class TurnEventHandler:
                 # Corrupt ledgers remain untouched and deny at PreToolUse.
                 _worker_tool_budget(_home(self.host), payload, self.classifier, charge=False)
             self.lifecycle.start(worker)
+            _consume_reservation(self.state, payload)
             observed = set(self.state["observed"])
             observed.add(worker)
             self.state["observed"] = sorted(observed)
@@ -350,6 +509,9 @@ class TurnEventHandler:
         worker = _worker(payload)
         if worker:
             self.lifecycle.complete(worker)
+        # Also reached by Claude's Agent-failure signal, where the spawn never
+        # became a worker and its reservation would otherwise never be freed.
+        _release_failed_reservation(self.state, payload)
         return None
 
     def _handle_worker_release(self, payload: dict[str, Any]) -> None:
@@ -360,6 +522,8 @@ class TurnEventHandler:
 
     def _handle_session_end(self, payload: dict[str, Any]) -> None:
         self.lifecycle.end_session()
+        self.state["pending_spawns"] = []
+        self.state["denied_spawns"] = []
         self.state["completed"] = True
         return None
 
@@ -367,18 +531,27 @@ class TurnEventHandler:
         # Workload delegation applies regardless of model. Reading, analysis,
         # and ordinary tool use have no tier-specific capability restrictions.
         reason = _spawn_budget_violation(payload, self.classifier)
+        delegating = _delegating(payload, self.classifier)
+        if reason is None and delegating:
+            reason = _active_cap_violation(self.state, self.classifier, payload)
         if reason is None and _mutating(payload, self.classifier):
             reason = _unmet(self.state)
-        if reason is None:
-            return None
-        if self.state.get("pending_authorization"):
+        if reason is not None:
+            if not self.state.get("pending_authorization"):
+                if delegating:
+                    _record_denied_spawn(self.state, payload)
+                return _deny(reason)
             # Consumed here, once: this specific denial is the one
             # subsequent decision the user's explicit authorization named.
             # Enforcement reverts to normal for every action after this one,
             # including an immediate repeat of the same tool call.
             self.state["pending_authorization"] = False
-            return None
-        return _deny(reason)
+        if delegating:
+            # Admitted, so the slot is spoken for from here until the worker's
+            # own start event arrives -- including a spawn admitted by the
+            # one-shot authorization above.
+            _reserve_spawn(self.state, payload)
+        return None
 
     def _handle_turn_stop(self, payload: dict[str, Any]) -> dict[str, Any] | None:
         # An authorization granted but never consumed by a blocked action
@@ -498,6 +671,32 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
             reason = _spawn_budget_violation(payload, classifier)
             if reason is None and _delegating(payload, classifier):
                 reason = _tier_violation(payload, classifier)
+            if _delegating(payload, classifier) and session:
+                # A nested spawn shares the parent's session_id, so the cap is
+                # read from -- and its reservation written to -- the parent's
+                # ledger, all under one lock so parallel spawns cannot each
+                # claim the same slot. `pending_spawns` and `denied_spawns`
+                # are the only fields a worker event ever writes there; the
+                # parent turn's own obligations, evidence, and authorization
+                # state are left untouched.
+                try:
+                    path, lock = _paths(home, session)
+                    with _locked(lock):
+                        parent_state = _load(path, _release_mode(home))
+                        if reason is None:
+                            reason = _active_cap_violation(
+                                parent_state, classifier, payload)
+                        if reason is None:
+                            _reserve_spawn(parent_state, payload)
+                            _save(path, parent_state)
+                        elif _record_denied_spawn(parent_state, payload):
+                            _save(path, parent_state)
+                except (OSError, ValueError):
+                    return _deny(
+                        "Active worker ledger could not be read or updated to "
+                        "verify the concurrent-worker cap; report this to the "
+                        "parent instead of spawning another worker."
+                    )
             return _deny(reason) if reason else None
         return None
     if session is None:

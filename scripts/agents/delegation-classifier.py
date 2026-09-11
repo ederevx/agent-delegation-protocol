@@ -219,6 +219,14 @@ WORKER_TURN_LIMITS = {
     "frontier-worker": 16,
 }
 
+# How many workers a single parent session may have in flight at once, counting
+# nested workers spawned by other workers: they share the parent's session_id,
+# so one per-session `concurrent` set already measures the whole tree. This is a
+# common ceiling on fan-out width, enforced identically on both hosts by the
+# shared hook, and is independent of the per-worker turn/tool budgets above --
+# those bound how long one worker runs, this bounds how many run together.
+MAX_ACTIVE_WORKERS = 10
+
 ROUTING_POLICY = (
     "Choose the lowest capable worker: quick, then bulk, balanced, frontier. "
     "Skip unnecessary tiers; escalate when evidence shows more reasoning is "
@@ -233,7 +241,11 @@ ROUTING_POLICY = (
     "Worker budgets are "
     + ", ".join(f"{tier.removesuffix('-worker')} {limit}"
                 for tier, limit in WORKER_TURN_LIMITS.items())
-    + ". Claude uses native maxTurns; Codex has advisory "
+    + ". "
+    + f"At most {MAX_ACTIVE_WORKERS} workers may be active at once in a "
+    "session, counting nested workers; wait for one to finish before "
+    "spawning more. "
+    "Claude uses native maxTurns; Codex has advisory "
     "agentic-turn budgets and a separate hard budget of hook-covered tool "
     "calls per identified worker lifetime, including resumes. At exhaustion, "
     "return the evidence report and remaining work instead of continuing."

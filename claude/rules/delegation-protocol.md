@@ -107,7 +107,10 @@ or a tool call; a round can request multiple tools. Resuming a worker may
 start a fresh native budget, so this is not a lifetime cap across resumes.
 Workers should report their result when reaching the cap and stop. Parent
 sessions are not capped. The hook rejects explicit `max_turns` above the tier
-cap and accepts lower values.
+cap and accepts lower values. Both hosts also share a hard cap of 10
+concurrently active workers per parent session, counting nested workers; the
+hook denies a spawn while the session's active set is full, and the parent
+waits for a worker to finish or fans out in smaller waves.
 
 Codex uses the same numbers for an advisory agentic-turn budget and a separate
 hard hook-covered tool-call budget, whose worker-id ledger survives resumes
