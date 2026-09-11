@@ -225,7 +225,12 @@ ROUTING_POLICY = (
     "needed, without mandatory retries. Choose the minimum adequate supported "
     "reasoning effort. Workers report escalation needs to the parent, which "
     "may route upward; worker subdelegation remains strictly downward. "
-    "All tiers may analyze and execute. Worker budgets are "
+    "All tiers may analyze and execute. The parent consolidates focused "
+    "single-topic workers into a general view of the task and never "
+    "executes mixed-topic work itself; workers that can delegate spawn a "
+    "lower tier for bounded subtasks rather than doing them inline. Keep "
+    "briefs and reports topic-scoped to minimize context contamination. "
+    "Worker budgets are "
     + ", ".join(f"{tier.removesuffix('-worker')} {limit}"
                 for tier, limit in WORKER_TURN_LIMITS.items())
     + ". Claude uses native maxTurns; Codex has advisory "

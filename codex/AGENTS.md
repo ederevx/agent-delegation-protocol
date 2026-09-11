@@ -18,6 +18,15 @@ effort; the existing tier defaults can be overridden.
 
 Delegate work with three or more distinct steps or estimated at 25% or more
 of the active context window. Keep parent-level judgment with the parent.
+The parent's primary purpose is to consolidate worker evidence into a general
+view of the task. It never carries out work of a different topic or nature
+itself: it decomposes such work into focused, single-topic workers and acts
+only as their reconciler, keeping planning, ambiguity, integration, conflict
+resolution, and final validation. Its own hands-on work is limited to the
+reads and checks needed to plan, brief, and evaluate worker evidence. Minimize
+context contamination throughout the session: each worker receives only the
+brief its topic needs and returns concise evidence rather than raw output, and
+the parent keeps topic-specific detail out of its own context.
 For independent workstreams, use concurrent native workers when capacity
 permits. Give each worker exclusive ownership, acceptance criteria,
 validation commands, and a concise evidence report scoped to one topic.
@@ -55,7 +64,10 @@ already the lowest tier and cannot delegate further. The parent/main agent is
 not part of this ordering at all — it is always the highest tier regardless of
 which model it runs on, and is exempt from this constraint, free to spawn any
 tier as today. Because a chain can only move strictly downward, its depth is
-bounded by the number of tiers and no cycle is possible.
+bounded by the number of tiers and no cycle is possible. Workers that can
+delegate should do so: when an assigned task contains a bounded subtask a
+lower tier can handle, spawn that tier rather than doing it inline, and keep
+the worker's own turns for the reasoning its tier exists for.
 
 ## Conflict boundary
 
