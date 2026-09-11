@@ -242,9 +242,10 @@ ROUTING_POLICY = (
     + ", ".join(f"{tier.removesuffix('-worker')} {limit}"
                 for tier, limit in WORKER_TURN_LIMITS.items())
     + ". "
-    + f"At most {MAX_ACTIVE_WORKERS} workers may be active at once in a "
-    "session, counting nested workers; wait for one to finish before "
-    "spawning more. "
+    + f"At most {MAX_ACTIVE_WORKERS} workers may be actively working at "
+    "once in a session, counting nested workers; idle finished or "
+    "resumable workers do not count. Wait for a running worker to finish "
+    "before spawning more. "
     "Claude uses native maxTurns; Codex has advisory "
     "agentic-turn budgets and a separate hard budget of hook-covered tool "
     "calls per identified worker lifetime, including resumes. At exhaustion, "

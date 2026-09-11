@@ -166,6 +166,55 @@ def test_active_worker_cap(home, env):
   assert 'Active worker cap' in denied(spawn('cap-auth'))
 
 
+def test_active_cap_non_automatic_release(home, env):
+  """A completed-but-unreleased worker under explicit/session release still
+  frees its cap slot: `concurrent` (not `active`) is what the cap counts, so
+  a worker held in `active` for later dismissal bookkeeping must not also be
+  treated as still occupying an active-worker slot."""
+  import hashlib
+  manifest_path = home / '.delegation-protocol/manifest.json'
+  manifest = json.loads(manifest_path.read_text())
+  original_release = manifest['release']
+  manifest['release'] = 'explicit_release'
+  manifest_path.write_text(json.dumps(manifest))
+  try:
+    def invoke(event, payload):
+      result = subprocess.run([sys.executable, str(HOOK), event],
+          input=json.dumps(payload), env=env, capture_output=True, text=True)
+      assert result.returncode == 0, result.stderr
+      return json.loads(result.stdout)
+    def denied(body):
+      assert body['hookSpecificOutput']['permissionDecision'] == 'deny', body
+      return body['hookSpecificOutput']['permissionDecisionReason']
+    def spawn(session, **extra):
+      return invoke('pre-mutation', dict({'session_id': session,
+          'tool_name': 'Agent',
+          'tool_input': {'subagent_type': 'bulk-worker'}}, **extra))
+    def start(session, worker, **extra):
+      invoke('worker-start', dict({'session_id': session, 'agent_id': worker,
+          'agent_type': 'bulk-worker'}, **extra))
+    def complete(session, **extra):
+      invoke('worker-complete', dict({'session_id': session}, **extra))
+    def state(session):
+      key = hashlib.sha256(session.encode()).hexdigest()
+      return json.loads(
+          (home / '.delegation-protocol/hook-state' / (key + '.json')).read_text())
+    for index in range(10):
+      start('noauto', f'noauto-{index}')
+    assert 'Active worker cap' in denied(spawn('noauto'))
+    # SubagentStop (worker-complete) under explicit_release leaves the worker
+    # in `active` (it is only resumable, not dismissed) but must drop it from
+    # `concurrent`, so the next spawn is admitted despite the held worker.
+    complete('noauto', agent_id='noauto-0')
+    held = state('noauto')
+    assert 'noauto-0' in held['active'], held
+    assert 'noauto-0' not in held['concurrent'], held
+    assert spawn('noauto') == {}
+  finally:
+    manifest['release'] = original_release
+    manifest_path.write_text(json.dumps(manifest))
+
+
 def main():
   with tempfile.TemporaryDirectory(prefix="claude-v2-") as raw:
     home=Path(raw); env=dict(os.environ, CLAUDE_CONFIG_DIR=str(home))
@@ -173,6 +222,7 @@ def main():
     assert r.returncode==0,r.stderr
     test_routing_and_limits(env)
     test_active_worker_cap(home, env)
+    test_active_cap_non_automatic_release(home, env)
     m=json.loads((home/'.delegation-protocol/manifest.json').read_text()); assert m['version']==3 and m['release']=='automatic_release'
     assert (home/'.delegation-protocol/hook_adapter.py').is_symlink()
     assert (home/'agents/frontier-worker.md').is_symlink()
