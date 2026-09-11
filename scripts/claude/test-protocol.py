@@ -26,8 +26,11 @@ def test_routing_and_limits(env):
       ('balanced-worker',32), ('frontier-worker',16)):
     # Model and effort overrides are no longer ADP capability bans. A
     # requested native turn cap may narrow but cannot exceed tier policy.
+    # One session id per probe: an admitted spawn holds an active-worker
+    # reservation until its start arrives, and these probe max_turns only.
     for requested in (None, 1, limit):
       assert invoke('pre-mutation', dict(parent, tool_name='Agent',
+          session_id=f'probe-{tier}-{requested}',
           tool_input={'subagent_type':tier, 'max_turns':requested,
               'model':'any-supported-model', 'effort':'low'})) == {}
     for requested in (limit + 1, 0, True, '16'):
@@ -45,12 +48,131 @@ def test_routing_and_limits(env):
   assert invoke('pre-mutation', dict(parent, tool_name='Agent',
       tool_input={'subagent_type':'general-purpose'})) == {}
 
+def test_active_worker_cap(home, env):
+  """A session may hold at most MAX_ACTIVE_WORKERS workers in flight at once."""
+  import hashlib
+  def invoke(event, payload):
+    result = subprocess.run([sys.executable, str(HOOK), event],
+        input=json.dumps(payload), env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+  def denied(body):
+    assert body['hookSpecificOutput']['permissionDecision'] == 'deny', body
+    return body['hookSpecificOutput']['permissionDecisionReason']
+  def spawn(session, **extra):
+    return invoke('pre-mutation', dict({'session_id': session,
+        'tool_name': 'Agent',
+        'tool_input': {'subagent_type': 'bulk-worker'}}, **extra))
+  def start(session, worker, **extra):
+    invoke('worker-start', dict({'session_id': session, 'agent_id': worker,
+        'agent_type': 'bulk-worker'}, **extra))
+  def complete(session, **extra):
+    invoke('worker-complete', dict({'session_id': session}, **extra))
+  def state(session):
+    key = hashlib.sha256(session.encode()).hexdigest()
+    return json.loads(
+        (home / '.delegation-protocol/hook-state' / (key + '.json')).read_text())
+  FULL = 'Active worker cap reached (10/10)'
+  # Ten workers in flight fill the shared per-session cap; the parent's own
+  # next spawn is denied even though nothing else about it is wrong.
+  for index in range(10):
+    start('cap', f'cap-{index}')
+  assert FULL in denied(spawn('cap'))
+  # A nested spawn runs under the parent's session_id, so a worker whose own
+  # tier permits the target tier is still capped by the same active set.
+  assert 'Active worker cap' in denied(spawn('cap', agent_id='cap-nested',
+      agent_type='frontier-worker'))
+  # An admitted spawn reserves its slot until the worker actually starts, so
+  # two spawn calls issued back to back cannot both read the same free slot.
+  complete('cap', agent_id='cap-0')
+  assert spawn('cap', tool_use_id='cap-call') == {}
+  assert FULL in denied(spawn('cap'))
+  # A re-delivery of that same call already owns its slot, so it is admitted
+  # at 10/10 rather than denied for being delivered twice -- on the parent
+  # path and on a nested worker's path alike.
+  assert spawn('cap', tool_use_id='cap-call') == {}
+  assert spawn('cap', tool_use_id='cap-call', agent_id='cap-nested',
+      agent_type='frontier-worker') == {}
+  assert state('cap')['pending_spawns'] == ['cap-call'], state('cap')
+  # The matching start consumes the reservation instead of adding to it, so
+  # freeing one slot afterwards admits exactly one more spawn.
+  start('cap', 'cap-0', tool_use_id='cap-call')
+  assert state('cap')['pending_spawns'] == [], state('cap')
+  complete('cap', agent_id='cap-0')
+  assert spawn('cap') == {}
+  # A reservation whose spawn never started does not outlive the round: the
+  # next prompt drops it, while workers still running are kept across it.
+  invoke('prompt', {'session_id': 'cap', 'prompt': 'Say hi.'})
+  assert spawn('cap') == {}
+  start('cap', 'cap-0')
+  invoke('prompt', {'session_id': 'cap', 'prompt': 'Say hi.'})
+  assert FULL in denied(spawn('cap'))
+  # A carry-forward follow-up is still a new user turn, so it clears
+  # reservations too, and the carry path keeps running workers untouched.
+  invoke('prompt', {'session_id': 'carry',
+      'prompt': 'Update 12 files across independent modules.'})
+  for index in range(9):
+    start('carry', f'carry-{index}')
+  assert spawn('carry') == {}
+  assert FULL in denied(spawn('carry'))
+  invoke('prompt', {'session_id': 'carry', 'prompt': 'continue'})
+  carried = state('carry')
+  assert carried['requires_delegation'], carried  # the follow-up carried
+  assert carried['pending_spawns'] == [], carried
+  assert len(carried['concurrent']) == 9, carried
+  assert spawn('carry') == {}
+  assert FULL in denied(spawn('carry'))
+  # A spawn that fails never becomes a worker. Claude reports that as a
+  # completion naming only the failed tool_use_id, which must free its slot.
+  for index in range(10):
+    assert spawn('fail', tool_use_id=f'fail-{index}') == {}
+  assert FULL in denied(spawn('fail'))
+  complete('fail', tool_use_id='fail-0')
+  assert spawn('fail', tool_use_id='fail-10') == {}
+  assert FULL in denied(spawn('fail'))
+  # A start carries no tool_use_id, so it consumes the oldest entry rather
+  # than its own. The accounting is therefore a count, not an identity map:
+  # an unmatched failure must still free one entry, or the worker that
+  # consumed someone else's entry stays counted as running and as pending.
+  assert spawn('skew', tool_use_id='skew-a') == {}
+  assert spawn('skew', tool_use_id='skew-b') == {}
+  start('skew', 'skew-worker')
+  complete('skew', tool_use_id='skew-a')
+  skewed = state('skew')
+  assert skewed['pending_spawns'] == [], skewed
+  assert len(skewed['concurrent']) == 1, skewed
+  # A failure reported for a spawn this hook denied never held a slot, so it
+  # must not free one that an admitted spawn is still holding -- on the
+  # parent path and on a nested worker's path alike.
+  held = state('fail')['pending_spawns']
+  # A genuine stop names a worker that consumed its reservation when it
+  # started, so it must not also pop an entry another spawn is still holding.
+  complete('fail', agent_id='never-started')
+  assert state('fail')['pending_spawns'] == held, state('fail')
+  assert FULL in denied(spawn('fail', tool_use_id='denied-parent'))
+  complete('fail', tool_use_id='denied-parent')
+  assert state('fail')['pending_spawns'] == held, state('fail')
+  assert 'Active worker cap' in denied(spawn('fail', tool_use_id='denied-nested',
+      agent_id='fail-nested', agent_type='frontier-worker'))
+  complete('fail', tool_use_id='denied-nested')
+  assert state('fail')['pending_spawns'] == held, state('fail')
+  # The single-use explicit authorization overrides the cap exactly once,
+  # like every other denial, and never becomes a standing bypass.
+  invoke('prompt', {'session_id': 'cap-auth',
+      'prompt': 'I explicitly authorize this action.'})
+  for index in range(10):
+    start('cap-auth', f'auth-{index}')
+  assert spawn('cap-auth') == {}
+  assert 'Active worker cap' in denied(spawn('cap-auth'))
+
+
 def main():
   with tempfile.TemporaryDirectory(prefix="claude-v2-") as raw:
     home=Path(raw); env=dict(os.environ, CLAUDE_CONFIG_DIR=str(home))
     r=subprocess.run([sys.executable,str(ENGINE),"install","--host","claude","--home",str(home),"--repo",str(ROOT)],env=env,capture_output=True,text=True)
     assert r.returncode==0,r.stderr
     test_routing_and_limits(env)
+    test_active_worker_cap(home, env)
     m=json.loads((home/'.delegation-protocol/manifest.json').read_text()); assert m['version']==3 and m['release']=='automatic_release'
     assert (home/'.delegation-protocol/hook_adapter.py').is_symlink()
     assert (home/'agents/frontier-worker.md').is_symlink()
