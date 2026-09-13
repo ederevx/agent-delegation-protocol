@@ -162,6 +162,13 @@ preserves unrelated configuration. Reinstall after changing the source
 checkout is required to adopt those changes; restart the host afterward so
 worker discovery sees the installed profiles.
 
+Hook state uses OS advisory locks, released when a hook process exits. Before
+upgrading from directory locks, stop the sessions and workers using the target
+home and let their hook processes exit; install, then start fresh sessions.
+The two lock formats do not interoperate. Ledger contents are preserved, and
+legacy lock directories remain intact for separate recovery. A legacy lock
+still blocks its affected session or worker identity with a diagnostic.
+
 Codex uses `session_release`; a completed worker never creates an impossible
 dismissal warning. Claude uses `automatic_release`; a foreground result clears
 its lifecycle automatically. The hook adapter checks worker budgets, observed

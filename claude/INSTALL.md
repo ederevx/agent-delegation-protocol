@@ -68,6 +68,12 @@ checkout; reinstall after changing the checkout to adopt those changes.
 
 ## Settings and lifecycle
 
+For the upgrade from directory locks to OS advisory locks, stop all Claude
+sessions and workers using this home and let their hook processes exit before
+installing. Start fresh sessions afterward: old and new lock formats cannot
+run together safely. Existing ledgers and legacy lock directories are retained;
+identities with a legacy lock remain blocked pending separate state recovery.
+
 Protocol-owned settings are merged into `settings.json` without replacing
 unrelated values. Existing environment overrides are retained; explicit
 disablement or organization-managed policy is reported rather than silently

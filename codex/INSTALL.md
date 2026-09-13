@@ -84,6 +84,12 @@ installation is left alone.
 
 ## Lifecycle and trust
 
+For the upgrade from directory locks to OS advisory locks, stop all Codex
+sessions and workers using this home and let their hook processes exit before
+installing. Start fresh sessions afterward: old and new lock formats cannot
+run together safely. Existing ledgers and legacy lock directories are retained;
+identities with a legacy lock remain blocked pending separate state recovery.
+
 The Codex profile uses a lifecycle-visible worker. The hook adapter observes
 native `SubagentStart`/`SubagentStop` events for the session and gates eligible
 parent mutation and turn completion on that evidence — there is no scheduler,
