@@ -59,13 +59,15 @@ The bulk worker is a managed regular-file copy because the Codex runtime require
 no-follow loading for selected role files. The installer records its source
 revision and refreshes only an unmodified protocol-owned copy.
 
-The installer also sets `agents.max_concurrent_threads_per_session = 10` in
-`$CODEX_HOME/config.toml` so Codex's native per-session subagent concurrency
-matches the protocol's shared active-worker cap. This native limit counts open
-threads including idle ones until they are closed or the session ends, unlike
-the hook cap which counts only actively working workers. Only that one
-assignment is written: every other line, table, and comment is preserved, a
-missing `config.toml` or `[agents]` table is created, and a legacy
+The installer sets `agents.max_concurrent_threads_per_session = 1024` in
+`$CODEX_HOME/config.toml`. This bounded native open-thread capacity works
+around hosts that retain idle threads but do not provide a close tool. It is
+separate from the hook's 10-worker cap, which still counts only actively
+working workers. It does not make native thread support unlimited. Existing
+sessions retain their startup capacity, so start a new Codex session after an
+installation or upgrade to use the new value. Only that one assignment is
+written: every other line, table, and comment is preserved, a missing
+`config.toml` or `[agents]` table is created, and a legacy
 `agents.max_threads` alias is left untouched. A header spelled inside a multiline string is data, not
 a table, and the parsed configuration is compared before and after the edit so
 nothing outside that one key can change. The manifest records the prior value
