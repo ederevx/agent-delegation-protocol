@@ -146,8 +146,15 @@ bash scripts/claude/install.sh
 Use the corresponding `.ps1` wrapper on Windows. The shared installer
 preflights every source, destination, manifest, and host JSON file before
 mutation. It uses a lock, atomic settings writes, rollback, and a complete
-ownership manifest. Uninstall removes only unchanged protocol-owned resources
-and preserves unrelated configuration.
+ownership manifest. Every installed protocol resource is a managed regular-file
+copy, so fresh installs do not require Windows symbolic-link privileges. An
+existing legacy protocol symlink is migrated transactionally; restoring it
+after a failed upgrade may still require symbolic-link support. The installer
+records source hashes and refreshes only unchanged managed copies. Uninstall
+removes only unchanged protocol-owned resources, restores recorded backups, and
+preserves unrelated configuration. Reinstall after changing the source
+checkout is required to adopt those changes; restart the host afterward so
+worker discovery sees the installed profiles.
 
 Codex uses `session_release`; a completed worker never creates an impossible
 dismissal warning. Claude uses `automatic_release`; a foreground result clears

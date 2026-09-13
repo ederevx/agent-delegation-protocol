@@ -74,6 +74,55 @@ def test_routing_and_limits(env):
   assert invoke('pre-mutation', dict(parent, tool_name='Agent',
       tool_input={'subagent_type':'general-purpose'})) == {}
 
+def test_installed_hook_runtime(home, env):
+  """The copied hook must use its configured home's copied runtime tree."""
+  hook = home / 'hooks/delegation-enforcer.py'
+  assert hook.is_file() and not hook.is_symlink(), hook
+  result = subprocess.run([sys.executable, str(hook), 'prompt'],
+      input=json.dumps({'session_id': 'installed-runtime', 'prompt': 'Say hi.'}),
+      env=env, capture_output=True, text=True)
+  assert result.returncode == 0, result.stderr
+  body = json.loads(result.stdout)['hookSpecificOutput']
+  assert body['hookEventName'] == 'UserPromptSubmit', result.stdout
+
+def test_checkout_hook_runtime(home, env):
+  """A checkout hook must not import an unrelated installed adapter."""
+  adapter = home / '.delegation-protocol/hook_adapter.py'
+  original = adapter.read_bytes()
+  adapter.write_text('raise RuntimeError("installed adapter was selected")\n')
+  try:
+    result = subprocess.run([sys.executable, str(HOOK), 'prompt'],
+        input=json.dumps({'session_id': 'checkout-runtime', 'prompt': 'Say hi.'}),
+        env=env, capture_output=True, text=True)
+  finally:
+    adapter.write_bytes(original)
+  assert result.returncode == 0, result.stderr
+  assert json.loads(result.stdout)['hookSpecificOutput']['hookEventName'] == (
+      'UserPromptSubmit')
+
+def test_installed_hook_without_source(root):
+  """A copied Codex hook remains usable after its installation source is gone."""
+  source = root / 'offline-source'
+  home = root / 'offline-home'
+  shutil.copytree(ROOT / 'codex', source / 'codex')
+  shutil.copytree(ROOT / 'scripts/agents', source / 'scripts/agents')
+  shutil.copytree(ROOT / 'scripts/hosts', source / 'scripts/hosts')
+  env = dict(os.environ, CODEX_HOME=str(home),
+      CLAUDE_CONFIG_DIR=str(root / 'wrong-host-home'))
+  installed = subprocess.run([sys.executable, str(ENGINE), 'install', '--host',
+      'codex', '--home', str(home), '--repo', str(source)], env=env,
+      capture_output=True, text=True)
+  assert installed.returncode == 0, installed.stderr
+  source.rename(root / 'offline-source-removed')
+  hook = home / 'hooks/delegation-enforcer.py'
+  assert hook.is_file() and not hook.is_symlink(), hook
+  result = subprocess.run([sys.executable, str(hook), 'prompt'],
+      input=json.dumps({'session_id': 'offline-runtime', 'prompt': 'Say hi.'}),
+      env=env, capture_output=True, text=True)
+  assert result.returncode == 0, result.stderr
+  body = json.loads(result.stdout)['hookSpecificOutput']
+  assert body['hookEventName'] == 'UserPromptSubmit', result.stdout
+
 def test_active_worker_cap(home, env):
   """A session may hold at most MAX_ACTIVE_WORKERS workers in flight at once."""
   import hashlib
@@ -294,9 +343,12 @@ def test_budget_failures(home):
 def main():
   test_powershell_wrappers()
   with tempfile.TemporaryDirectory(prefix="codex-v2-") as raw:
+    test_installed_hook_without_source(Path(raw))
     home=Path(raw); env=dict(os.environ, CODEX_HOME=str(home))
     r=subprocess.run([sys.executable,str(ENGINE),"install","--host","codex","--home",str(home),"--repo",str(ROOT)],env=env,capture_output=True,text=True)
     assert r.returncode==0,r.stderr
+    test_installed_hook_runtime(home, env)
+    test_checkout_hook_runtime(home, env)
     test_routing_and_limits(env)
     test_active_worker_cap(home, env)
     test_tool_budgets(home, env)
@@ -315,7 +367,7 @@ def main():
     assert any(c.endswith(' pre-mutation') for c in commands('PreToolUse'))
     worker_wired_events={e for e in hooks if any(c.endswith((' worker-start',' worker-complete')) for c in commands(e))}
     assert worker_wired_events=={'SubagentStart','SubagentStop'},worker_wired_events
-    assert (home/'.delegation-protocol/hook_adapter.py').is_symlink()
+    assert not (home/'.delegation-protocol/hook_adapter.py').is_symlink()
     worker = home/'agents/bulk_worker.toml'; worker.write_text('user change\n')
     r2=subprocess.run([sys.executable,str(ENGINE),"install","--host","codex","--home",str(home),"--repo",str(ROOT)],env=env,capture_output=True,text=True)
     assert r2.returncode != 0 and 'unowned destination' in r2.stderr

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Claude host installation and native lifecycle smoke tests."""
-import json, os, subprocess, sys, tempfile, importlib.util
+import json, os, shutil, subprocess, sys, tempfile, importlib.util
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 ENGINE = ROOT / "scripts/hosts/install.py"
@@ -47,6 +47,55 @@ def test_routing_and_limits(env):
       tool_input={'subagent_type':'frontier-worker'})) == {}
   assert invoke('pre-mutation', dict(parent, tool_name='Agent',
       tool_input={'subagent_type':'general-purpose'})) == {}
+
+def test_installed_hook_runtime(home, env):
+  """The copied hook must use its configured home's copied runtime tree."""
+  hook = home / 'hooks/delegation-enforcer.py'
+  assert hook.is_file() and not hook.is_symlink(), hook
+  result = subprocess.run([sys.executable, str(hook), 'prompt'],
+      input=json.dumps({'session_id': 'installed-runtime', 'prompt': 'Say hi.'}),
+      env=env, capture_output=True, text=True)
+  assert result.returncode == 0, result.stderr
+  body = json.loads(result.stdout)['hookSpecificOutput']
+  assert body['hookEventName'] == 'UserPromptSubmit', result.stdout
+
+def test_checkout_hook_runtime(home, env):
+  """A checkout hook must not import an unrelated installed adapter."""
+  adapter = home / '.delegation-protocol/hook_adapter.py'
+  original = adapter.read_bytes()
+  adapter.write_text('raise RuntimeError("installed adapter was selected")\n')
+  try:
+    result = subprocess.run([sys.executable, str(HOOK), 'prompt'],
+        input=json.dumps({'session_id': 'checkout-runtime', 'prompt': 'Say hi.'}),
+        env=env, capture_output=True, text=True)
+  finally:
+    adapter.write_bytes(original)
+  assert result.returncode == 0, result.stderr
+  assert json.loads(result.stdout)['hookSpecificOutput']['hookEventName'] == (
+      'UserPromptSubmit')
+
+def test_installed_hook_without_source(root):
+  """A copied Claude hook remains usable after its installation source is gone."""
+  source = root / 'offline-source'
+  home = root / 'offline-home'
+  shutil.copytree(ROOT / 'claude', source / 'claude')
+  shutil.copytree(ROOT / 'scripts/agents', source / 'scripts/agents')
+  shutil.copytree(ROOT / 'scripts/hosts', source / 'scripts/hosts')
+  env = dict(os.environ, CLAUDE_CONFIG_DIR=str(home),
+      CODEX_HOME=str(root / 'wrong-host-home'))
+  installed = subprocess.run([sys.executable, str(ENGINE), 'install', '--host',
+      'claude', '--home', str(home), '--repo', str(source)], env=env,
+      capture_output=True, text=True)
+  assert installed.returncode == 0, installed.stderr
+  source.rename(root / 'offline-source-removed')
+  hook = home / 'hooks/delegation-enforcer.py'
+  assert hook.is_file() and not hook.is_symlink(), hook
+  result = subprocess.run([sys.executable, str(hook), 'prompt'],
+      input=json.dumps({'session_id': 'offline-runtime', 'prompt': 'Say hi.'}),
+      env=env, capture_output=True, text=True)
+  assert result.returncode == 0, result.stderr
+  body = json.loads(result.stdout)['hookSpecificOutput']
+  assert body['hookEventName'] == 'UserPromptSubmit', result.stdout
 
 def test_active_worker_cap(home, env):
   """A session may hold at most MAX_ACTIVE_WORKERS workers in flight at once."""
@@ -217,18 +266,21 @@ def test_active_cap_non_automatic_release(home, env):
 
 def main():
   with tempfile.TemporaryDirectory(prefix="claude-v2-") as raw:
+    test_installed_hook_without_source(Path(raw))
     home=Path(raw); env=dict(os.environ, CLAUDE_CONFIG_DIR=str(home))
     r=subprocess.run([sys.executable,str(ENGINE),"install","--host","claude","--home",str(home),"--repo",str(ROOT)],env=env,capture_output=True,text=True)
     assert r.returncode==0,r.stderr
+    test_installed_hook_runtime(home, env)
+    test_checkout_hook_runtime(home, env)
     test_routing_and_limits(env)
     test_active_worker_cap(home, env)
     test_active_cap_non_automatic_release(home, env)
     m=json.loads((home/'.delegation-protocol/manifest.json').read_text()); assert m['version']==3 and m['release']=='automatic_release'
-    assert (home/'.delegation-protocol/hook_adapter.py').is_symlink()
-    assert (home/'agents/frontier-worker.md').is_symlink()
-    assert (home/'agents/balanced-worker.md').is_symlink()
-    assert (home/'agents/bulk-worker.md').is_symlink()
-    assert (home/'agents/quick-worker.md').is_symlink()
+    assert not (home/'.delegation-protocol/hook_adapter.py').is_symlink()
+    assert not (home/'agents/frontier-worker.md').is_symlink()
+    assert not (home/'agents/balanced-worker.md').is_symlink()
+    assert not (home/'agents/bulk-worker.md').is_symlink()
+    assert not (home/'agents/quick-worker.md').is_symlink()
     # Only native lifecycle events (plus the documented Agent-failure signal)
     # ever wire to worker-start/worker-complete -- no arbitrary tool call
     # (which is how ACP/AALP traffic would otherwise reach the hook) can ever

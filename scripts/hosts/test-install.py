@@ -464,6 +464,277 @@ def test_codex_thread_capacity_upgrade_preserves_original_restore() -> None:
         assert config.read_bytes() == original
 
 
+def manifest_for(home: Path) -> dict:
+    return json.loads((home / ".delegation-protocol/manifest.json").read_text())
+
+
+def assert_regular_resources(repo: Path, home: Path, host: str) -> dict:
+    """Assert every installed runtime asset is self-contained and copied."""
+    manifest = manifest_for(home)
+    assert manifest["host"] == host
+    assert manifest["resources"]
+    for item in manifest["resources"]:
+        source, destination = Path(item["source"]), Path(item["destination"])
+        assert item["kind"] == "copy", item
+        assert destination.is_file() and not destination.is_symlink(), destination
+        assert destination.read_bytes() == source.read_bytes(), destination
+        assert manifest["hashes"][str(destination)] == hashlib.sha256(
+            destination.read_bytes()
+        ).hexdigest()
+    return manifest
+
+
+def test_fresh_copy_install_and_managed_refresh() -> None:
+    """Both hosts install only regular files, then refresh only owned copies."""
+    with tempfile.TemporaryDirectory(prefix="adp-copy-fresh-") as raw:
+        root = Path(raw)
+        for host in ("claude", "codex"):
+            repo, home = fixture(root / host), root / f"{host}-home"
+            install.install(repo, home, host)
+            first = assert_regular_resources(repo, home, host)
+            tracked = next(item for item in first["resources"] if item["destination"].endswith(
+                "delegation-enforcer.py"
+            ))
+            source, destination = Path(tracked["source"]), Path(tracked["destination"])
+            source.write_bytes(b"managed refresh\n")
+            install.install(repo, home, host)
+            assert destination.read_bytes() == b"managed refresh\n"
+            second = assert_regular_resources(repo, home, host)
+            assert second["hashes"][str(destination)] == hashlib.sha256(
+                b"managed refresh\n"
+            ).hexdigest()
+
+
+def test_legacy_v116_links_migrate_from_a_different_checkout() -> None:
+    """A v1.16 link manifest may migrate only when each old target is exact."""
+    with tempfile.TemporaryDirectory(prefix="adp-copy-legacy-") as raw:
+        root = Path(raw)
+        old_repo, repo = fixture(root / "v1.16-checkout"), fixture(root / "new-checkout")
+        home = root / "codex-home"
+        home.mkdir()
+        original_agents = b"user global instructions\n"
+        original_config = b'[agents]\nmax_threads = 9\n'
+        (home / "AGENTS.md").write_bytes(original_agents)
+        (home / "config.toml").write_bytes(original_config)
+
+        # Build an authentic v1.16-style resource manifest: all resources were
+        # links, and its source checkout is intentionally different from the
+        # checkout now doing the migration.
+        install.install(old_repo, home, "codex")
+        legacy = manifest_for(home)
+        old_resources = install.resources(old_repo, home, "codex")
+        for source, destination, _ in old_resources:
+            destination.unlink()
+            destination.symlink_to(source)
+        legacy["resources"] = [
+            {"source": str(source), "destination": str(destination), "kind": "link"}
+            for source, destination, _ in old_resources
+        ]
+        legacy["owned"] = [str(destination) for _, destination, _ in old_resources]
+        legacy["hashes"] = {}
+        legacy["repo"] = str(old_repo)
+        legacy["version"] = 3  # v1.16's native-host manifest schema.
+        manifest_path = home / ".delegation-protocol/manifest.json"
+        preserved_backups = {
+            path.name: path.read_bytes()
+            for path in (home / ".delegation-protocol").glob("*.before-first-install")
+        }
+        policy = legacy["policy"].copy()
+        codex_config = legacy["codex_config"].copy()
+        manifest_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+        install.install(repo, home, "codex")
+        migrated = assert_regular_resources(repo, home, "codex")
+        assert migrated["policy"] == policy
+        assert migrated["codex_config"] == codex_config
+        retained_backups = {
+            path.name: path.read_bytes()
+            for path in (home / ".delegation-protocol").glob("*.before-first-install")
+        }
+        for name, payload in preserved_backups.items():
+            assert retained_backups[name] == payload
+        old_source, migrated_destination, _ = old_resources[0]
+        migrated_destination.unlink()
+        # The old checkout has identical bytes, but its link is no longer an
+        # owned v3 resource after migration and must not be followed.
+        migrated_destination.symlink_to(old_source)
+        try:
+            install.install(repo, home, "codex")
+        except SystemExit as error:
+            assert "unowned destination" in str(error)
+        else:
+            raise AssertionError("old source link was accepted after migration")
+        migrated_destination.unlink()
+        migrated_destination.write_bytes((repo / old_source.relative_to(old_repo)).read_bytes())
+        install.uninstall(home, "codex")
+        assert (home / "AGENTS.md").read_bytes() == original_agents
+        assert (home / "config.toml").read_bytes() == original_config
+
+
+def test_refuses_foreign_copies_and_foreign_symlinks() -> None:
+    """Ownership never follows altered bytes or an attacker-replaced link."""
+    with tempfile.TemporaryDirectory(prefix="adp-copy-foreign-") as raw:
+        root = Path(raw)
+        for host in ("claude", "codex"):
+            repo, home = fixture(root / host), root / f"{host}-home"
+            install.install(repo, home, host)
+            item = manifest_for(home)["resources"][0]
+            destination = Path(item["destination"])
+            destination.write_bytes(b"user changed this copy\n")
+            try:
+                install.install(repo, home, host)
+            except SystemExit as error:
+                assert "unowned destination" in str(error)
+            else:
+                raise AssertionError("modified managed copy was overwritten")
+            destination.unlink()
+            foreign = root / f"foreign-{host}"
+            # A link to identical data is still a foreign path.  Byte equality
+            # must never turn a replacement symlink into an owned copy.
+            foreign.write_bytes(Path(item["source"]).read_bytes())
+            destination.symlink_to(foreign)
+            try:
+                install.install(repo, home, host)
+            except SystemExit as error:
+                assert "unowned destination" in str(error)
+            else:
+                raise AssertionError("foreign symlink was overwritten")
+
+
+def test_reinstall_refuses_former_policy_links() -> None:
+    """Managed policy copies cannot be replaced by legacy-style links."""
+    with tempfile.TemporaryDirectory(prefix="adp-copy-policy-links-") as raw:
+        root, repo = Path(raw), fixture(Path(raw) / "repo")
+
+        # Direct policy: its former source link must not be accepted merely
+        # because it points at the same bytes.
+        direct = root / "direct"
+        install.install(repo, direct, "codex")
+        agents = direct / "AGENTS.md"
+        agents.unlink()
+        agents.symlink_to(repo / "codex/AGENTS.md")
+        try:
+            install.install(repo, direct, "codex")
+        except SystemExit as error:
+            assert "modified Codex policy" in str(error)
+        else:
+            raise AssertionError("direct policy source link was accepted")
+
+        # Composed policy had a link to its composed state in earlier releases.
+        # A current managed copy must reject that link on reinstall.
+        composed = root / "composed"
+        composed.mkdir()
+        (composed / "AGENTS.md").write_bytes(b"user policy\n")
+        install.install(repo, composed, "codex")
+        override = composed / "AGENTS.override.md"
+        override.unlink()
+        override.symlink_to(composed / ".delegation-protocol/AGENTS.composed.md")
+        try:
+            install.install(repo, composed, "codex")
+        except SystemExit as error:
+            assert "incomplete composed Codex policy" in str(error)
+        else:
+            raise AssertionError("composed policy link was accepted")
+
+
+def test_direct_policy_copy_failure_restores_bytes_and_mode() -> None:
+    """A late chmod failure leaves the pre-existing direct policy untouched."""
+    with tempfile.TemporaryDirectory(prefix="adp-copy-policy-rollback-") as raw:
+        root, repo, home = Path(raw), fixture(Path(raw) / "repo"), Path(raw) / "home"
+        install.install(repo, home, "codex")
+        agents = home / "AGENTS.md"
+        previous_bytes, previous_mode = agents.read_bytes(), agents.stat().st_mode & 0o7777
+        (repo / "codex/AGENTS.md").write_bytes(b"new policy bytes\n")
+        real_chmod = install.os.chmod
+
+        def fail_policy_chmod(path: Path | str, mode: int) -> None:
+            real_chmod(path, mode)
+            if Path(path) == agents:
+                raise OSError("late policy chmod failure")
+
+        with patch.object(install.os, "chmod", side_effect=fail_policy_chmod):
+            try:
+                install.install(repo, home, "codex")
+            except OSError as error:
+                assert str(error) == "late policy chmod failure"
+            else:
+                raise AssertionError("late policy chmod failure was swallowed")
+        assert agents.is_file() and not agents.is_symlink()
+        assert agents.read_bytes() == previous_bytes
+        assert agents.stat().st_mode & 0o7777 == previous_mode
+
+
+def test_uninstall_preserves_changed_composed_policy_backup() -> None:
+    """A user-edited original policy backup survives uninstall unchanged."""
+    with tempfile.TemporaryDirectory(prefix="adp-copy-policy-backup-") as raw:
+        root, repo, home = Path(raw), fixture(Path(raw) / "repo"), Path(raw) / "home"
+        home.mkdir()
+        (home / "AGENTS.md").write_bytes(b"original user policy\n")
+        install.install(repo, home, "codex")
+        backup = home / ".delegation-protocol/original-active-global.md"
+        backup.write_bytes(b"user edited preserved backup\n")
+        install.uninstall(home, "codex")
+        assert backup.read_bytes() == b"user edited preserved backup\n"
+
+
+def test_uninstall_keeps_changed_assets_and_restores_user_state() -> None:
+    with tempfile.TemporaryDirectory(prefix="adp-copy-uninstall-") as raw:
+        root, repo, home = Path(raw), None, None
+        repo = fixture(root)
+        home = root / "codex-home"
+        home.mkdir()
+        original_agents = b"own instructions\n"
+        original_config = b'model = "user-choice"\n'
+        (home / "AGENTS.md").write_bytes(original_agents)
+        (home / "config.toml").write_bytes(original_config)
+        install.install(repo, home, "codex")
+        item = manifest_for(home)["resources"][0]
+        changed = Path(item["destination"])
+        changed.write_bytes(b"leave this user edit alone\n")
+        install.uninstall(home, "codex")
+        assert changed.read_bytes() == b"leave this user edit alone\n"
+        assert (home / "AGENTS.md").read_bytes() == original_agents
+        assert (home / "config.toml").read_bytes() == original_config
+
+
+def test_late_failure_restores_legacy_links_and_exact_bytes() -> None:
+    """Migration failures restore the old link tree and all prior metadata."""
+    with tempfile.TemporaryDirectory(prefix="adp-copy-rollback-") as raw:
+        root = Path(raw)
+        old_repo, repo, home = fixture(root / "old"), fixture(root / "new"), root / "claude"
+        install.install(old_repo, home, "claude")
+        legacy = manifest_for(home)
+        old_resources = install.resources(old_repo, home, "claude")
+        for source, destination, _ in old_resources:
+            destination.unlink()
+            destination.symlink_to(source)
+        legacy["resources"] = [
+            {"source": str(source), "destination": str(destination), "kind": "link"}
+            for source, destination, _ in old_resources
+        ]
+        legacy["owned"] = [str(destination) for _, destination, _ in old_resources]
+        legacy["hashes"] = {}
+        legacy["repo"] = str(old_repo)
+        manifest_path = home / ".delegation-protocol/manifest.json"
+        before = {path: path.read_bytes() for path in (
+            home / "settings.json", manifest_path,
+            home / ".delegation-protocol/host-settings.json",
+        )}
+        manifest_path.write_text(json.dumps(legacy), encoding="utf-8")
+        before[manifest_path] = manifest_path.read_bytes()
+        with patch.object(install.settings, "install", side_effect=RuntimeError("late failure")):
+            try:
+                install.install(repo, home, "claude")
+            except RuntimeError as error:
+                assert str(error) == "late failure"
+            else:
+                raise AssertionError("late failure did not abort installation")
+        for source, destination, _ in old_resources:
+            assert destination.is_symlink() and install.same_link(destination, source)
+        for path, payload in before.items():
+            assert path.read_bytes() == payload
+
+
 def main() -> None:
     test_explicit_authorization_is_single_use()
     test_codex_open_thread_capacity()
@@ -471,70 +742,15 @@ def main() -> None:
     test_codex_config_reinstall_keeps_user_edits()
     test_codex_config_is_restored_byte_for_byte()
     test_codex_thread_capacity_upgrade_preserves_original_restore()
-    test_same_link_paths()
-    test_windows_symlink_privilege_error()
-    test_other_symlink_errors_are_not_relabelled()
-    with tempfile.TemporaryDirectory(prefix="protocol-hosts-") as raw:
-        root, repo = Path(raw), None
-        repo = fixture(root)
-        home = root / "claude-home"
-        install.install(repo, home, "claude")
-        manifest = json.loads((home / ".delegation-protocol/manifest.json").read_text())
-        assert manifest["version"] == 3
-        assert (home / "hooks/delegation-enforcer.py").is_symlink()
-        install.uninstall(home, "claude")
-        assert not (home / "hooks/delegation-enforcer.py").exists()
-        assert not (home / ".delegation-protocol/manifest.json").exists()
-
-        codex = root / "codex-empty"
-        install.install(repo, codex, "codex")
-        assert (codex / "AGENTS.md").is_symlink()
-        hook_adapter = codex / ".delegation-protocol" / "hook_adapter.py"
-        manifest = json.loads((
-            codex / ".delegation-protocol/manifest.json"
-        ).read_text())
-        hook_adapter_resource = next(item for item in manifest["resources"]
-                                      if item["destination"] == str(hook_adapter))
-        assert hook_adapter.is_symlink()
-        assert hook_adapter_resource["kind"] == "link"
-        cache = codex / ".delegation-protocol/__pycache__"
-        cache.mkdir()
-        (cache / "runtime.pyc").write_bytes(b"generated cache")
-        install.uninstall(codex, "codex")
-        assert not (codex / "AGENTS.md").exists()
-        assert not hook_adapter.exists()
-        assert not (codex / ".delegation-protocol").exists()
-
-        codex = root / "codex-agents"
-        codex.mkdir()
-        original = b"user instructions\n"
-        (codex / "AGENTS.md").write_bytes(original)
-        install.install(repo, codex, "codex")
-        override = codex / "AGENTS.override.md"
-        assert override.is_symlink()
-        assert override.read_bytes() == original.rstrip(b"\n") + b"\n\n" + (
-            repo / "codex/AGENTS.md"
-        ).read_bytes()
-        (repo / "codex/AGENTS.md").write_text(
-            "updated protocol\n", encoding="utf-8"
-        )
-        install.install(repo, codex, "codex")
-        assert override.read_text(encoding="utf-8").endswith("updated protocol\n")
-        install.uninstall(codex, "codex")
-        assert not override.exists()
-        assert (codex / "AGENTS.md").read_bytes() == original
-
-        codex = root / "codex-override"
-        codex.mkdir()
-        (codex / "AGENTS.md").write_text("shadowed\n", encoding="utf-8")
-        prior_override = codex / "AGENTS.override.md"
-        prior_override.write_text("active override\n", encoding="utf-8")
-        install.install(repo, codex, "codex")
-        assert prior_override.is_symlink()
-        install.uninstall(codex, "codex")
-        assert not prior_override.is_symlink()
-        assert prior_override.read_text(encoding="utf-8") == "active override\n"
-        print("Host installation tests: PASS")
+    test_fresh_copy_install_and_managed_refresh()
+    test_legacy_v116_links_migrate_from_a_different_checkout()
+    test_refuses_foreign_copies_and_foreign_symlinks()
+    test_reinstall_refuses_former_policy_links()
+    test_direct_policy_copy_failure_restores_bytes_and_mode()
+    test_uninstall_preserves_changed_composed_policy_backup()
+    test_uninstall_keeps_changed_assets_and_restores_user_state()
+    test_late_failure_restores_legacy_links_and_exact_bytes()
+    print("Host installation tests: PASS")
 
 
 if __name__ == "__main__":

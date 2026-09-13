@@ -23,10 +23,10 @@ bash scripts/codex/install.sh
 ```
 
 Python 3.11 or newer is required. Set `CODEX_PYTHON` when automatic discovery
-cannot find a suitable interpreter. Native Windows also requires symbolic-link
-support through Developer Mode or an elevated PowerShell. If Windows denies
-link creation, the installer stops transactionally and reports how to satisfy
-that requirement before retrying.
+cannot find a suitable interpreter. Fresh installs use regular-file copies and
+do not require Windows symbolic-link privileges. If a legacy protocol symlink
+is present, installation migrates it transactionally; restoring the link after
+a failed upgrade may require symbolic-link support.
 
 The installer validates `$CODEX_HOME`, destination types, protocol metadata,
 and hook configuration before mutation. Existing unrelated instructions,
@@ -36,13 +36,14 @@ without partially enabling the protocol.
 ## Installed surface
 
 When no global instruction file exists, the active home receives a direct
-protocol-owned link at `$CODEX_HOME/AGENTS.md`. When `AGENTS.md` or
+protocol-owned copy at `$CODEX_HOME/AGENTS.md`. When `AGENTS.md` or
 `AGENTS.override.md` already exists, the installer preserves the active content,
 composes it before the protocol policy under installation state, and activates
-that composition through a managed `AGENTS.override.md` link. Uninstall restores
+that composition through a managed `AGENTS.override.md` copy. Uninstall restores
 the prior override, when one existed, and never replaces unrelated instructions.
 
-The active home also receives the worker and protocol-owned links:
+The active home also receives managed regular-file copies of the worker and
+protocol-owned resources:
 
 ```text
 $CODEX_HOME/agents/frontier_worker.toml
@@ -55,9 +56,9 @@ $CODEX_HOME/.delegation-protocol/hook_adapter.py
 $CODEX_HOME/.delegation-protocol/lifecycle.py
 ```
 
-The bulk worker is a managed regular-file copy because the Codex runtime requires
-no-follow loading for selected role files. The installer records its source
-revision and refreshes only an unmodified protocol-owned copy.
+The installer records source hashes for every managed copy and refreshes only
+an unmodified protocol-owned copy. Installed code runs independently of the
+source checkout; reinstall after changing the checkout to adopt those changes.
 
 The installer sets `agents.max_concurrent_threads_per_session = 1024` in
 `$CODEX_HOME/config.toml`. This bounded native open-thread capacity works
@@ -126,6 +127,6 @@ bash scripts/codex/uninstall.sh
 .\scripts\codex\uninstall.ps1
 ```
 
-Uninstall removes only protocol-owned hooks, links, state, and an unmodified
-managed worker copy. It restores preserved user configuration where recorded,
-keeps unrelated files, and never modifies Claude.
+Uninstall removes only unchanged protocol-owned handlers, copies, and state.
+It restores preserved user configuration where recorded, keeps unrelated files,
+and never modifies Claude.

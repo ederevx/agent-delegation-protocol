@@ -74,8 +74,57 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def leaf_digest(path: Path) -> str | None:
+    """Hash a leaf's identity without dereferencing a user symlink."""
+    if path.is_symlink():
+        return hashlib.sha256(
+            b"link\0" + os.fsencode(os.readlink(path))
+        ).hexdigest()
+    if path.is_file():
+        return digest(path)
+    return None
+
+
 def resource_digest(source: Path, kind: str) -> str:
     return digest(source)
+
+
+def _mode(path: Path) -> int:
+    return path.lstat().st_mode & 0o7777
+
+
+def capture_path(path: Path) -> tuple[str, bytes | str | None, int | None]:
+    """Capture a leaf without dereferencing a symlink for transaction rollback."""
+    if path.is_symlink():
+        return "link", os.readlink(path), _mode(path)
+    if path.is_file():
+        return "file", path.read_bytes(), _mode(path)
+    if path.exists():
+        raise SystemExit(f"unsafe protocol destination: {path}")
+    return "missing", None, None
+
+
+def restore_path(path: Path, saved: tuple[str, bytes | str | None, int | None]) -> None:
+    """Restore a captured leaf exactly, replacing links rather than following them."""
+    kind, value, mode = saved
+    if _present(path):
+        if path.is_dir() and not path.is_symlink():
+            raise SystemExit(f"cannot roll back unsafe directory: {path}")
+        path.unlink()
+    if kind == "link":
+        assert isinstance(value, str)
+        path.symlink_to(value)
+    elif kind == "file":
+        assert isinstance(value, bytes)
+        atomic_bytes(path, value)
+        assert mode is not None
+        os.chmod(path, mode)
+
+
+def atomic_copy(source: Path, destination: Path) -> None:
+    """Install a regular owned copy without ever opening a destination link."""
+    atomic_bytes(destination, source.read_bytes())
+    os.chmod(destination, _mode(source))
 
 
 def same_link(path: Path, source: Path) -> bool:
@@ -87,21 +136,6 @@ def same_link(path: Path, source: Path) -> bool:
     return _normalized_link_path(target, parent) == _normalized_link_path(
         expected, os.getcwd()
     )
-
-
-def create_symlink(destination: Path, source: Path) -> None:
-    """Create a managed link with actionable Windows privilege guidance."""
-    try:
-        destination.symlink_to(source, target_is_directory=source.is_dir())
-    except OSError as error:
-        if getattr(error, "winerror", None) == 1314:
-            raise SystemExit(
-                f"cannot create required symbolic link: {destination}. "
-                "Windows denied symbolic-link creation (WinError 1314). "
-                "Enable Developer Mode or rerun this installer from an "
-                "elevated PowerShell."
-            ) from None
-        raise
 
 
 def atomic_json(path: Path, value: dict[str, Any]) -> None:
@@ -159,26 +193,26 @@ def acquire_lock(state: Path) -> Path:
 def resources(repo: Path, home: Path, host: str) -> list[tuple[Path, Path, str]]:
     state = home / ".delegation-protocol"
     common = [
-        (repo / "scripts/agents/delegation-classifier.py", state / "delegation-classifier.py", "link"),
-        (repo / "scripts/hosts/hook_adapter.py", state / "hook_adapter.py", "link"),
-        (repo / "scripts/hosts/lifecycle.py", state / "lifecycle.py", "link"),
+        (repo / "scripts/agents/delegation-classifier.py", state / "delegation-classifier.py", "copy"),
+        (repo / "scripts/hosts/hook_adapter.py", state / "hook_adapter.py", "copy"),
+        (repo / "scripts/hosts/lifecycle.py", state / "lifecycle.py", "copy"),
     ]
     if host == "claude":
         return [
-            (repo / "claude/rules/delegation-protocol.md", home / "rules/delegation-protocol.md", "link"),
-            (repo / "claude/agents/frontier-worker.md", home / "agents/frontier-worker.md", "link"),
-            (repo / "claude/agents/balanced-worker.md", home / "agents/balanced-worker.md", "link"),
-            (repo / "claude/agents/bulk-worker.md", home / "agents/bulk-worker.md", "link"),
-            (repo / "claude/agents/quick-worker.md", home / "agents/quick-worker.md", "link"),
-            (repo / "claude/hooks/delegation-enforcer.py", home / "hooks/delegation-enforcer.py", "link"),
+            (repo / "claude/rules/delegation-protocol.md", home / "rules/delegation-protocol.md", "copy"),
+            (repo / "claude/agents/frontier-worker.md", home / "agents/frontier-worker.md", "copy"),
+            (repo / "claude/agents/balanced-worker.md", home / "agents/balanced-worker.md", "copy"),
+            (repo / "claude/agents/bulk-worker.md", home / "agents/bulk-worker.md", "copy"),
+            (repo / "claude/agents/quick-worker.md", home / "agents/quick-worker.md", "copy"),
+            (repo / "claude/hooks/delegation-enforcer.py", home / "hooks/delegation-enforcer.py", "copy"),
             *common,
         ]
     return [
-        (repo / "codex/agents/frontier_worker.toml", home / "agents/frontier_worker.toml", "link"),
-        (repo / "codex/agents/balanced-worker.toml", home / "agents/balanced-worker.toml", "link"),
+        (repo / "codex/agents/frontier_worker.toml", home / "agents/frontier_worker.toml", "copy"),
+        (repo / "codex/agents/balanced-worker.toml", home / "agents/balanced-worker.toml", "copy"),
         (repo / "codex/agents/bulk_worker.toml", home / "agents/bulk_worker.toml", "copy"),
-        (repo / "codex/agents/quick_worker.toml", home / "agents/quick_worker.toml", "link"),
-        (repo / "codex/hooks/delegation-enforcer.py", home / "hooks/delegation-enforcer.py", "link"),
+        (repo / "codex/agents/quick_worker.toml", home / "agents/quick_worker.toml", "copy"),
+        (repo / "codex/hooks/delegation-enforcer.py", home / "hooks/delegation-enforcer.py", "copy"),
         *common,
     ]
 
@@ -209,12 +243,20 @@ def prepare_codex_policy(
                 "direct", "composed"}:
             raise SystemExit("invalid Codex policy ownership metadata")
         if previous["mode"] == "direct":
-            if not same_link(agents, protocol):
+            installed = previous.get("installed_digest")
+            legacy_source = Path(previous.get("source", manifest.get("repo", ""))) / "codex/AGENTS.md"
+            if not (agents.is_file() and not agents.is_symlink() and installed and
+                    digest(agents) == installed) and not (
+                        not installed and same_link(agents, legacy_source)):
                 raise SystemExit(f"refusing modified Codex policy: {agents}")
         else:
             source_kind = previous.get("source")
+            override_digest = previous.get("override_digest")
+            owned_override = (override.is_file() and not override.is_symlink() and
+                              override_digest and digest(override) == override_digest)
             if (source_kind not in {"agents", "override"} or
-                    not same_link(override, composed) or
+                    not (owned_override or (not override_digest and
+                                            same_link(override, composed))) or
                     not composed.is_file() or not backup.is_file() or
                     (source_kind == "override") != _present(saved_override)):
                 raise SystemExit("refusing incomplete composed Codex policy state")
@@ -242,56 +284,44 @@ def install_codex_policy(
     saved_override = state / "original-AGENTS.override.md"
 
     if policy["mode"] == "direct":
-        created = not same_link(agents, protocol)
-        if created:
-            create_symlink(agents, protocol)
+        prior = capture_path(agents)
+        expected = digest(protocol)
+        try:
+            if not (agents.is_file() and not agents.is_symlink() and digest(agents) == expected):
+                atomic_copy(protocol, agents)
+        except BaseException:
+            restore_path(agents, prior)
+            raise
 
         def rollback_direct() -> None:
-            if created and same_link(agents, protocol):
-                agents.unlink(missing_ok=True)
+            restore_path(agents, prior)
 
-        return policy, rollback_direct
+        return {**policy, "installed_digest": expected, "source": str(repo)}, rollback_direct
 
     source_kind = policy["source"]
-    reinstall = same_link(override, composed)
-    prior_composed = composed.read_bytes() if reinstall else None
-    moved_override = False
+    prior = {path: capture_path(path) for path in (override, composed, backup, saved_override)}
+    reinstall = composed.is_file() and backup.is_file()
     try:
         if not reinstall:
             active = override if source_kind == "override" else agents
-            atomic_bytes(backup, active.read_bytes())
+            atomic_copy(active, backup)
         content = backup.read_bytes().rstrip(b"\n") + b"\n\n" + protocol.read_bytes()
         atomic_bytes(composed, content)
         if not reinstall and source_kind == "override":
             os.replace(override, saved_override)
-            moved_override = True
-        if not reinstall:
-            create_symlink(override, composed)
+        atomic_copy(composed, override)
     except BaseException:
-        if same_link(override, composed):
-            override.unlink(missing_ok=True)
-        if moved_override and _present(saved_override):
-            os.replace(saved_override, override)
-        if prior_composed is None:
-            composed.unlink(missing_ok=True)
-            backup.unlink(missing_ok=True)
-        else:
-            atomic_bytes(composed, prior_composed)
+        for path, saved in prior.items():
+            restore_path(path, saved)
         raise
 
     def rollback_composed() -> None:
-        if reinstall:
-            if prior_composed is not None:
-                atomic_bytes(composed, prior_composed)
-            return
-        if same_link(override, composed):
-            override.unlink(missing_ok=True)
-        if moved_override and _present(saved_override):
-            os.replace(saved_override, override)
-        composed.unlink(missing_ok=True)
-        backup.unlink(missing_ok=True)
+        for path, saved in prior.items():
+            restore_path(path, saved)
 
-    return policy, rollback_composed
+    return {**policy, "composed_digest": digest(composed),
+            "override_digest": digest(override), "backup_digest": digest(backup),
+            "saved_override_digest": leaf_digest(saved_override)}, rollback_composed
 
 
 def uninstall_codex_policy(home: Path, manifest: dict[str, Any]) -> None:
@@ -305,16 +335,25 @@ def uninstall_codex_policy(home: Path, manifest: dict[str, Any]) -> None:
     backup = state / "original-active-global.md"
     saved_override = state / "original-AGENTS.override.md"
     if policy.get("mode") == "direct":
-        source = Path(manifest["repo"]) / "codex/AGENTS.md"
-        if same_link(agents, source):
+        source = Path(policy.get("source", manifest["repo"])) / "codex/AGENTS.md"
+        if (agents.is_file() and not agents.is_symlink() and
+                digest(agents) == policy.get("installed_digest")) or (
+                    not policy.get("installed_digest") and same_link(agents, source)):
             agents.unlink(missing_ok=True)
         return
-    if same_link(override, composed):
+    if (override.is_file() and not override.is_symlink() and
+            digest(override) == policy.get("override_digest")) or (
+                not policy.get("override_digest") and same_link(override, composed)):
         override.unlink(missing_ok=True)
     if policy.get("source") == "override" and _present(saved_override):
         os.replace(saved_override, override)
-    composed.unlink(missing_ok=True)
-    backup.unlink(missing_ok=True)
+    if composed.is_file() and digest(composed) == policy.get("composed_digest"):
+        composed.unlink(missing_ok=True)
+    # A backup is installer-owned only after v3 recorded its regular-file hash.
+    # Older records and any modified replacement remain user data.
+    if (backup.is_file() and not backup.is_symlink() and
+            digest(backup) == policy.get("backup_digest")):
+        backup.unlink(missing_ok=True)
 
 
 def _split_lines(text: str) -> list[str]:
@@ -663,18 +702,46 @@ def validate_codex_uninstall(home: Path, manifest: dict[str, Any]) -> None:
     override = home / "AGENTS.override.md"
     composed = state / "AGENTS.composed.md"
     saved_override = state / "original-AGENTS.override.md"
-    if not same_link(override, composed):
+    owned_override = (
+        override.is_file() and not override.is_symlink() and
+        digest(override) == policy.get("override_digest")
+    )
+    if not owned_override and not (
+            not policy.get("override_digest") and same_link(override, composed)):
         raise SystemExit("refusing to overwrite a modified Codex override")
     if policy.get("source") == "override" and not _present(saved_override):
         raise SystemExit("refusing uninstall without the preserved Codex override")
+    saved_digest = policy.get("saved_override_digest")
+    if (policy.get("source") == "override" and saved_digest is not None and
+            leaf_digest(saved_override) != saved_digest):
+        raise SystemExit("refusing to overwrite a modified preserved Codex override")
 
 
-def validate_destination(source: Path, destination: Path, kind: str, owned: bool, recorded: str | None = None) -> None:
+def _legacy_resource_source(
+    manifest: dict[str, Any] | None, destination: Path,
+) -> tuple[Path, str] | None:
+    """Find the recorded v3 source; never guess a foreign link is ours."""
+    for item in (manifest or {}).get("resources", []):
+        if isinstance(item, dict) and item.get("destination") == str(destination):
+            source = item.get("source")
+            kind = item.get("kind")
+            if isinstance(source, str) and isinstance(kind, str):
+                return Path(source), kind
+    return None
+
+
+def validate_destination(source: Path, destination: Path, kind: str, owned: bool,
+                         recorded: str | None = None,
+                         legacy: tuple[Path, str] | None = None) -> None:
     if not destination.exists() and not destination.is_symlink():
         return
-    if kind == "link" and same_link(destination, source):
+    if (kind == "copy" and destination.is_file() and not destination.is_symlink()
+            and owned and recorded and digest(destination) == recorded):
         return
-    if kind == "copy" and destination.is_file() and owned and recorded and digest(destination) == recorded:
+    # v3 installed links.  They may be upgraded only when the manifest proves
+    # the exact target; an arbitrary link is never an owned destination.
+    if (kind == "copy" and owned and legacy is not None and legacy[1] == "link"
+            and same_link(destination, legacy[0])):
         return
     raise SystemExit(f"refusing to overwrite unowned destination: {destination}")
 
@@ -693,8 +760,13 @@ def prepare(repo: Path, home: Path, host: str, manifest: dict[str, Any] | None) 
     for source, destination, kind in result:
         if not source.exists():
             raise SystemExit(f"missing protocol source: {source}")
-        validate_destination(source, destination, kind, str(destination) in owned, hashes.get(str(destination)))
-    settings.load_json(home / ("settings.json" if host == "claude" else "hooks.json"))
+        validate_destination(
+            source, destination, kind, str(destination) in owned,
+            hashes.get(str(destination)),
+            _legacy_resource_source(manifest, destination),
+        )
+    settings_path = home / ("settings.json" if host == "claude" else "hooks.json")
+    settings.load_json(settings_path)
     return result
 
 
@@ -708,7 +780,7 @@ def install(repo: Path, home: Path, host: str) -> None:
     prepare(repo, home, host, previous)
     state.mkdir(parents=True, exist_ok=True)
     lock = acquire_lock(state)
-    changed: list[tuple[Path, bytes | None, bool]] = []
+    changed: list[tuple[Path, tuple[str, bytes | str | None, int | None]]] = []
     rollback_policy: Callable[[], None] = lambda: None
     settings_path = home / ("settings.json" if host == "claude" else "hooks.json")
     prior_settings = settings_path.read_bytes() if settings_path.exists() else None
@@ -735,18 +807,12 @@ def install(repo: Path, home: Path, host: str) -> None:
             directory.mkdir(parents=True, exist_ok=True)
         items = prepare(repo, home, host, previous)
         for source, destination, kind in items:
-            if kind == "link":
-                if same_link(destination, source):
-                    continue
-                changed.append((destination, None, destination.exists() or destination.is_symlink()))
-                create_symlink(destination, source)
-            else:
-                expected_digest = resource_digest(source, kind)
-                if destination.exists() and digest(destination) == expected_digest:
-                    continue
-                prior = destination.read_bytes() if destination.exists() else None
-                changed.append((destination, prior, prior is not None))
-                shutil.copy2(source, destination)
+            expected_digest = resource_digest(source, kind)
+            if (destination.is_file() and not destination.is_symlink() and
+                    digest(destination) == expected_digest):
+                continue
+            changed.append((destination, capture_path(destination)))
+            atomic_copy(source, destination)
         policy = None
         codex_config = None
         if host == "codex":
@@ -779,11 +845,8 @@ def install(repo: Path, home: Path, host: str) -> None:
         if codex_config_path is not None:
             _restore_codex_config(codex_config_path, prior_codex_config)
             _restore_codex_config(codex_config_backup, prior_codex_config_backup)
-        for destination, prior, existed in reversed(changed):
-            if destination.is_symlink() or destination.is_file():
-                destination.unlink(missing_ok=True)
-            if existed and prior is not None:
-                destination.write_bytes(prior)
+        for destination, prior in reversed(changed):
+            restore_path(destination, prior)
         if prior_settings is None:
             settings_path.unlink(missing_ok=True)
         else:
@@ -829,12 +892,12 @@ def uninstall(home: Path, host: str) -> None:
             path = Path(name)
             resource = resources_by_destination.get(name, {})
             source = Path(resource.get("source", ""))
-            owned_link = resource.get("kind") == "link" and same_link(path, source)
             owned_copy = (
-                resource.get("kind") == "copy" and path.is_file() and
+                path.is_file() and not path.is_symlink() and
                 digest(path) == manifest.get("hashes", {}).get(name)
             )
-            if owned_link or owned_copy:
+            legacy_link = (resource.get("kind") == "link" and same_link(path, source))
+            if legacy_link or owned_copy:
                 path.unlink(missing_ok=True)
         manifest_path.unlink(missing_ok=True)
         for backup in state.glob("*.before-first-install"):
