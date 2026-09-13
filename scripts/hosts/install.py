@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import ntpath
 import os
@@ -30,13 +29,13 @@ VERSION = 3
 
 # Codex caps concurrently open spawned-agent threads per session through an
 # `[agents]` table key (legacy alias `max_threads`, which we never write and
-# never remove).  The protocol pins it to the same shared active-worker cap the
-# classifier advertises so one number governs both halves.
+# never remove).  This is deliberately separate from the hook's active-worker
+# cap: Codex retains idle threads on hosts without a close operation.
 CODEX_CONCURRENCY_TABLE = "agents"
 CODEX_CONCURRENCY_KEY = "max_concurrent_threads_per_session"
 CODEX_LEGACY_CONCURRENCY_KEY = "max_threads"
 CODEX_CONFIG_BACKUP = "config.toml.before-first-install"
-DEFAULT_ACTIVE_WORKERS = 10
+CODEX_OPEN_THREAD_CAPACITY = 1024
 
 
 def _strip_windows_extended_prefix(value: str) -> str:
@@ -318,29 +317,6 @@ def uninstall_codex_policy(home: Path, manifest: dict[str, Any]) -> None:
     backup.unlink(missing_ok=True)
 
 
-def active_worker_cap() -> int:
-    """Return the shared active-worker cap published by the classifier.
-
-    The classifier is the single source of the number; this loader stays
-    defensive so a host installation never fails merely because the constant
-    moved or the module could not be executed here.
-    """
-    path = Path(__file__).resolve().parents[1] / "agents" / "delegation-classifier.py"
-    try:
-        specification = importlib.util.spec_from_file_location(
-            "protocol_active_worker_cap", path
-        )
-        if specification and specification.loader:
-            module = importlib.util.module_from_spec(specification)
-            specification.loader.exec_module(module)
-            value = getattr(module, "MAX_ACTIVE_WORKERS", None)
-            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-                return value
-    except Exception:
-        pass
-    return DEFAULT_ACTIVE_WORKERS
-
-
 def _split_lines(text: str) -> list[str]:
     """Split on newlines only, keeping every byte (including CR) in place."""
     return re.findall(r"[^\n]*\n|[^\n]+", text)
@@ -554,7 +530,7 @@ def _codex_config_path(home: Path) -> Path:
 def install_codex_concurrency(
     home: Path, cap: int, manifest: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Pin Codex's per-session subagent concurrency to the protocol cap."""
+    """Set Codex's native open-thread capacity."""
     config = _codex_config_path(home)
     backup = home / ".delegation-protocol" / CODEX_CONFIG_BACKUP
     key = CODEX_CONCURRENCY_KEY
@@ -778,7 +754,7 @@ def install(repo: Path, home: Path, host: str) -> None:
                 repo, home, prepare_codex_policy(repo, home, previous)
             )
             codex_config = install_codex_concurrency(
-                home, active_worker_cap(), previous
+                home, CODEX_OPEN_THREAD_CAPACITY, previous
             )
         settings.install(
             host,

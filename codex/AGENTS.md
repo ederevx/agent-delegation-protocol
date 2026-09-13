@@ -111,10 +111,11 @@ native start until its native stop, plus spawns admitted but not yet
 started. Idle workers do not count, including one that has finished and is
 held or resumable; it counts again only while a resume is running.
 
-Codex's native `agents.max_concurrent_threads_per_session` limit counts every
-open thread, idle ones included, and releases a slot only on explicit close or
-session end, so close finished threads you will not resume to keep idle
-threads from consuming native slots.
+Codex's native `agents.max_concurrent_threads_per_session` setting allows a
+bounded 1024 open threads because it counts idle threads until the host closes
+them or the session ends. The hook independently keeps its 10-worker active
+guard. When the host exposes a supported close operation, close finished
+threads you will not resume; otherwise, do not invent lifecycle calls.
 
 The common `ROUTING_POLICY` supplies generated worker instructions and context
 injected at `UserPromptSubmit` and `SubagentStart`. All tiers retain their

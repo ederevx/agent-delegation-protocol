@@ -2,7 +2,9 @@
 """Disposable-home tests for the manifest ownership primitive."""
 from __future__ import annotations
 
+import hashlib
 import json
+import runpy
 import tempfile
 from pathlib import Path, PureWindowsPath
 from unittest.mock import patch
@@ -165,15 +167,19 @@ def codex_config_value(home: Path) -> object:
     return data.get("agents", {}).get(install.CODEX_CONCURRENCY_KEY)
 
 
-def test_codex_concurrency_cap() -> None:
-    """The Codex host pins native subagent concurrency to the protocol cap.
+def test_codex_open_thread_capacity() -> None:
+    """The Codex host writes its independent native thread capacity.
 
     The installer owns exactly one `[agents]` assignment in `config.toml`,
     preserves every other line, and undoes only what it recorded.
     """
-    cap = install.active_worker_cap()
+    cap = install.CODEX_OPEN_THREAD_CAPACITY
     key = install.CODEX_CONCURRENCY_KEY
-    assert isinstance(cap, int) and cap > 0
+    classifier = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "agents" / "delegation-classifier.py")
+    )
+    assert cap == 1024
+    assert classifier["MAX_ACTIVE_WORKERS"] == 10
 
     with tempfile.TemporaryDirectory(prefix="adp-codex-config-") as raw:
         root = Path(raw)
@@ -298,7 +304,7 @@ def test_codex_config_edit_is_verified_semantically() -> None:
     place, so the parsed configuration minus the managed key must be
     unchanged.
     """
-    cap = install.active_worker_cap()
+    cap = install.CODEX_OPEN_THREAD_CAPACITY
     key = install.CODEX_CONCURRENCY_KEY
     with tempfile.TemporaryDirectory(prefix="adp-codex-verify-") as raw:
         root = Path(raw)
@@ -332,7 +338,7 @@ def test_codex_config_reinstall_keeps_user_edits() -> None:
     digest must not be refreshed over a file the user has since changed --
     otherwise uninstall would reinstate pre-install bytes on top of edits.
     """
-    cap = install.active_worker_cap()
+    cap = install.CODEX_OPEN_THREAD_CAPACITY
     key = install.CODEX_CONCURRENCY_KEY
     with tempfile.TemporaryDirectory(prefix="adp-codex-reinstall-") as raw:
         root = Path(raw)
@@ -366,7 +372,7 @@ def test_codex_config_is_restored_byte_for_byte() -> None:
     user content: the installer records the pre-install bytes and restores
     them verbatim rather than re-serializing the file.
     """
-    cap = install.active_worker_cap()
+    cap = install.CODEX_OPEN_THREAD_CAPACITY
     key = install.CODEX_CONCURRENCY_KEY
     decoy = (
         "[profiles.review]\n"
@@ -412,12 +418,59 @@ def test_codex_config_is_restored_byte_for_byte() -> None:
             assert not backup.exists(), name
 
 
+def test_codex_thread_capacity_upgrade_preserves_original_restore() -> None:
+    """An old 10-thread install upgrades without taking ownership of 10.
+
+    The previous installer tied this setting to the active-worker cap.  Its
+    manifest must retain the user's original value when this version writes
+    the larger open-thread capacity, so an untouched uninstall is exact.
+    """
+    legacy_cap = 10
+    capacity = install.CODEX_OPEN_THREAD_CAPACITY
+    key = install.CODEX_CONCURRENCY_KEY
+    assert capacity == 1024
+    with tempfile.TemporaryDirectory(prefix="adp-codex-capacity-upgrade-") as raw:
+        root = Path(raw)
+        repo = fixture(root)
+        home = root / "codex-upgrade"
+        home.mkdir()
+        config = home / "config.toml"
+        original = f"[agents]\n{key} = 4\nmax_threads = 3\n".encode("utf-8")
+        config.write_bytes(original)
+        install.install(repo, home, "codex")
+
+        # Model the v1.15 installer state: it wrote 10, while its manifest
+        # and backup still describe the user's original setting.
+        legacy = f"[agents]\n{key} = {legacy_cap}\nmax_threads = 3\n".encode("utf-8")
+        config.write_bytes(legacy)
+        manifest_path = home / ".delegation-protocol/manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        record = manifest["codex_config"]
+        record["value"] = legacy_cap
+        record["previous"] = 4
+        record["previous_line"] = f"{key} = 4\n"
+        record["installed_digest"] = hashlib.sha256(legacy).hexdigest()
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        install.install(repo, home, "codex")
+        manifest = json.loads(manifest_path.read_text())
+        record = manifest["codex_config"]
+        assert codex_config_value(home) == capacity
+        assert record["value"] == capacity
+        assert record["previous"] == 4
+        assert record["previous_line"] == f"{key} = 4\n"
+        assert "max_threads = 3\n" in config.read_text(encoding="utf-8")
+        install.uninstall(home, "codex")
+        assert config.read_bytes() == original
+
+
 def main() -> None:
     test_explicit_authorization_is_single_use()
-    test_codex_concurrency_cap()
+    test_codex_open_thread_capacity()
     test_codex_config_edit_is_verified_semantically()
     test_codex_config_reinstall_keeps_user_edits()
     test_codex_config_is_restored_byte_for_byte()
+    test_codex_thread_capacity_upgrade_preserves_original_restore()
     test_same_link_paths()
     test_windows_symlink_privilege_error()
     test_other_symlink_errors_are_not_relabelled()
