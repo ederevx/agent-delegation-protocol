@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import runpy
 import tempfile
+from functools import wraps
 from pathlib import Path, PureWindowsPath
 from unittest.mock import patch
 
@@ -27,6 +29,31 @@ class FakeWindowsLink:
 
     def __fspath__(self) -> str:
         return str(self._path)
+
+
+class SymlinkFixtureUnavailable(Exception):
+    """The current Windows account cannot construct a legacy-link fixture."""
+
+
+def fixture_symlink_to(destination: Path, source: Path) -> None:
+    """Create a test-only link, skipping only for Windows privilege denial."""
+    try:
+        destination.symlink_to(source)
+    except OSError as error:
+        if os.name == "nt" and getattr(error, "winerror", None) == 1314:
+            raise SymlinkFixtureUnavailable from error
+        raise
+
+
+def requires_symlink_fixture(test):
+    """Keep legacy-link assertions active whenever the fixture is available."""
+    @wraps(test)
+    def wrapped() -> None:
+        try:
+            test()
+        except SymlinkFixtureUnavailable:
+            print(f"{test.__name__}: SKIP (Windows symlink privilege unavailable)")
+    return wrapped
 
 
 def fixture(root: Path) -> Path:
@@ -505,6 +532,7 @@ def test_fresh_copy_install_and_managed_refresh() -> None:
             ).hexdigest()
 
 
+@requires_symlink_fixture
 def test_legacy_v116_links_migrate_from_a_different_checkout() -> None:
     """A v1.16 link manifest may migrate only when each old target is exact."""
     with tempfile.TemporaryDirectory(prefix="adp-copy-legacy-") as raw:
@@ -525,7 +553,7 @@ def test_legacy_v116_links_migrate_from_a_different_checkout() -> None:
         old_resources = install.resources(old_repo, home, "codex")
         for source, destination, _ in old_resources:
             destination.unlink()
-            destination.symlink_to(source)
+            fixture_symlink_to(destination, source)
         legacy["resources"] = [
             {"source": str(source), "destination": str(destination), "kind": "link"}
             for source, destination, _ in old_resources
@@ -557,7 +585,7 @@ def test_legacy_v116_links_migrate_from_a_different_checkout() -> None:
         migrated_destination.unlink()
         # The old checkout has identical bytes, but its link is no longer an
         # owned v3 resource after migration and must not be followed.
-        migrated_destination.symlink_to(old_source)
+        fixture_symlink_to(migrated_destination, old_source)
         try:
             install.install(repo, home, "codex")
         except SystemExit as error:
@@ -571,6 +599,7 @@ def test_legacy_v116_links_migrate_from_a_different_checkout() -> None:
         assert (home / "config.toml").read_bytes() == original_config
 
 
+@requires_symlink_fixture
 def test_refuses_foreign_copies_and_foreign_symlinks() -> None:
     """Ownership never follows altered bytes or an attacker-replaced link."""
     with tempfile.TemporaryDirectory(prefix="adp-copy-foreign-") as raw:
@@ -592,7 +621,7 @@ def test_refuses_foreign_copies_and_foreign_symlinks() -> None:
             # A link to identical data is still a foreign path.  Byte equality
             # must never turn a replacement symlink into an owned copy.
             foreign.write_bytes(Path(item["source"]).read_bytes())
-            destination.symlink_to(foreign)
+            fixture_symlink_to(destination, foreign)
             try:
                 install.install(repo, home, host)
             except SystemExit as error:
@@ -601,6 +630,7 @@ def test_refuses_foreign_copies_and_foreign_symlinks() -> None:
                 raise AssertionError("foreign symlink was overwritten")
 
 
+@requires_symlink_fixture
 def test_reinstall_refuses_former_policy_links() -> None:
     """Managed policy copies cannot be replaced by legacy-style links."""
     with tempfile.TemporaryDirectory(prefix="adp-copy-policy-links-") as raw:
@@ -612,7 +642,7 @@ def test_reinstall_refuses_former_policy_links() -> None:
         install.install(repo, direct, "codex")
         agents = direct / "AGENTS.md"
         agents.unlink()
-        agents.symlink_to(repo / "codex/AGENTS.md")
+        fixture_symlink_to(agents, repo / "codex/AGENTS.md")
         try:
             install.install(repo, direct, "codex")
         except SystemExit as error:
@@ -628,7 +658,9 @@ def test_reinstall_refuses_former_policy_links() -> None:
         install.install(repo, composed, "codex")
         override = composed / "AGENTS.override.md"
         override.unlink()
-        override.symlink_to(composed / ".delegation-protocol/AGENTS.composed.md")
+        fixture_symlink_to(
+            override, composed / ".delegation-protocol/AGENTS.composed.md"
+        )
         try:
             install.install(repo, composed, "codex")
         except SystemExit as error:
@@ -697,6 +729,7 @@ def test_uninstall_keeps_changed_assets_and_restores_user_state() -> None:
         assert (home / "config.toml").read_bytes() == original_config
 
 
+@requires_symlink_fixture
 def test_late_failure_restores_legacy_links_and_exact_bytes() -> None:
     """Migration failures restore the old link tree and all prior metadata."""
     with tempfile.TemporaryDirectory(prefix="adp-copy-rollback-") as raw:
@@ -707,7 +740,7 @@ def test_late_failure_restores_legacy_links_and_exact_bytes() -> None:
         old_resources = install.resources(old_repo, home, "claude")
         for source, destination, _ in old_resources:
             destination.unlink()
-            destination.symlink_to(source)
+            fixture_symlink_to(destination, source)
         legacy["resources"] = [
             {"source": str(source), "destination": str(destination), "kind": "link"}
             for source, destination, _ in old_resources
