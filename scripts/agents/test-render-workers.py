@@ -22,6 +22,10 @@ def profile(tier: str, host: str = "claude") -> dict:
     return json.loads((ROOT / f"agents/{tier}-worker-profiles.json").read_text())["profiles"][host]
 
 
+def profile_document(tier: str) -> dict:
+    return json.loads((ROOT / f"agents/{tier}-worker-profiles.json").read_text())
+
+
 class WorkerRenderingTests(unittest.TestCase):
     def test_native_and_advisory_budgets_use_common_policy(self):
         expected = {"quick": 128, "bulk": 64, "balanced": 32, "frontier": 16}
@@ -42,16 +46,40 @@ class WorkerRenderingTests(unittest.TestCase):
                         self.assertIn(f"Advisory agentic-turn budget: {limit}", text)
                         self.assertIn(f"hard budget of {limit} PreToolUse tool-call attempts", text)
 
-    def test_execution_tiers_keep_execution_and_quick_cannot_delegate(self):
+    def test_all_tiers_inherit_host_tool_access_without_scope_contracts(self):
+        outputs = renderer.rendered_outputs()
         for tier in ("frontier", "balanced", "bulk", "quick"):
-            output = profile(tier)["output"]
-            text = renderer.render_claude("body", "description", output)
-            self.assertIn("Write, Edit, Bash", text)
-        for delegation_tool in ("Agent", "Task", "functions.spawn_agent"):
-            output = copy.deepcopy(profile("quick")["output"])
-            output["tools"].append(delegation_tool)
-            with self.subTest(tool=delegation_tool), self.assertRaisesRegex(ValueError, "delegation tool"):
-                renderer.render_claude("body", "description", output)
+            source = profile_document(tier)
+            self.assertNotIn("scope_contract", source)
+            for host in ("claude", "codex"):
+                with self.subTest(tier=tier, host=host):
+                    output = source["profiles"][host]["output"]
+                    self.assertNotIn("tools", output)
+                    self.assertNotIn("disallowedTools", output)
+                    text = outputs[ROOT / output["path"]]
+                    self.assertNotIn("## Scope", text)
+                    if host == "claude":
+                        self.assertNotIn("tools:", text)
+                        self.assertNotIn("disallowedTools:", text)
+                    else:
+                        self.assertNotIn("tools", tomllib.loads(text))
+
+    def test_tier_models_and_efforts_remain_configured(self):
+        expected = {
+            "quick": {"claude": ("haiku", "low"), "codex": ("gpt-5.6-luna", "low")},
+            "bulk": {"claude": ("sonnet", "medium"), "codex": ("gpt-5.6-terra", "medium")},
+            "balanced": {"claude": ("opus", "high"), "codex": ("gpt-5.6-sol", "high")},
+            "frontier": {"claude": ("fable", "xhigh"), "codex": ("gpt-6-astra", "xhigh")},
+        }
+        for tier, hosts in expected.items():
+            for host, (model, effort) in hosts.items():
+                with self.subTest(tier=tier, host=host):
+                    output = profile(tier, host)["output"]
+                    self.assertEqual(output["model"], model)
+                    self.assertEqual(
+                        output["effort"] if host == "claude" else output["reasoning_effort"],
+                        effort,
+                    )
 
     def test_unknown_roles_fail_for_both_hosts(self):
         for host, render in (("claude", renderer.render_claude), ("codex", renderer.render_codex)):
@@ -72,10 +100,6 @@ class WorkerRenderingTests(unittest.TestCase):
                 self.assertNotIn("Do not edit files", generated)
                 self.assertNotIn("analysis and lower-tier delegation only", generated)
                 self.assertNotIn("matched native balanced-worker completion", generated)
-                if "frontier" in path.name:
-                    self.assertIn("Analyze, implement, run commands and tests", generated)
-                if "balanced" in path.name:
-                    self.assertIn("Prefer analysis", generated)
 
 
 if __name__ == "__main__":

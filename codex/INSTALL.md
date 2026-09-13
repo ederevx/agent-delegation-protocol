@@ -60,6 +60,11 @@ The installer records source hashes for every managed copy and refreshes only
 an unmodified protocol-owned copy. Installed code runs independently of the
 source checkout; reinstall after changing the checkout to adopt those changes.
 
+Each worker inherits the parent Codex host's tool access, including configured
+MCP tools. The profiles apply no tier-specific tool allowlists or task scope
+blocks. Codex permissions and hooks still govern individual calls, and the
+protocol retains ownership boundaries and strict downward worker recursion.
+
 The installer sets `agents.max_concurrent_threads_per_session = 1024` in
 `$CODEX_HOME/config.toml`. This bounded native open-thread capacity works
 around hosts that retain idle threads but do not provide a close tool. It is

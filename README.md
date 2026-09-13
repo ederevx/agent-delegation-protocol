@@ -6,6 +6,12 @@ final validation. All tiers can analyze and execute with their normal tools,
 subject to workload delegation rules and worker budgets. ADP has no scheduler,
 provider catalog, or transport of its own.
 
+Every worker inherits the parent host's tool access, including configured MCP
+tools; profiles do not impose tier-specific tool allowlists or task scope
+blocks. Host permissions and hooks still govern individual calls, while the
+protocol's ownership boundaries and strict downward recursion rules still
+govern delegation.
+
 This is a clean break from the earlier scheduler-based generation of this
 protocol. It has no compatibility runtime, request-file transport, managed
 deployment, or in-place state migration from that generation.

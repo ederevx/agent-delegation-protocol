@@ -57,6 +57,11 @@ taking over parent architecture or integration. All four are ordinary native
 subagents; the protocol observes their lifecycle, it does not launch or route
 them.
 
+Each worker inherits the parent Claude host's tool access, including configured
+MCP tools. The profiles apply no tier-specific tool allowlists or task scope
+blocks. Claude permissions and hooks still govern individual calls, and the
+protocol retains ownership boundaries and strict downward worker recursion.
+
 The installer records source hashes for every managed copy and refreshes only an
 unmodified protocol-owned copy. Installed code runs independently of the source
 checkout; reinstall after changing the checkout to adopt those changes.

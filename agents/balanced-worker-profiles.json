@@ -13,25 +13,8 @@
         "format": "claude-markdown",
         "name": "balanced-worker",
         "model": "opus",
-        "effort": "high",
-        "tools": [
-          "Read",
-          "Write",
-          "Edit",
-          "Bash",
-          "Grep",
-          "Glob",
-          "WebFetch",
-          "WebSearch",
-          "NotebookEdit",
-          "SendMessage",
-          "Agent"
-        ]
-      },
-      "scope_contract": [
-        "Prefer analysis, diagnosis, task decomposition, and evidence review. This tier can perform both routine execution and difficult reasoning within its assigned scope. Delegate routine work to bulk or quick when that uses less compute; execute directly when appropriate. Ask the parent for a higher tier only when the reasoning requires it.",
-        "Delegate bounded subtasks downward whenever a lower tier can handle them; spawn only bulk-worker or quick-worker (bulk_worker or quick_worker on Codex). Give each child exclusive ownership, acceptance criteria, validation commands, and an evidence report requirement."
-      ]
+        "effort": "high"
+      }
     },
     "codex": {
       "host_name": "Codex",
@@ -45,11 +28,7 @@
         "name": "balanced_worker",
         "model": "gpt-5.6-sol",
         "reasoning_effort": "high"
-      },
-      "scope_contract": [
-        "Prefer analysis, diagnosis, task decomposition, and evidence review. This tier can perform both routine execution and difficult reasoning within its assigned scope. Delegate routine work to bulk or quick when that uses less compute; execute directly when appropriate. Ask the parent for a higher tier only when the reasoning requires it.",
-        "Delegate bounded subtasks downward whenever a lower tier can handle them; spawn only bulk-worker or quick-worker (bulk_worker or quick_worker on Codex). Give each child exclusive ownership, acceptance criteria, validation commands, and an evidence report requirement."
-      ]
+      }
     }
   }
 }
