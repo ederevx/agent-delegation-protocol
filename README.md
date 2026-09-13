@@ -6,6 +6,12 @@ final validation. All tiers can analyze and execute with their normal tools,
 subject to workload delegation rules and worker budgets. ADP has no scheduler,
 provider catalog, or transport of its own.
 
+Every worker inherits the parent host's tool access, including configured MCP
+tools; profiles do not impose tier-specific tool allowlists or task scope
+blocks. Host permissions and hooks still govern individual calls, while the
+protocol's ownership boundaries and strict downward recursion rules still
+govern delegation.
+
 This is a clean break from the earlier scheduler-based generation of this
 protocol. It has no compatibility runtime, request-file transport, managed
 deployment, or in-place state migration from that generation.
@@ -146,8 +152,22 @@ bash scripts/claude/install.sh
 Use the corresponding `.ps1` wrapper on Windows. The shared installer
 preflights every source, destination, manifest, and host JSON file before
 mutation. It uses a lock, atomic settings writes, rollback, and a complete
-ownership manifest. Uninstall removes only unchanged protocol-owned resources
-and preserves unrelated configuration.
+ownership manifest. Every installed protocol resource is a managed regular-file
+copy, so fresh installs do not require Windows symbolic-link privileges. An
+existing legacy protocol symlink is migrated transactionally; restoring it
+after a failed upgrade may still require symbolic-link support. The installer
+records source hashes and refreshes only unchanged managed copies. Uninstall
+removes only unchanged protocol-owned resources, restores recorded backups, and
+preserves unrelated configuration. Reinstall after changing the source
+checkout is required to adopt those changes; restart the host afterward so
+worker discovery sees the installed profiles.
+
+Hook state uses OS advisory locks, released when a hook process exits. Before
+upgrading from directory locks, stop the sessions and workers using the target
+home and let their hook processes exit; install, then start fresh sessions.
+The two lock formats do not interoperate. Ledger contents are preserved, and
+legacy lock directories remain intact for separate recovery. A legacy lock
+still blocks its affected session or worker identity with a diagnostic.
 
 Codex uses `session_release`; a completed worker never creates an impossible
 dismissal warning. Claude uses `automatic_release`; a foreground result clears

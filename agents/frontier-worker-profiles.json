@@ -13,25 +13,8 @@
         "format": "claude-markdown",
         "name": "frontier-worker",
         "model": "fable",
-        "effort": "xhigh",
-        "tools": [
-          "Read",
-          "Write",
-          "Edit",
-          "Bash",
-          "Grep",
-          "Glob",
-          "WebFetch",
-          "WebSearch",
-          "NotebookEdit",
-          "SendMessage",
-          "Agent"
-        ]
-      },
-      "scope_contract": [
-        "Use this highest-cost tier for difficult work only when lower tiers are insufficient. Analyze, implement, run commands and tests, or delegate as needed within the assigned scope. Prefer bulk or quick for routine execution and balanced for analytical subproblems when they are adequate.",
-        "Delegate bounded subtasks downward whenever a lower tier can handle them; spawn only balanced-worker, bulk-worker, or quick-worker (underscore names on Codex). Give each child exclusive ownership, acceptance criteria, validation commands, and an evidence report requirement."
-      ]
+        "effort": "xhigh"
+      }
     },
     "codex": {
       "host_name": "Codex",
@@ -45,11 +28,7 @@
         "name": "frontier_worker",
         "model": "gpt-6-astra",
         "reasoning_effort": "xhigh"
-      },
-      "scope_contract": [
-        "Use this highest-cost tier for difficult work only when lower tiers are insufficient. Analyze, implement, run commands and tests, or delegate as needed within the assigned scope. Prefer bulk or quick for routine execution and balanced for analytical subproblems when they are adequate.",
-        "Delegate bounded subtasks downward whenever a lower tier can handle them; spawn only balanced-worker, bulk-worker, or quick-worker (underscore names on Codex). Give each child exclusive ownership, acceptance criteria, validation commands, and an evidence report requirement."
-      ]
+      }
     }
   }
 }

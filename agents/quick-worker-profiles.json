@@ -5,10 +5,6 @@
     "claude": {
       "host_name": "Claude",
       "parent_channel": "`SendMessage` (use `ListAgents` to identify the parent)",
-      "scope_contract": [
-        "Prefer trivial, mechanical, single-step work: a well-specified edit, direct lookup, formatting, or command. Analyze and execute the assigned work with the least adequate effort. Report material ambiguity or a need for broader decomposition to the parent.",
-        "Do not spawn subagents. Ask the parent to reassign work that needs another tier."
-      ],
       "conflict_contract": [
         "Use the same parent escalation path for an operation outside the assigned ownership; a single-use permission never becomes a standing grant."
       ],
@@ -20,28 +16,12 @@
         "format": "claude-markdown",
         "name": "quick-worker",
         "model": "haiku",
-        "effort": "low",
-        "tools": [
-          "Read",
-          "Write",
-          "Edit",
-          "Bash",
-          "Grep",
-          "Glob",
-          "WebFetch",
-          "WebSearch",
-          "NotebookEdit",
-          "SendMessage"
-        ]
+        "effort": "low"
       }
     },
     "codex": {
       "host_name": "Codex",
       "parent_channel": "the collaboration channel available to the worker",
-      "scope_contract": [
-        "Prefer trivial, mechanical, single-step work: a well-specified edit, direct lookup, formatting, or command. Analyze and execute the assigned work with the least adequate effort. Report material ambiguity or a need for broader decomposition to the parent.",
-        "Do not spawn subagents. Ask the parent to reassign work that needs another tier."
-      ],
       "conflict_contract": [
         "If no parent channel is available, stop and report instead of guessing."
       ],

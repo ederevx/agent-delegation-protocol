@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import errno
 import tempfile
 import time
 from contextlib import contextmanager
@@ -82,25 +83,62 @@ def _paths(home: Path, session: str) -> tuple[Path, Path]:
     return root / f"{key}.json", root / f"{key}.lock"
 
 
+class LegacyLockLayoutError(OSError):
+    """A directory lock cannot safely interoperate with advisory locking."""
+
+
 @contextmanager
 def _locked(lock: Path) -> Iterator[None]:
-    lock.parent.mkdir(parents=True, exist_ok=True)
+    """Hold a crash-released advisory lock for a protocol state file.
+
+    ``lock`` remains the legacy directory-lock path solely to reject an
+    un-migrated layout. Advisory locking is adopted only after a quiescent
+    host restart, so old and new hook invocations cannot overlap.
+    """
+    if lock.exists():
+        raise LegacyLockLayoutError(
+            "legacy protocol lock layout detected; quiescently restart the "
+            "host and resolve the legacy lock before adopting advisory locks"
+        )
+    advisory = lock.parent / "advisory-locks" / lock.name
+    advisory.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + 2
-    while True:
+    with advisory.open("a+b") as handle:
+        if advisory.stat().st_size == 0:
+            handle.write(b"\0")
+            handle.flush()
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("protocol hook state is busy")
+                time.sleep(0.01)
+            except OSError as error:
+                # CPython's msvcrt wrapper raises from the C runtime errno;
+                # `_locking(..., LK_NBLCK, ...)` uses EACCES for contention.
+                if os.name != "nt" or error.errno != errno.EACCES:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("protocol hook state is busy")
+                time.sleep(0.01)
         try:
-            lock.mkdir()
-            break
-        except FileExistsError:
-            if time.monotonic() >= deadline:
-                raise TimeoutError("protocol hook state is busy")
-            time.sleep(0.01)
-    try:
-        yield
-    finally:
-        try:
-            lock.rmdir()
-        except OSError:
-            pass
+            yield
+        finally:
+            if os.name == "nt":
+                import msvcrt
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _load(path: Path, mode: str) -> dict[str, Any]:
@@ -594,10 +632,14 @@ def _worker_tool_budget(home: Path, payload: dict[str, Any],
                         classifier: Any, *, charge: bool = True) -> dict[str, Any] | None:
     try:
         return _worker_tool_budget_locked(home, payload, classifier, charge=charge)
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError) as error:
         # Hook exceptions can be treated as non-blocking by the host. Return
         # an explicit decision when persistence or lock acquisition fails.
-        return _deny("Worker tool-call budget could not be verified or saved; report the ledger/lock error to the parent without further tool calls.")
+        return _deny(
+            "Worker tool-call budget could not be verified or saved; "
+            f"{error}. Report the ledger/lock error to the parent without "
+            "further tool calls."
+        )
 
 
 def _worker_tool_budget_locked(home: Path, payload: dict[str, Any],
@@ -651,6 +693,18 @@ def _worker_tool_budget_locked(home: Path, payload: dict[str, Any],
     return None
 
 
+def _state_error(event: str, error: Exception) -> dict[str, Any]:
+    reason = (
+        "Protocol state could not be verified or saved; "
+        f"{error}. Report this to the parent without further tool calls."
+    )
+    if event == "pre-mutation":
+        return _deny(reason)
+    if event == "turn-stop":
+        return {"decision": "block", "reason": reason}
+    return {"systemMessage": reason}
+
+
 def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     """Apply one normalized hook event and return host-compatible feedback."""
     if host not in {"claude", "codex"} or not isinstance(payload, dict):
@@ -691,11 +745,11 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
                             _save(path, parent_state)
                         elif _record_denied_spawn(parent_state, payload):
                             _save(path, parent_state)
-                except (OSError, ValueError):
+                except (OSError, ValueError) as error:
                     return _deny(
                         "Active worker ledger could not be read or updated to "
-                        "verify the concurrent-worker cap; report this to the "
-                        "parent instead of spawning another worker."
+                        f"verify the concurrent-worker cap; {error}. Report "
+                        "this to the parent instead of spawning another worker."
                     )
             return _deny(reason) if reason else None
         return None
@@ -703,12 +757,15 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         return None
     path, lock = _paths(home, session)
     mode = _release_mode(home)
-    with _locked(lock):
-        state = _load(path, mode)
-        handler = TurnEventHandler(host, classifier, mode, state)
-        try:
-            output = handler.handle(event, payload)
-        except _SkipSave:
-            return None
-        _save(path, state)
-        return output
+    try:
+        with _locked(lock):
+            state = _load(path, mode)
+            handler = TurnEventHandler(host, classifier, mode, state)
+            try:
+                output = handler.handle(event, payload)
+            except _SkipSave:
+                return None
+            _save(path, state)
+            return output
+    except (OSError, ValueError, TypeError) as error:
+        return _state_error(event, error)

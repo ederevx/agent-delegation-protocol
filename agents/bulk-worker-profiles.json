@@ -5,10 +5,6 @@
     "claude": {
       "host_name": "Claude",
       "parent_channel": "`SendMessage` (use `ListAgents` to identify the parent)",
-      "scope_contract": [
-        "Prefer routine bounded implementation, commands, tests, extraction, and repetitive processing that need little interpretation. Analyze and execute the assigned work, preserve relevant information, and report concrete evidence. Ask the parent to reassign work when greater reasoning is needed.",
-        "Delegate bounded subtasks downward whenever a lower tier can handle them; spawn only quick-worker (quick_worker on Codex) for an independent trivial step. Return architecture, integration, and final acceptance judgment to the parent."
-      ],
       "conflict_contract": [
         "Use the same parent escalation path for an operation outside the assigned ownership; a single-use permission never becomes a standing grant."
       ],
@@ -20,29 +16,12 @@
         "format": "claude-markdown",
         "name": "bulk-worker",
         "model": "sonnet",
-        "effort": "medium",
-        "tools": [
-          "Read",
-          "Write",
-          "Edit",
-          "Bash",
-          "Grep",
-          "Glob",
-          "WebFetch",
-          "WebSearch",
-          "NotebookEdit",
-          "SendMessage",
-          "Agent"
-        ]
+        "effort": "medium"
       }
     },
     "codex": {
       "host_name": "Codex",
       "parent_channel": "the collaboration channel available to the worker",
-      "scope_contract": [
-        "Prefer routine bounded implementation, commands, tests, extraction, and repetitive processing that need little interpretation. Analyze and execute the assigned work, preserve relevant information, and report concrete evidence. Ask the parent to reassign work when greater reasoning is needed.",
-        "Delegate bounded subtasks downward whenever a lower tier can handle them; spawn only quick-worker (quick_worker on Codex) for an independent trivial step. Return architecture, integration, and final acceptance judgment to the parent."
-      ],
       "conflict_contract": [
         "If no parent channel is available, stop and report instead of guessing."
       ],

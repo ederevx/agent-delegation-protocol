@@ -22,10 +22,11 @@ bash scripts/claude/install.sh
 .\scripts\claude\install.ps1
 ```
 
-Python 3.11 or newer is required for the local hook and protocol client. Native
-Windows also requires symbolic-link support through Developer Mode or an
-elevated PowerShell. If Windows denies link creation, the installer stops
-transactionally and reports how to satisfy that requirement before retrying.
+Python 3.11 or newer is required for the local hook and protocol client. Fresh
+installs use regular-file copies and do not require Windows symbolic-link
+privileges. If a legacy protocol symlink is present, installation migrates it
+transactionally; restoring the link after a failed upgrade may require
+symbolic-link support.
 The installer validates the Claude home, destination types, protocol metadata,
 and settings before mutation. Existing settings, rules, and unrelated handlers
 are preserved; conflicts stop installation without partial activation.
@@ -33,7 +34,7 @@ are preserved; conflicts stop installation without partial activation.
 ## Installed surface
 
 The active home receives independent Claude policy, worker, hook, and client
-links:
+managed regular-file copies:
 
 ```text
 $CLAUDE_CONFIG_DIR/rules/delegation-protocol.md
@@ -56,7 +57,22 @@ taking over parent architecture or integration. All four are ordinary native
 subagents; the protocol observes their lifecycle, it does not launch or route
 them.
 
+Each worker inherits the parent Claude host's tool access, including configured
+MCP tools. The profiles apply no tier-specific tool allowlists or task scope
+blocks. Claude permissions and hooks still govern individual calls, and the
+protocol retains ownership boundaries and strict downward worker recursion.
+
+The installer records source hashes for every managed copy and refreshes only an
+unmodified protocol-owned copy. Installed code runs independently of the source
+checkout; reinstall after changing the checkout to adopt those changes.
+
 ## Settings and lifecycle
+
+For the upgrade from directory locks to OS advisory locks, stop all Claude
+sessions and workers using this home and let their hook processes exit before
+installing. Start fresh sessions afterward: old and new lock formats cannot
+run together safely. Existing ledgers and legacy lock directories are retained;
+identities with a legacy lock remain blocked pending separate state recovery.
 
 Protocol-owned settings are merged into `settings.json` without replacing
 unrelated values. Existing environment overrides are retained; explicit
@@ -100,6 +116,6 @@ bash scripts/claude/uninstall.sh
 .\scripts\claude\uninstall.ps1
 ```
 
-Uninstall removes only protocol-owned handlers, links, state, and settings
-values that remain unchanged since installation. It preserves unrelated
-configuration and never modifies Codex.
+Uninstall removes only protocol-owned handlers, copies, state, and settings
+values that remain unchanged since installation. It restores preserved user
+configuration where recorded, keeps unrelated files, and never modifies Codex.
