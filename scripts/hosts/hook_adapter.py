@@ -595,9 +595,6 @@ class TurnEventHandler:
         # An authorization granted but never consumed by a blocked action
         # must not survive past the turn it was granted in.
         self.state["pending_authorization"] = False
-        reason = _unmet(self.state)
-        if reason:
-            return {"decision": "block", "reason": reason}
         if self.mode == "explicit_release" and self.lifecycle.finished:
             return {
                 "decision": "block",

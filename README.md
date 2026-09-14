@@ -27,9 +27,8 @@ deterministic classifier ── requires_delegation / requires_multi / min_agent
       ▼
 host-native subagent lifecycle (SubagentStart / SubagentStop)
       │
-      ├── PreToolUse gate ── checks delegation and Codex tool-call budgets
-      │
-      └── Stop gate ── blocks turn completion until delegation evidence exists
+      └── PreToolUse gate ── checks delegation and Codex tool-call budgets
+          (Stop expires unused authorization and marks the turn complete)
 ```
 
 The classifier is a deterministic, host-agnostic function of the prompt text:
@@ -120,10 +119,12 @@ matching `SubagentStop` (or, on Claude, a foreground Agent result) closes it.
 decides, purely from the prompt, whether delegation is required at all and
 how many concurrent workers it must reach.
 
-`PreToolUse` checks parent delegation evidence and Codex worker tool-call
-budgets; `Stop` checks required delegation evidence. Native lifecycle identity
-is needed to attribute a tool call to a worker budget. Missing worker identity
-or missing hook events limit what the ledger can enforce.
+`PreToolUse` checks parent delegation evidence for eligible mutations and
+applies Codex worker budgets to intercepted tool calls. `Stop` expires unused
+authorization and marks the turn complete; it does not require delegation
+evidence for turn completion. Native lifecycle identity is needed to attribute
+a tool call to a worker budget. Missing worker identity or missing hook events
+limit what the ledger can enforce.
 
 Hooks enforce only calls delivered to them and are not a security sandbox.
 Codex's `write_stdin` input and polling have no `PreToolUse` hook, specialized

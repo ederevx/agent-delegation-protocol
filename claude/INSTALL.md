@@ -80,11 +80,12 @@ disablement or organization-managed policy is reported rather than silently
 overridden.
 
 Claude's lifecycle profile observes native worker start and completion events
-(`SubagentStart`/`SubagentStop`) and gates eligible parent mutation and turn
-completion on delegation evidence. Foreground Agent results automatically
-release the worker lifecycle. A completed foreground worker does not require a
-further stop action; a stop action is reserved for a running background task
-that needs cancellation.
+(`SubagentStart`/`SubagentStop`) and gates eligible parent mutation on
+delegation evidence. `Stop` expires unused authorization and marks the turn
+complete; it does not gate turn completion. Foreground Agent results
+automatically release the worker lifecycle. A completed foreground worker does
+not require a further stop action; a stop action is reserved for a running
+background task that needs cancellation.
 
 ## Owner bypass
 

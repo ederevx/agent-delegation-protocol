@@ -92,8 +92,9 @@ identities with a legacy lock remain blocked pending separate state recovery.
 
 The Codex profile uses a lifecycle-visible worker. The hook adapter observes
 native `SubagentStart`/`SubagentStop` events for the session and gates eligible
-parent mutation and turn completion on that evidence — there is no scheduler,
-request file, or receipt to manage.
+parent mutation on delegation evidence. `Stop` expires unused authorization
+and marks the turn complete; it does not gate turn completion. There is no
+scheduler, request file, or receipt to manage.
 
 After collecting and validating a completed worker subtree's reports, promptly
 close it if it will not be resumed. Prefer a direct native close operation;
