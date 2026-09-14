@@ -205,7 +205,7 @@ def test_codex_open_thread_capacity() -> None:
     classifier = runpy.run_path(
         str(Path(__file__).resolve().parents[1] / "agents" / "delegation-classifier.py")
     )
-    assert cap == 1024
+    assert cap == 10
     assert classifier["MAX_ACTIVE_WORKERS"] == 10
 
     with tempfile.TemporaryDirectory(prefix="adp-codex-config-") as raw:
@@ -446,16 +446,16 @@ def test_codex_config_is_restored_byte_for_byte() -> None:
 
 
 def test_codex_thread_capacity_upgrade_preserves_original_restore() -> None:
-    """An old 10-thread install upgrades without taking ownership of 10.
+    """A 1024-thread workaround install migrates to 10 without losing restore.
 
-    The previous installer tied this setting to the active-worker cap.  Its
-    manifest must retain the user's original value when this version writes
-    the larger open-thread capacity, so an untouched uninstall is exact.
+    Its manifest must retain the user's original value when this version
+    writes the ordinary capacity, so reinstall and untouched uninstall remain
+    exact.
     """
-    legacy_cap = 10
+    workaround_cap = 1024
     capacity = install.CODEX_OPEN_THREAD_CAPACITY
     key = install.CODEX_CONCURRENCY_KEY
-    assert capacity == 1024
+    assert capacity == 10
     with tempfile.TemporaryDirectory(prefix="adp-codex-capacity-upgrade-") as raw:
         root = Path(raw)
         repo = fixture(root)
@@ -466,17 +466,19 @@ def test_codex_thread_capacity_upgrade_preserves_original_restore() -> None:
         config.write_bytes(original)
         install.install(repo, home, "codex")
 
-        # Model the v1.15 installer state: it wrote 10, while its manifest
-        # and backup still describe the user's original setting.
-        legacy = f"[agents]\n{key} = {legacy_cap}\nmax_threads = 3\n".encode("utf-8")
-        config.write_bytes(legacy)
+        # Model the 1024-thread workaround state: its manifest and backup
+        # still describe the user's original setting.
+        workaround = (
+            f"[agents]\n{key} = {workaround_cap}\nmax_threads = 3\n"
+        ).encode("utf-8")
+        config.write_bytes(workaround)
         manifest_path = home / ".delegation-protocol/manifest.json"
         manifest = json.loads(manifest_path.read_text())
         record = manifest["codex_config"]
-        record["value"] = legacy_cap
+        record["value"] = workaround_cap
         record["previous"] = 4
         record["previous_line"] = f"{key} = 4\n"
-        record["installed_digest"] = hashlib.sha256(legacy).hexdigest()
+        record["installed_digest"] = hashlib.sha256(workaround).hexdigest()
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
         install.install(repo, home, "codex")
@@ -487,6 +489,11 @@ def test_codex_thread_capacity_upgrade_preserves_original_restore() -> None:
         assert record["previous"] == 4
         assert record["previous_line"] == f"{key} = 4\n"
         assert "max_threads = 3\n" in config.read_text(encoding="utf-8")
+
+        # A subsequent install must retain first-install restoration metadata.
+        install.install(repo, home, "codex")
+        manifest = json.loads(manifest_path.read_text())
+        assert manifest["codex_config"]["previous"] == 4
         install.uninstall(home, "codex")
         assert config.read_bytes() == original
 

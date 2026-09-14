@@ -79,10 +79,25 @@ the machine. The parent decides each request separately.
 
 ## Lifecycle
 
-Codex workers report their result and end their host session. The parent
-collects the report, integrates verified evidence, and completes final
-repository-wide validation before accepting the result. Do not require an
-unavailable post-result worker operation or block completion on one.
+Codex workers report their result and end their host session. After collecting
+and validating a completed worker subtree's reports, promptly close it when it
+will not be resumed. Prefer a direct native close operation when the host
+provides one. For Codex 0.154.0 V2, the verified app-server route is
+`mcp__codex_tui__set_thread_archived({archived:true, threadId:<exact owned
+child UUID>})`: never omit `threadId`. Before cascading archive, verify that
+every descendant is complete and obtain each UUID from native metadata or a
+read-only parent-child mapping. Confirm closure by checking that the subtree
+no longer appears in `list_agents` and that `read_thread` reports it unloaded.
+Never treat deleting session files, editing SQLite or the ledger, or killing
+processes as closure. If native closure is missing or fails, report the
+concrete blocker; do not inflate capacity or claim that bookkeeping freed the
+host thread. Completion frees the hook's active-worker slot; `session_release`
+retains completion bookkeeping separately from native host closure. For V2,
+a native thread-limit error immediately after
+confirmed archival can be stale residency pruning; refresh live status and
+retry once. Report a repeated failure rather than increasing the limit.
+V1 requires its native `close_agent`; archival does not release its counted
+spawn slot. Keep the current models and V2 interface for the archive route.
 
 Resuming a worker session continues it on its original topic only. When the
 next task is a different topic from its original deployment, start a fresh
@@ -111,11 +126,10 @@ native start until its native stop, plus spawns admitted but not yet
 started. Idle workers do not count, including one that has finished and is
 held or resumable; it counts again only while a resume is running.
 
-Codex's native `agents.max_concurrent_threads_per_session` setting allows a
-bounded 1024 open threads because it counts idle threads until the host closes
-them or the session ends. The hook independently keeps its 10-worker active
-guard. When the host exposes a supported close operation, close finished
-threads you will not resume; otherwise, do not invent lifecycle calls.
+Codex's native `agents.max_concurrent_threads_per_session` limit is 10. V2
+separately limits executing agents and resident child threads, and can evict
+completed idle residents. The hook's 10-worker active guard is separate.
+Close completed workers that will not be resumed using the procedure above.
 
 The common `ROUTING_POLICY` supplies generated worker instructions and context
 injected at `UserPromptSubmit` and `SubagentStart`. All tiers retain their
