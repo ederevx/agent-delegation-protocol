@@ -68,11 +68,19 @@ def test_legacy_state_ignores_retired_fields_without_losing_enforcement_state() 
         path.write_text(json.dumps(legacy), encoding="utf-8")
         state = adapter._load(path)
     assert state == {
-        key: value for key, value in legacy.items()
-        if key not in {
-            "analysis_signal", "execution_signal", "active", "finished",
-            "mode",
-        }
+        "schema_version": 3,
+        "requires_delegation": legacy["requires_delegation"],
+        "requires_multi": legacy["requires_multi"],
+        "min_agents": legacy["min_agents"],
+        # Bare schema-2 ids migrate with an unknown (epoch-zero) start time so
+        # the staleness sweep frees them instead of leaking the slot forever.
+        "concurrent": [{"id": "concurrent", "started_at": 0.0}],
+        "pending_spawns": ["pending"],
+        "denied_spawns": ["denied"],
+        "observed": ["observed"],
+        "peak_active": legacy["peak_active"],
+        "completed": legacy["completed"],
+        "pending_authorization": legacy["pending_authorization"],
     }
 
 

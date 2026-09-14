@@ -183,3 +183,146 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def test_stale_concurrent_entries_are_swept_at_cap_check() -> None:
+    """A worker whose start predates the staleness ceiling frees its slot."""
+    import json as _json
+    import time as _time
+
+    with tempfile.TemporaryDirectory(prefix="protocol-sweep-") as raw:
+        home = Path(raw)
+        previous_home = os.environ.get("CODEX_HOME")
+        os.environ["CODEX_HOME"] = str(home)
+        try:
+            classifier = _classifier(home)
+            cap = classifier.MAX_ACTIVE_WORKERS
+            path, _ = _paths(home, "sweep-session")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            stale = _time.time() - 7 * 24 * 60 * 60
+            fresh = _time.time()
+            entries = [{"id": f"stale-{n}", "started_at": stale} for n in range(cap - 1)]
+            entries.append({"id": "fresh-worker", "started_at": fresh})
+            path.write_text(_json.dumps({
+                "schema_version": 3, "concurrent": entries,
+                "pending_spawns": [], "denied_spawns": [], "observed": [],
+                "peak_active": cap, "requires_delegation": False,
+                "requires_multi": False, "min_agents": 0,
+                "completed": False, "pending_authorization": False,
+            }))
+            denied = run("codex", "pre-mutation", {
+                "session_id": "sweep-session", "tool_name": "Agent",
+                "tool_use_id": "spawn-1",
+                "tool_input": {"subagent_type": "bulk-worker"},
+            })
+            assert denied is None, denied
+            state = _json.loads(path.read_text())
+            assert not any(
+                e["id"].startswith("stale-") for e in state["concurrent"]
+            )
+            assert any(entry["id"] == "fresh-worker" for entry in state["concurrent"])
+            assert "spawn-1" in state["pending_spawns"]
+        finally:
+            if previous_home is None:
+                os.environ.pop("CODEX_HOME", None)
+            else:
+                os.environ["CODEX_HOME"] = previous_home
+
+
+def test_fresh_workers_still_count_against_the_cap() -> None:
+    """Only stale entries are swept; live workers keep consuming their slot."""
+    import json as _json
+    import time as _time
+
+    with tempfile.TemporaryDirectory(prefix="protocol-sweep-fresh-") as raw:
+        home = Path(raw)
+        previous_home = os.environ.get("CODEX_HOME")
+        os.environ["CODEX_HOME"] = str(home)
+        try:
+            classifier = _classifier(home)
+            cap = classifier.MAX_ACTIVE_WORKERS
+            path, _ = _paths(home, "fresh-session")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            now = _time.time()
+            path.write_text(_json.dumps({
+                "schema_version": 3,
+                "concurrent": [{"id": f"live-{n}", "started_at": now} for n in range(cap)],
+                "pending_spawns": [], "denied_spawns": [], "observed": [],
+                "peak_active": cap, "requires_delegation": False,
+                "requires_multi": False, "min_agents": 0,
+                "completed": False, "pending_authorization": False,
+            }))
+            denied = run("codex", "pre-mutation", {
+                "session_id": "fresh-session", "tool_name": "Agent",
+                "tool_use_id": "spawn-2",
+                "tool_input": {"subagent_type": "bulk-worker"},
+            })
+            body = denied["hookSpecificOutput"]
+            assert body["permissionDecision"] == "deny", body
+            assert "Active worker cap reached" in body["permissionDecisionReason"]
+            state = _json.loads(path.read_text())
+            assert len(state["concurrent"]) == cap
+            assert "spawn-2" not in state["pending_spawns"]
+        finally:
+            if previous_home is None:
+                os.environ.pop("CODEX_HOME", None)
+            else:
+                os.environ["CODEX_HOME"] = previous_home
+
+
+def test_schema2_state_migrates_and_stale_entries_expire() -> None:
+    """Bare schema-2 ids adopt epoch-zero starts and sweep at the next check."""
+    import json as _json
+
+    with tempfile.TemporaryDirectory(prefix="protocol-migrate-") as raw:
+        home = Path(raw)
+        previous_home = os.environ.get("CODEX_HOME")
+        os.environ["CODEX_HOME"] = str(home)
+        try:
+            path, _ = _paths(home, "migrate-session")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(_json.dumps({
+                "schema_version": 2,
+                "concurrent": ["crashed-worker"],
+                "pending_spawns": [], "denied_spawns": [], "observed": [],
+                "peak_active": 1, "requires_delegation": False,
+                "requires_multi": False, "min_agents": 0,
+                "completed": False, "pending_authorization": False,
+            }))
+            run("codex", "pre-mutation", {
+                "session_id": "migrate-session", "tool_name": "Read",
+            })
+            state = _json.loads(path.read_text())
+            assert state["schema_version"] == 3
+            assert state["concurrent"] == [{"id": "crashed-worker", "started_at": 0.0}]
+            # The migrated entry is older than the ceiling, so a spawn attempt
+            # sweeps it instead of counting it against the cap.
+            denied = run("codex", "pre-mutation", {
+                "session_id": "migrate-session", "tool_name": "Agent",
+                "tool_use_id": "spawn-3",
+                "tool_input": {"subagent_type": "bulk-worker"},
+            })
+            assert denied is None, denied
+            state = _json.loads(path.read_text())
+            assert state["concurrent"] == []
+        finally:
+            if previous_home is None:
+                os.environ.pop("CODEX_HOME", None)
+            else:
+                os.environ["CODEX_HOME"] = previous_home
+
+
+def main() -> None:
+    test_advisory_lock_recovery()
+    test_advisory_lock_exclusion_and_legacy_refusal()
+    test_advisory_lock_prevents_lost_updates()
+    test_windows_lock_contention_retries_eacces()
+    test_legacy_locks_fail_closed_with_actionable_feedback()
+    test_stale_concurrent_entries_are_swept_at_cap_check()
+    test_fresh_workers_still_count_against_the_cap()
+    test_schema2_state_migrates_and_stale_entries_expire()
+    print("Host lock tests: PASS")
+
+
+if __name__ == "__main__":
+    main()
