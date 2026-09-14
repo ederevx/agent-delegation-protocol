@@ -225,7 +225,7 @@ def main():
     test_checkout_hook_runtime(home, env)
     test_routing_and_limits(env)
     test_active_worker_cap(home, env)
-    m=json.loads((home/'.delegation-protocol/manifest.json').read_text()); assert m['version']==3 and m['release']=='automatic_release'
+    m=json.loads((home/'.delegation-protocol/manifest.json').read_text()); assert m['version']==3 and 'release' not in m
     assert not (home/'.delegation-protocol/hook_adapter.py').is_symlink()
     assert not (home/'agents/frontier-worker.md').is_symlink()
     assert not (home/'agents/balanced-worker.md').is_symlink()

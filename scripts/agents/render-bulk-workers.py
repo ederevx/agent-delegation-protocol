@@ -39,12 +39,12 @@ def paragraph_text(value: Any, name: str) -> str:
     return "\n\n".join(value)
 
 
-def render_body(template: str, profile: dict[str, Any]) -> str:
+def render_body(template: str, host: dict[str, Any], output: dict[str, Any]) -> str:
     replacements = {
-        "PARENT_CHANNEL": profile["parent_channel"],
+        "PARENT_CHANNEL": host["parent_channel"],
         "ROUTING_POLICY": ROUTING_POLICY,
-        "RUNTIME_CONTRACT": runtime_contract(profile["output"]),
-        "LIFECYCLE_CONTRACT": paragraph_text(profile["lifecycle_contract"], "lifecycle_contract"),
+        "RUNTIME_CONTRACT": runtime_contract(output),
+        "LIFECYCLE_CONTRACT": paragraph_text(host["lifecycle_contract"], "lifecycle_contract"),
     }
     expected = set(TOKEN.findall(template))
     if expected != set(replacements):
@@ -53,6 +53,14 @@ def render_body(template: str, profile: dict[str, Any]) -> str:
     if TOKEN.search(body):
         raise ValueError("unresolved template token")
     return body
+
+
+def profile_output(host: dict[str, Any], worker: dict[str, Any]) -> dict[str, Any]:
+    output = host["output"]
+    return {
+        "format": output["format"],
+        **worker,
+    }
 
 
 def worker_turn_limit(output: dict[str, Any]) -> int:
@@ -130,9 +138,10 @@ def rendered_outputs() -> dict[Path, str]:
     template = (REPO_ROOT / template_relative_path).read_text(encoding="utf-8")
     for tier, tier_profile in source["tiers"].items():
         description = tier_profile["description"]
-        for profile in tier_profile["profiles"].values():
-            output = profile["output"]
-            body = render_body(template, profile)
+        for host_name, worker in tier_profile["profiles"].items():
+            host = source["hosts"][host_name]
+            output = profile_output(host, worker)
+            body = render_body(template, host, output)
             if output["format"] == "claude-markdown":
                 text = render_claude(body, description, output)
             elif output["format"] == "codex-toml":

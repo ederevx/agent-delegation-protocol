@@ -1,35 +1,41 @@
 {
   "schema_version": 2,
   "template": "agents/worker-common.md.tmpl",
+  "hosts": {
+    "claude": {
+      "parent_channel": "`SendMessage` (use `ListAgents` to identify the parent)",
+      "lifecycle_contract": [
+        "Return the evidence report through the foreground Agent result or `SendMessage` for a named background teammate. Claude automatically releases a foreground Agent when its result returns; do not issue a stop operation for that completed worker."
+      ],
+      "output": {
+        "format": "claude-markdown"
+      }
+    },
+    "codex": {
+      "parent_channel": "the collaboration channel available to the worker",
+      "lifecycle_contract": [
+        "Return the evidence report and stop. The host session lifecycle releases the worker; no nonexistent post-result worker action is required."
+      ],
+      "output": {
+        "format": "codex-toml"
+      }
+    }
+  },
   "tiers": {
     "bulk": {
       "description": "Default worker for routine bounded implementation, commands, and tests needing little interpretation.",
       "profiles": {
         "claude": {
-          "parent_channel": "`SendMessage` (use `ListAgents` to identify the parent)",
-          "lifecycle_contract": [
-            "Return the evidence report through the foreground Agent result or `SendMessage` for a named background teammate. Claude automatically releases a foreground Agent when its result returns; do not issue a stop operation for that completed worker."
-          ],
-          "output": {
-            "path": "claude/agents/bulk-worker.md",
-            "format": "claude-markdown",
-            "name": "bulk-worker",
-            "model": "sonnet",
-            "effort": "medium"
-          }
+          "path": "claude/agents/bulk-worker.md",
+          "name": "bulk-worker",
+          "model": "sonnet",
+          "effort": "medium"
         },
         "codex": {
-          "parent_channel": "the collaboration channel available to the worker",
-          "lifecycle_contract": [
-            "Return the evidence report and stop. The host session lifecycle releases the worker; no nonexistent post-result worker action is required."
-          ],
-          "output": {
-            "path": "codex/agents/bulk_worker.toml",
-            "format": "codex-toml",
-            "name": "bulk_worker",
-            "model": "gpt-5.6-terra",
-            "reasoning_effort": "medium"
-          }
+          "path": "codex/agents/bulk_worker.toml",
+          "name": "bulk_worker",
+          "model": "gpt-5.6-terra",
+          "reasoning_effort": "medium"
         }
       }
     },
@@ -37,30 +43,16 @@
       "description": "Preferred worker for trivial, mechanical, single-step work using the least adequate compute.",
       "profiles": {
         "claude": {
-          "parent_channel": "`SendMessage` (use `ListAgents` to identify the parent)",
-          "lifecycle_contract": [
-            "Return the evidence report through the foreground Agent result or `SendMessage` for a named background teammate. Claude automatically releases a foreground Agent when its result returns; do not issue a stop operation for that completed worker."
-          ],
-          "output": {
-            "path": "claude/agents/quick-worker.md",
-            "format": "claude-markdown",
-            "name": "quick-worker",
-            "model": "haiku",
-            "effort": "low"
-          }
+          "path": "claude/agents/quick-worker.md",
+          "name": "quick-worker",
+          "model": "haiku",
+          "effort": "low"
         },
         "codex": {
-          "parent_channel": "the collaboration channel available to the worker",
-          "lifecycle_contract": [
-            "Return the evidence report and stop. The host session lifecycle releases the worker; no nonexistent post-result worker action is required."
-          ],
-          "output": {
-            "path": "codex/agents/quick_worker.toml",
-            "format": "codex-toml",
-            "name": "quick_worker",
-            "model": "gpt-5.6-luna",
-            "reasoning_effort": "low"
-          }
+          "path": "codex/agents/quick_worker.toml",
+          "name": "quick_worker",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "low"
         }
       }
     },
@@ -68,30 +60,16 @@
       "description": "Analysis-first worker that can also execute; use when lower tiers need more reasoning.",
       "profiles": {
         "claude": {
-          "parent_channel": "`SendMessage` (use `ListAgents` to identify the parent)",
-          "lifecycle_contract": [
-            "Return the evidence report through the foreground Agent result or `SendMessage` for a named background teammate. Claude automatically releases a foreground Agent when its result returns; do not issue a stop operation for that completed worker."
-          ],
-          "output": {
-            "path": "claude/agents/balanced-worker.md",
-            "format": "claude-markdown",
-            "name": "balanced-worker",
-            "model": "opus",
-            "effort": "high"
-          }
+          "path": "claude/agents/balanced-worker.md",
+          "name": "balanced-worker",
+          "model": "opus",
+          "effort": "high"
         },
         "codex": {
-          "parent_channel": "the collaboration channel available to the worker",
-          "lifecycle_contract": [
-            "Return the evidence report and stop. The host session lifecycle releases the worker; no nonexistent post-result worker action is required."
-          ],
-          "output": {
-            "path": "codex/agents/balanced-worker.toml",
-            "format": "codex-toml",
-            "name": "balanced_worker",
-            "model": "gpt-5.6-sol",
-            "reasoning_effort": "high"
-          }
+          "path": "codex/agents/balanced-worker.toml",
+          "name": "balanced_worker",
+          "model": "gpt-5.6-sol",
+          "reasoning_effort": "high"
         }
       }
     },
@@ -99,30 +77,16 @@
       "description": "Highest-cost worker for difficult reasoning or execution when lower tiers are insufficient; shortest runtime budget.",
       "profiles": {
         "claude": {
-          "parent_channel": "`SendMessage` (use `ListAgents` to identify the parent)",
-          "lifecycle_contract": [
-            "Return the evidence report through the foreground Agent result or `SendMessage` for a named background teammate. Claude automatically releases a foreground Agent when its result returns; do not issue a stop operation for that completed worker."
-          ],
-          "output": {
-            "path": "claude/agents/frontier-worker.md",
-            "format": "claude-markdown",
-            "name": "frontier-worker",
-            "model": "fable",
-            "effort": "xhigh"
-          }
+          "path": "claude/agents/frontier-worker.md",
+          "name": "frontier-worker",
+          "model": "fable",
+          "effort": "xhigh"
         },
         "codex": {
-          "parent_channel": "the collaboration channel available to the worker",
-          "lifecycle_contract": [
-            "Return the evidence report and stop. The host session lifecycle releases the worker; no nonexistent post-result worker action is required."
-          ],
-          "output": {
-            "path": "codex/agents/frontier_worker.toml",
-            "format": "codex-toml",
-            "name": "frontier_worker",
-            "model": "gpt-6-astra",
-            "reasoning_effort": "xhigh"
-          }
+          "path": "codex/agents/frontier_worker.toml",
+          "name": "frontier_worker",
+          "model": "gpt-6-astra",
+          "reasoning_effort": "xhigh"
         }
       }
     }

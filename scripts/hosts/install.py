@@ -849,7 +849,6 @@ def install(repo: Path, home: Path, host: str) -> None:
             sys.executable,
         )
         manifest = {"version": VERSION, "host": host, "repo": str(repo),
-                    "release": "automatic_release" if host == "claude" else "session_release",
                     "owned": [str(destination) for _, destination, _ in items],
                     "resources": [{"source": str(source), "destination": str(destination), "kind": kind}
                                   for source, destination, kind in items],

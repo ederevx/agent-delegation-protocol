@@ -546,6 +546,7 @@ def test_fresh_copy_install_and_managed_refresh() -> None:
             assert not (home / ".delegation-protocol/host-settings.json").exists()
             assert not (home / ".delegation-protocol/lifecycle.py").exists()
             first = assert_regular_resources(repo, home, host)
+            assert "release" not in first
             tracked = next(item for item in first["resources"] if item["destination"].endswith(
                 "delegation-enforcer.py"
             ))
