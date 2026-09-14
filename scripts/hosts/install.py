@@ -29,13 +29,13 @@ VERSION = 3
 
 # Codex caps concurrently open spawned-agent threads per session through an
 # `[agents]` table key (legacy alias `max_threads`, which we never write and
-# never remove).  This is deliberately separate from the hook's active-worker
-# cap: Codex retains idle threads on hosts without a close operation.
+# never remove).  It is configured to the ordinary protocol capacity; the
+# hook independently enforces the same active-worker limit.
 CODEX_CONCURRENCY_TABLE = "agents"
 CODEX_CONCURRENCY_KEY = "max_concurrent_threads_per_session"
 CODEX_LEGACY_CONCURRENCY_KEY = "max_threads"
 CODEX_CONFIG_BACKUP = "config.toml.before-first-install"
-CODEX_OPEN_THREAD_CAPACITY = 1024
+CODEX_OPEN_THREAD_CAPACITY = 10
 
 
 def _strip_windows_extended_prefix(value: str) -> str:

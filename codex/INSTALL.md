@@ -65,11 +65,11 @@ MCP tools. The profiles apply no tier-specific tool allowlists or task scope
 blocks. Codex permissions and hooks still govern individual calls, and the
 protocol retains ownership boundaries and strict downward worker recursion.
 
-The installer sets `agents.max_concurrent_threads_per_session = 1024` in
-`$CODEX_HOME/config.toml`. This bounded native open-thread capacity works
-around hosts that retain idle threads but do not provide a close tool. It is
-separate from the hook's 10-worker cap, which still counts only actively
-working workers. It does not make native thread support unlimited. Existing
+The installer sets `agents.max_concurrent_threads_per_session = 10` in
+`$CODEX_HOME/config.toml`. This native open-thread cap is separate from the
+hook's 10-worker active cap. V2 limits executing agents and resident child
+threads separately and can evict completed idle residents. The parent also
+closes completed subtrees it will not resume. Existing
 sessions retain their startup capacity, so start a new Codex session after an
 installation or upgrade to use the new value. Only that one assignment is
 written: every other line, table, and comment is preserved, a missing
@@ -94,6 +94,23 @@ The Codex profile uses a lifecycle-visible worker. The hook adapter observes
 native `SubagentStart`/`SubagentStop` events for the session and gates eligible
 parent mutation and turn completion on that evidence — there is no scheduler,
 request file, or receipt to manage.
+
+After collecting and validating a completed worker subtree's reports, promptly
+close it if it will not be resumed. Prefer a direct native close operation;
+the verified Codex 0.154.0 V2 app-server route is
+`mcp__codex_tui__set_thread_archived({archived:true, threadId:<exact owned
+child UUID>})`. Verify every descendant is complete before cascading archive,
+obtain IDs from native metadata or a read-only parent-child mapping, and then
+confirm the subtree is absent from `list_agents` and unloaded by `read_thread`.
+Completion frees the hook's active-worker slot; `session_release` retains
+completion bookkeeping and does not close the host thread. V2 can report a
+native limit error while pruning residency entries left by archival; refresh
+live status and retry once, then report any repeated failure.
+V1 requires its native `close_agent`; archival does not release its counted
+spawn slot. No model, model catalog, or interface switch is installed here.
+If closure is unavailable or fails, report the concrete blocker rather than
+changing capacity or using files, SQLite, ledger edits, or process termination
+as a substitute.
 
 Codex requires user review and trust for non-managed hooks. After installation:
 
@@ -126,7 +143,8 @@ python3 scripts/codex/test-protocol.py
 In a fresh session confirm that the worker is available, hooks are trusted,
 and a clearly eligible task cannot mutate parent-owned files before delegation
 evidence exists. Confirm that a worker report releases its host lifecycle
-without requiring an unavailable post-result action.
+bookkeeping, then close a completed subtree through the native route and
+confirm that it disappears from `list_agents` and is unloaded by `read_thread`.
 
 ## Uninstall
 

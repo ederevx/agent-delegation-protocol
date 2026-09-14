@@ -170,9 +170,23 @@ legacy lock directories remain intact for separate recovery. A legacy lock
 still blocks its affected session or worker identity with a diagnostic.
 
 Codex uses `session_release`; a completed worker never creates an impossible
-dismissal warning. Claude uses `automatic_release`; a foreground result clears
-its lifecycle automatically. The hook adapter checks worker budgets, observed
-delegation, and concurrent fan-out when required.
+dismissal warning. Completion frees the hook's active-worker slot, not the
+native host thread. After collecting and validating a completed Codex subtree,
+the parent promptly closes it if it will not be resumed. Prefer a direct native
+close operation; the verified Codex 0.154.0 V2 app-server route is
+`mcp__codex_tui__set_thread_archived({archived:true, threadId:<exact owned
+child UUID>})`. Before cascading archive, verify every descendant is complete,
+obtain owned UUIDs from native metadata or a read-only parent-child mapping,
+and confirm the subtree disappears from `list_agents` and is unloaded by
+`read_thread`. If closure is unavailable or fails, report the concrete blocker;
+do not substitute session-file deletion, SQLite or ledger edits, process
+termination, or a larger thread limit. In V2, a native limit error immediately
+after verified archival can prune stale residency entries; refresh status and
+retry once, reporting a repeated failure. V1 requires native `close_agent`
+because archival does not release its counted spawn slot. Claude uses
+`automatic_release`; a
+foreground result clears its lifecycle automatically. The hook adapter checks
+worker budgets, observed delegation, and concurrent fan-out when required.
 
 ## Owner bypass
 
