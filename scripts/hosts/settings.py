@@ -11,6 +11,11 @@ from typing import Any
 
 STATUS_PREFIX = "Delegation protocol v2:"
 
+# Single source of truth for which settings file each host's hook entries
+# live in. install.py imports this table; every host-specific read of the
+# filename goes through it.
+HOST_SETTINGS_FILE = {"claude": "settings.json", "codex": "hooks.json"}
+
 
 def quote(value: str) -> str:
     return '"' + value.replace('"', '\\"') + '"'
@@ -112,7 +117,7 @@ def merge_groups(settings: dict[str, Any], additions: dict[str, list[dict[str, A
 
 
 def install(host: str, home: Path, hook_path: Path, python_executable: str) -> None:
-    settings_path = home / ("settings.json" if host == "claude" else "hooks.json")
+    settings_path = home / HOST_SETTINGS_FILE[host]
     state_dir = home / ".delegation-protocol"
     settings = load_json(settings_path)
     backup = state_dir / f"{settings_path.name}.before-first-install"
@@ -124,7 +129,7 @@ def install(host: str, home: Path, hook_path: Path, python_executable: str) -> N
 
 
 def uninstall(host: str, home: Path) -> None:
-    settings_path = home / ("settings.json" if host == "claude" else "hooks.json")
+    settings_path = home / HOST_SETTINGS_FILE[host]
     state_dir = home / ".delegation-protocol"
     manifest_path = state_dir / "host-settings.json"
     # Older installs recorded only the environment entries they inserted.

@@ -868,6 +868,35 @@ def test_late_failure_restores_legacy_links_and_exact_bytes() -> None:
             assert path.read_bytes() == payload
 
 
+def test_verify_detects_checkout_drift_and_resyncs() -> None:
+    """Manifest hashes record deployed bytes; verify compares against the repo."""
+    with tempfile.TemporaryDirectory(prefix="adp-verify-") as raw:
+        root = Path(raw)
+        repo = fixture(root)
+        home = root / "claude-home"
+        install.install(repo, home, "claude")
+        assert install.verify(home, "claude", repo) == 0
+        classifier = repo / "scripts/agents/delegation-classifier.py"
+        classifier.write_text(
+            classifier.read_text(encoding="utf-8") + "\n# checkout advanced\n",
+            encoding="utf-8",
+        )
+        assert install.verify(home, "claude", repo) == 1
+        (home / "hooks/delegation-enforcer.py").unlink()
+        assert install.verify(home, "claude", repo) == 1
+        install.install(repo, home, "claude")
+        assert install.verify(home, "claude", repo) == 0
+
+
+def test_verify_reports_missing_installation() -> None:
+    with tempfile.TemporaryDirectory(prefix="adp-verify-missing-") as raw:
+        root = Path(raw)
+        repo = fixture(root)
+        home = root / "claude-home"
+        home.mkdir()
+        assert install.verify(home, "claude", repo) == 1
+
+
 def main() -> None:
     test_explicit_authorization_is_single_use()
     test_codex_open_thread_capacity()
@@ -888,6 +917,8 @@ def main() -> None:
     test_uninstall_preserves_changed_composed_policy_backup()
     test_uninstall_keeps_changed_assets_and_restores_user_state()
     test_late_failure_restores_legacy_links_and_exact_bytes()
+    test_verify_detects_checkout_drift_and_resyncs()
+    test_verify_reports_missing_installation()
     print("Host installation tests: PASS")
 
 

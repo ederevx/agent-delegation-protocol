@@ -13,9 +13,18 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+# One row per host. The else-means-codex ternaries this replaces were the
+# reason a third host could silently inherit Codex's environment, settings
+# file, and context variable; every host-specific read goes through these
+# tables now.
+HOST_ENVIRONMENT = {
+    "claude": ("CLAUDE_CONFIG_DIR", ".claude"),
+    "codex": ("CODEX_HOME", ".codex"),
+}
+
+
 def _home(host: str) -> Path:
-    variable = "CLAUDE_CONFIG_DIR" if host == "claude" else "CODEX_HOME"
-    default = ".claude" if host == "claude" else ".codex"
+    variable, default = HOST_ENVIRONMENT[host]
     return Path(os.environ.get(variable, str(Path.home() / default))).expanduser()
 
 
@@ -196,7 +205,7 @@ def _agent_type(payload: dict[str, Any]) -> str | None:
 
 
 def _requested_tier(payload: dict[str, Any]) -> str | None:
-    """Which profile an Agent/Task call is trying to spawn, from its own args."""
+    """Which profile an Agent/Task/subagent call is trying to spawn, from its own args."""
     tool = payload.get("tool_input") or payload.get("toolInput") or {}
     if isinstance(tool, dict):
         value = tool.get("subagent_type") or tool.get("agent_type")
@@ -404,6 +413,17 @@ def _deny(reason: str) -> dict[str, Any]:
     }
 
 
+HOST_CONTEXT_ENVIRONMENT = {
+    "claude": ("CLAUDE_CODE_MAX_CONTEXT_TOKENS",),
+    "codex": ("CODEX_MAX_CONTEXT_TOKENS",),
+}
+
+
+def _context_environment(host: str) -> tuple[str, ...]:
+    """Environment variables that name the parent's active context window."""
+    return HOST_CONTEXT_ENVIRONMENT.get(host, ())
+
+
 class TurnEventHandler:
     """Applies one normalized hook event against a single turn's saved state.
 
@@ -444,8 +464,7 @@ class TurnEventHandler:
         decision = self.classifier.classify(
             str(prompt),
             self.state,
-            context_env=("CLAUDE_CODE_MAX_CONTEXT_TOKENS",)
-            if self.host == "claude" else ("CODEX_MAX_CONTEXT_TOKENS",),
+            context_env=_context_environment(self.host),
         )
         carry = bool(decision.get("carry_forward"))
         # A reservation only spans the gap between an admitted spawn and its
