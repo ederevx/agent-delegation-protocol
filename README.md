@@ -165,7 +165,18 @@ records source hashes and refreshes only unchanged managed copies. Uninstall
 removes only unchanged protocol-owned resources, restores recorded backups, and
 preserves unrelated configuration. Reinstall after changing the source
 checkout is required to adopt those changes; restart the host afterward so
-worker discovery sees the installed profiles.
+worker discovery sees the installed profiles. To check whether a deployment
+has drifted from the checkout it was installed from — the manifest records
+the deployed bytes, not the checkout's, so a stale install otherwise looks
+healthy — run the read-only verifier:
+
+```bash
+python3 scripts/hosts/install.py verify --host claude --home "$HOME/.claude" --repo .
+python3 scripts/hosts/install.py verify --host codex --home "$HOME/.codex" --repo .
+```
+
+A non-zero exit lists every managed copy that differs from the checkout or is
+missing; rerun the installer to resync.
 
 Hook state uses OS advisory locks, released when a hook process exits. Before
 upgrading from directory locks, stop the sessions and workers using the target

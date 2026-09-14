@@ -13,9 +13,23 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+# One row per host. The else-means-codex ternaries this replaces were the
+# reason a third host could silently inherit Codex's environment, settings
+# file, and context variable; every host-specific read goes through these
+# tables now.
+# A concurrent worker whose start event is older than this is treated as
+# leaked: its slot is freed at the next cap check even if no completion
+# event ever arrives (host crash, kill -9, abort mid-fan-out).
+STALE_WORKER_SECONDS = 6 * 60 * 60
+
+HOST_ENVIRONMENT = {
+    "claude": ("CLAUDE_CONFIG_DIR", ".claude"),
+    "codex": ("CODEX_HOME", ".codex"),
+}
+
+
 def _home(host: str) -> Path:
-    variable = "CLAUDE_CONFIG_DIR" if host == "claude" else "CODEX_HOME"
-    default = ".claude" if host == "claude" else ".codex"
+    variable, default = HOST_ENVIRONMENT[host]
     return Path(os.environ.get(variable, str(Path.home() / default))).expanduser()
 
 
@@ -125,14 +139,27 @@ def _load(path: Path) -> dict[str, Any]:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         state = {}
-    if not isinstance(state, dict) or state.get("schema_version") != 2:
+    if not isinstance(state, dict) or state.get("schema_version") not in (2, 3):
         state = {}
+    # Schema 2 kept bare worker ids with no start time. Their age cannot be
+    # known, and a file that survived the schema upgrade is at least one
+    # install cycle old, so migrated entries adopt epoch zero and the TTL
+    # sweep frees them at the next cap check. A genuinely running worker's
+    # later completion event still discards it harmlessly by id.
+    migrated = [
+        {"id": worker, "started_at": 0.0}
+        if not isinstance(worker, dict) else worker
+        for worker in state.get("concurrent", [])
+        if isinstance(worker, (str, dict)) and (
+            isinstance(worker, dict) or worker.strip()
+        )
+    ]
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "requires_delegation": bool(state.get("requires_delegation")),
         "requires_multi": bool(state.get("requires_multi")),
         "min_agents": int(state.get("min_agents", 0)),
-        "concurrent": list(state.get("concurrent", [])),
+        "concurrent": migrated,
         "pending_spawns": list(state.get("pending_spawns", [])),
         "denied_spawns": list(state.get("denied_spawns", [])),
         "observed": list(state.get("observed", [])),
@@ -196,7 +223,7 @@ def _agent_type(payload: dict[str, Any]) -> str | None:
 
 
 def _requested_tier(payload: dict[str, Any]) -> str | None:
-    """Which profile an Agent/Task call is trying to spawn, from its own args."""
+    """Which profile an Agent/Task/subagent call is trying to spawn, from its own args."""
     tool = payload.get("tool_input") or payload.get("toolInput") or {}
     if isinstance(tool, dict):
         value = tool.get("subagent_type") or tool.get("agent_type")
@@ -273,6 +300,48 @@ def _holds_reservation(state: dict[str, Any], payload: dict[str, Any]) -> bool:
     return bool(token) and token in state.get("pending_spawns", [])
 
 
+def _worker_id(entry: Any) -> str:
+    """The worker id a concurrent-ledger entry carries, however it is stored."""
+    if isinstance(entry, dict):
+        return str(entry.get("id") or "")
+    return str(entry or "")
+
+
+def _normalize_concurrent(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Dedupe by id keeping the earliest start, then sort by id."""
+    earliest: dict[str, float] = {}
+    for entry in state.get("concurrent", []):
+        worker = _worker_id(entry)
+        if not worker:
+            continue
+        started = entry.get("started_at", 0.0) if isinstance(entry, dict) else 0.0
+        started = started if isinstance(started, (int, float)) else 0.0
+        if worker not in earliest or started < earliest[worker]:
+            earliest[worker] = started
+    return [{"id": worker, "started_at": earliest[worker]}
+            for worker in sorted(earliest)]
+
+
+def _sweep_stale_workers(state: dict[str, Any]) -> None:
+    """Free slots of workers whose start event predates the staleness ceiling.
+
+    Claude papers over the common leak with a failure event; Codex and pi
+    have none, so a crashed host could otherwise consume cap slots forever:
+    nothing else ever removes a `concurrent` entry whose SubagentStop never
+    arrives. Sweeping here means every spawn attempt pays the check while
+    only genuinely stale entries pay the removal.
+    """
+    cutoff = time.time() - STALE_WORKER_SECONDS
+    kept = [
+        entry for entry in state.get("concurrent", [])
+        if isinstance(entry, dict)
+        and isinstance(entry.get("started_at"), (int, float))
+        and entry["started_at"] > cutoff
+    ]
+    if len(kept) != len(state.get("concurrent", [])):
+        state["concurrent"] = kept
+
+
 def _active_cap_violation(state: dict[str, Any], classifier: Any,
                           payload: dict[str, Any]) -> str | None:
     """Reason a further worker spawn must be denied for an over-full session.
@@ -295,6 +364,7 @@ def _active_cap_violation(state: dict[str, Any], classifier: Any,
     """
     if _holds_reservation(state, payload):
         return None
+    _sweep_stale_workers(state)
     running = (len(state.get("concurrent", []))
                + len(state.get("pending_spawns", [])))
     cap = classifier.MAX_ACTIVE_WORKERS
@@ -404,6 +474,17 @@ def _deny(reason: str) -> dict[str, Any]:
     }
 
 
+HOST_CONTEXT_ENVIRONMENT = {
+    "claude": ("CLAUDE_CODE_MAX_CONTEXT_TOKENS",),
+    "codex": ("CODEX_MAX_CONTEXT_TOKENS",),
+}
+
+
+def _context_environment(host: str) -> tuple[str, ...]:
+    """Environment variables that name the parent's active context window."""
+    return HOST_CONTEXT_ENVIRONMENT.get(host, ())
+
+
 class TurnEventHandler:
     """Applies one normalized hook event against a single turn's saved state.
 
@@ -429,7 +510,7 @@ class TurnEventHandler:
         }
         handler = handlers.get(event)
         output = handler(payload) if handler else None
-        self.state["concurrent"] = sorted(set(self.state["concurrent"]))
+        self.state["concurrent"] = _normalize_concurrent(self.state)
         return output
 
     def _handle_prompt(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -444,8 +525,7 @@ class TurnEventHandler:
         decision = self.classifier.classify(
             str(prompt),
             self.state,
-            context_env=("CLAUDE_CODE_MAX_CONTEXT_TOKENS",)
-            if self.host == "claude" else ("CODEX_MAX_CONTEXT_TOKENS",),
+            context_env=_context_environment(self.host),
         )
         carry = bool(decision.get("carry_forward"))
         # A reservation only spans the gap between an admitted spawn and its
@@ -483,9 +563,12 @@ class TurnEventHandler:
                 # A native start pins the initial limit before any tool call.
                 # Corrupt ledgers remain untouched and deny at PreToolUse.
                 _worker_tool_budget(_home(self.host), payload, self.classifier, charge=False)
-            concurrent = set(self.state["concurrent"])
-            concurrent.add(worker)
-            self.state["concurrent"] = sorted(concurrent)
+            concurrent = [
+                entry for entry in self.state.get("concurrent", [])
+                if _worker_id(entry) != worker
+            ]
+            concurrent.append({"id": worker, "started_at": time.time()})
+            self.state["concurrent"] = concurrent
             _consume_reservation(self.state, payload)
             observed = set(self.state["observed"])
             observed.add(worker)
@@ -498,9 +581,10 @@ class TurnEventHandler:
     def _handle_worker_complete(self, payload: dict[str, Any]) -> None:
         worker = _worker(payload)
         if worker:
-            concurrent = set(self.state["concurrent"])
-            concurrent.discard(worker)
-            self.state["concurrent"] = sorted(concurrent)
+            self.state["concurrent"] = [
+                entry for entry in self.state.get("concurrent", [])
+                if _worker_id(entry) != worker
+            ]
         # Also reached by Claude's Agent-failure signal, where the spawn never
         # became a worker and its reservation would otherwise never be freed.
         _release_failed_reservation(self.state, payload)

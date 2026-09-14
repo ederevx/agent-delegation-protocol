@@ -22,10 +22,21 @@ from typing import Any, Callable
 
 try:
     from . import settings
+    from .settings import HOST_SETTINGS_FILE
 except ImportError:
     import settings
+    from settings import HOST_SETTINGS_FILE
 
 VERSION = 3
+
+# Per-host runtime facts. The settings file name is None for a host with no
+# hook-configuration JSON; its integration is deployed as plain resources.
+# First entry may be empty, meaning the home root itself (Codex's AGENTS.md
+# policy lives at the root; Claude's rules live under rules/).
+HOST_DIRECTORIES = {
+    "claude": ("rules", "agents", "hooks", ".delegation-protocol"),
+    "codex": ("", "agents", "hooks", ".delegation-protocol"),
+}
 
 # Codex caps concurrently open spawned-agent threads per session through an
 # `[agents]` table key (legacy alias `max_threads`, which we never write and
@@ -753,6 +764,43 @@ def retire_owned_lifecycle(
     destination.unlink()
 
 
+def retire_orphaned_owned(
+    home: Path, previous: dict[str, Any] | None,
+    items: list[tuple[Path, Path, str]],
+    changed: list[tuple[Path, tuple[str, bytes | str | None, int | None]]],
+) -> None:
+    """Unlink prior-manifest-owned copies the new resource set no longer has.
+
+    When a resource disappears from `resources()`, a reinstall would otherwise
+    strand its deployed copy forever: the new manifest no longer owns it, so
+    no later uninstall can remove it. Remove only destinations the previous
+    manifest owned as unchanged managed copies and that the new install does
+    not write; modified or foreign files are left in place.
+    """
+    if not previous:
+        return
+    fresh = {str(destination) for _, destination, _ in items}
+    recorded_hashes = previous.get("hashes", {})
+    recorded_resources = {
+        item.get("destination"): item
+        for item in previous.get("resources", [])
+        if isinstance(item, dict)
+    }
+    for name in previous.get("owned", []):
+        if name in fresh:
+            continue
+        path = Path(name)
+        resource = recorded_resources.get(name, {})
+        if not (
+            resource.get("kind") == "copy" and path.is_file() and
+            not path.is_symlink() and
+            digest(path) == recorded_hashes.get(name)
+        ):
+            continue
+        changed.append((path, capture_path(path)))
+        path.unlink()
+
+
 def validate_destination(source: Path, destination: Path, kind: str, owned: bool,
                          recorded: str | None = None,
                          legacy: tuple[Path, str] | None = None) -> None:
@@ -769,10 +817,17 @@ def validate_destination(source: Path, destination: Path, kind: str, owned: bool
     raise SystemExit(f"refusing to overwrite unowned destination: {destination}")
 
 
+def _managed_directories(home: Path, host: str) -> tuple[Path, ...]:
+    try:
+        parts = HOST_DIRECTORIES[host]
+    except KeyError:
+        raise SystemExit(f"no managed-directory layout for host: {host}") from None
+    return tuple(home / part if part else home for part in parts)
+
+
 def prepare(repo: Path, home: Path, host: str, manifest: dict[str, Any] | None) -> list[tuple[Path, Path, str]]:
     state = home / ".delegation-protocol"
-    directories = ((home / "rules" if host == "claude" else home), home / "agents", home / "hooks", state)
-    for directory in directories:
+    for directory in _managed_directories(home, host):
         if directory.exists() and (not directory.is_dir() or directory.is_symlink()):
             raise SystemExit(f"unsafe protocol directory: {directory}")
     owned = set((manifest or {}).get("owned", []))
@@ -788,7 +843,10 @@ def prepare(repo: Path, home: Path, host: str, manifest: dict[str, Any] | None) 
             hashes.get(str(destination)),
             _legacy_resource_source(manifest, destination),
         )
-    settings_path = home / ("settings.json" if host == "claude" else "hooks.json")
+    settings_file = HOST_SETTINGS_FILE.get(host)
+    if settings_file is None:
+        return result
+    settings_path = home / settings_file
     settings.load_json(settings_path)
     return result
 
@@ -805,11 +863,12 @@ def install(repo: Path, home: Path, host: str) -> None:
     lock = acquire_lock(state)
     changed: list[tuple[Path, tuple[str, bytes | str | None, int | None]]] = []
     rollback_policy: Callable[[], None] = lambda: None
-    settings_path = home / ("settings.json" if host == "claude" else "hooks.json")
-    prior_settings = settings_path.read_bytes() if settings_path.exists() else None
-    settings_backup = state / f"{settings_path.name}.before-first-install"
+    settings_file = HOST_SETTINGS_FILE.get(host)
+    settings_path = home / settings_file if settings_file else None
+    prior_settings = settings_path.read_bytes() if settings_path and settings_path.exists() else None
+    settings_backup = state / f"{settings_file}.before-first-install" if settings_file else None
     prior_settings_backup = (
-        settings_backup.read_bytes() if settings_backup.exists() else None
+        settings_backup.read_bytes() if settings_backup and settings_backup.exists() else None
     )
     codex_config_path = _codex_config_path(home) if host == "codex" else None
     prior_codex_config = (
@@ -822,7 +881,7 @@ def install(repo: Path, home: Path, host: str) -> None:
         codex_config_backup.read_bytes() if codex_config_backup.exists() else None
     )
     try:
-        for directory in ((home / "rules" if host == "claude" else home), home / "agents", home / "hooks", state):
+        for directory in _managed_directories(home, host):
             directory.mkdir(parents=True, exist_ok=True)
         items = prepare(repo, home, host, previous)
         for source, destination, kind in items:
@@ -833,6 +892,7 @@ def install(repo: Path, home: Path, host: str) -> None:
             changed.append((destination, capture_path(destination)))
             atomic_copy(source, destination)
         retire_owned_lifecycle(state, previous, changed)
+        retire_orphaned_owned(home, previous, items, changed)
         policy = None
         codex_config = None
         if host == "codex":
@@ -842,12 +902,13 @@ def install(repo: Path, home: Path, host: str) -> None:
             codex_config = install_codex_concurrency(
                 home, CODEX_OPEN_THREAD_CAPACITY, previous
             )
-        settings.install(
-            host,
-            home,
-            home / "hooks/delegation-enforcer.py",
-            sys.executable,
-        )
+        if settings_path is not None:
+            settings.install(
+                host,
+                home,
+                home / "hooks/delegation-enforcer.py",
+                sys.executable,
+            )
         manifest = {"version": VERSION, "host": host, "repo": str(repo),
                     "owned": [str(destination) for _, destination, _ in items],
                     "resources": [{"source": str(source), "destination": str(destination), "kind": kind}
@@ -866,11 +927,15 @@ def install(repo: Path, home: Path, host: str) -> None:
             _restore_codex_config(codex_config_backup, prior_codex_config_backup)
         for destination, prior in reversed(changed):
             restore_path(destination, prior)
-        if prior_settings is None:
+        if settings_path is None:
+            pass
+        elif prior_settings is None:
             settings_path.unlink(missing_ok=True)
         else:
             settings_path.write_bytes(prior_settings)
-        if prior_settings_backup is None:
+        if settings_backup is None:
+            pass
+        elif prior_settings_backup is None:
             settings_backup.unlink(missing_ok=True)
         else:
             settings_backup.write_bytes(prior_settings_backup)
@@ -895,6 +960,8 @@ def uninstall(home: Path, host: str) -> None:
             # First, because a configuration this installer cannot undo safely
             # stops the uninstall before anything else has been removed.
             uninstall_codex_concurrency(home, manifest)
+        if host not in HOST_SETTINGS_FILE:
+            raise SystemExit(f"unsupported host in manifest: {host}")
         settings.uninstall(host, home)
         if host == "codex":
             uninstall_codex_policy(home, manifest)
@@ -927,18 +994,61 @@ def uninstall(home: Path, host: str) -> None:
         pass
 
 
+def verify(home: Path, host: str, repo: Path) -> int:
+    """Compare deployed managed copies against the current checkout.
+
+    Manifest hashes record the deployed bytes, not the repo bytes, so they
+    cannot detect staleness after the checkout advances. Drift here means the
+    hook is enforcing an older protocol than the repo tests: rerun the
+    installer to resync. Missing deployed resources are drift too.
+    """
+    state = home / ".delegation-protocol"
+    manifest_path = state / "manifest.json"
+    if not manifest_path.exists():
+        print(f"drift: no protocol installation in {home}")
+        return 1
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("version") != VERSION or manifest.get("host") != host:
+        print("drift: unsupported or mismatched protocol manifest")
+        return 1
+    drifted = 0
+    for item in manifest.get("resources", []):
+        if not isinstance(item, dict) or item.get("kind") != "copy":
+            continue
+        destination = Path(item.get("destination", ""))
+        source = Path(item.get("source", ""))
+        if not destination.is_file() or destination.is_symlink():
+            print(f"drift: missing deployed copy {destination}")
+            drifted += 1
+            continue
+        if not source.is_file():
+            print(f"drift: manifest source retired from the checkout {source}")
+            drifted += 1
+            continue
+        if digest(destination) != digest(source):
+            print(f"drift: deployed copy differs from checkout {destination}")
+            drifted += 1
+    if drifted:
+        print(f"{drifted} drifted resource(s); run the installer to resync.")
+        return 1
+    print(f"verified: deployed {host} resources match the checkout.")
+    return 0
+
+
 def main() -> int:
     if sys.version_info < (3, 11):
         raise SystemExit("protocol v2 requires Python 3.11 or newer")
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("install", "uninstall"))
-    parser.add_argument("--host", choices=("claude", "codex"), required=True)
+    parser.add_argument("action", choices=("install", "uninstall", "verify"))
+    parser.add_argument("--host", choices=tuple(HOST_SETTINGS_FILE), required=True)
     parser.add_argument("--home", required=True)
     parser.add_argument("--repo", required=True)
     args = parser.parse_args()
     home, repo = Path(args.home).expanduser().resolve(), Path(args.repo).resolve()
     if args.action == "install":
         install(repo, home, args.host)
+    elif args.action == "verify":
+        return verify(home, args.host, repo)
     else:
         uninstall(home, args.host)
     return 0
