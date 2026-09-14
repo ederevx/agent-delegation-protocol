@@ -764,6 +764,43 @@ def retire_owned_lifecycle(
     destination.unlink()
 
 
+def retire_orphaned_owned(
+    home: Path, previous: dict[str, Any] | None,
+    items: list[tuple[Path, Path, str]],
+    changed: list[tuple[Path, tuple[str, bytes | str | None, int | None]]],
+) -> None:
+    """Unlink prior-manifest-owned copies the new resource set no longer has.
+
+    When a resource disappears from `resources()`, a reinstall would otherwise
+    strand its deployed copy forever: the new manifest no longer owns it, so
+    no later uninstall can remove it. Remove only destinations the previous
+    manifest owned as unchanged managed copies and that the new install does
+    not write; modified or foreign files are left in place.
+    """
+    if not previous:
+        return
+    fresh = {str(destination) for _, destination, _ in items}
+    recorded_hashes = previous.get("hashes", {})
+    recorded_resources = {
+        item.get("destination"): item
+        for item in previous.get("resources", [])
+        if isinstance(item, dict)
+    }
+    for name in previous.get("owned", []):
+        if name in fresh:
+            continue
+        path = Path(name)
+        resource = recorded_resources.get(name, {})
+        if not (
+            resource.get("kind") == "copy" and path.is_file() and
+            not path.is_symlink() and
+            digest(path) == recorded_hashes.get(name)
+        ):
+            continue
+        changed.append((path, capture_path(path)))
+        path.unlink()
+
+
 def validate_destination(source: Path, destination: Path, kind: str, owned: bool,
                          recorded: str | None = None,
                          legacy: tuple[Path, str] | None = None) -> None:
@@ -855,6 +892,7 @@ def install(repo: Path, home: Path, host: str) -> None:
             changed.append((destination, capture_path(destination)))
             atomic_copy(source, destination)
         retire_owned_lifecycle(state, previous, changed)
+        retire_orphaned_owned(home, previous, items, changed)
         policy = None
         codex_config = None
         if host == "codex":
