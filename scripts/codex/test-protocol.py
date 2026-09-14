@@ -365,6 +365,8 @@ def main():
     assert any(c.endswith(' worker-start') for c in commands('SubagentStart'))
     assert any(c.endswith(' worker-complete') for c in commands('SubagentStop'))
     assert any(c.endswith(' pre-mutation') for c in commands('PreToolUse'))
+    assert any(h['statusMessage'] == 'Delegation protocol v2: finish turn bookkeeping'
+        for group in hooks['Stop'] for h in group['hooks'])
     worker_wired_events={e for e in hooks if any(c.endswith((' worker-start',' worker-complete')) for c in commands(e))}
     assert worker_wired_events=={'SubagentStart','SubagentStop'},worker_wired_events
     assert not (home/'.delegation-protocol/hook_adapter.py').is_symlink()
@@ -395,11 +397,14 @@ def main():
       assert q.returncode==0,q.stderr
     stopped=subprocess.run([sys.executable,str(HOOK),'turn-stop'],input=json.dumps({'session_id':'s'}),env=env,capture_output=True,text=True)
     assert stopped.returncode==0 and json.loads(stopped.stdout)=={}, 'session release created impossible finished-worker warning'
-    # Stop detects unsatisfied delegation instead of silently ending the turn.
+    # Stop only finishes per-turn bookkeeping. Required delegation remains a
+    # pre-mutation gate, so a turn with no worker observations may still end.
     subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'unmet','prompt':'Update 12 files across independent modules.'}),env=env,capture_output=True,text=True)
+    unmet_mutation=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'unmet','tool_name':'Edit'}),env=env,capture_output=True,text=True)
+    assert json.loads(unmet_mutation.stdout)['hookSpecificOutput']['permissionDecision']=='deny',unmet_mutation.stdout
     stop_unmet=subprocess.run([sys.executable,str(HOOK),'turn-stop'],input=json.dumps({'session_id':'unmet'}),env=env,capture_output=True,text=True)
     stop_body=json.loads(stop_unmet.stdout)
-    assert stop_body.get('decision')=='block' and stop_body.get('reason'),stop_body
+    assert stop_body == {},stop_body
     # Multi-agent/fan-out requires real concurrent overlap. Under Codex's
     # session_release mode a completed worker stays "held" (no inferred
     # dismissal debt), so this specifically exercises that a strictly
@@ -410,7 +415,7 @@ def main():
       subprocess.run([sys.executable,str(HOOK),event],input=json.dumps({'session_id':'seq','agent_id':worker}),env=env,capture_output=True,text=True)
     seq_stop=subprocess.run([sys.executable,str(HOOK),'turn-stop'],input=json.dumps({'session_id':'seq'}),env=env,capture_output=True,text=True)
     seq_body=json.loads(seq_stop.stdout)
-    assert seq_body.get('decision')=='block' and 'concurrently' in seq_body.get('reason',''),seq_body
+    assert seq_body == {},seq_body
     # Explicit, single-use, text-based authorization is the sole remaining
     # override -- no marker file, and it does not persist as a standing
     # bypass. It allows exactly the one otherwise-blocked action it names,
@@ -421,6 +426,12 @@ def main():
     assert json.loads(allowed.stdout)=={},allowed.stdout
     byp_denied_again=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'byp','tool_name':'Edit'}),env=env,capture_output=True,text=True)
     assert json.loads(byp_denied_again.stdout)['hookSpecificOutput']['permissionDecision']=='deny',byp_denied_again.stdout
+    # An unused authorization expires at Stop even though Stop no longer
+    # rejects an unmet delegation requirement.
+    subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'expired-auth','prompt':'Update 12 files across independent modules. I explicitly authorize this action.'}),env=env,capture_output=True,text=True)
+    assert json.loads(subprocess.run([sys.executable,str(HOOK),'turn-stop'],input=json.dumps({'session_id':'expired-auth'}),env=env,capture_output=True,text=True).stdout) == {}
+    expired_denied=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'expired-auth','tool_name':'Edit'}),env=env,capture_output=True,text=True)
+    assert json.loads(expired_denied.stdout)['hookSpecificOutput']['permissionDecision']=='deny',expired_denied.stdout
     r=subprocess.run([sys.executable,str(ENGINE),"uninstall","--host","codex","--home",str(home),"--repo",str(ROOT)],env=env,capture_output=True,text=True); assert r.returncode==0,r.stderr
     assert not (home/'.delegation-protocol/hook_adapter.py').exists()
     assert not (home/'.delegation-protocol').exists()

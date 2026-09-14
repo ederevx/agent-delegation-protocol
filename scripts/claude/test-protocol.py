@@ -292,6 +292,8 @@ def main():
     assert any(c.endswith(' worker-start') for c in commands('SubagentStart'))
     assert any(c.endswith(' worker-complete') for c in commands('SubagentStop'))
     assert any(c.endswith(' pre-mutation') for c in commands('PreToolUse'))
+    assert any(h['statusMessage'] == 'Delegation protocol v2: finish turn bookkeeping'
+        for group in hooks['Stop'] for h in group['hooks'])
     worker_wired_events={e for e in hooks if any(c.endswith((' worker-start',' worker-complete')) for c in commands(e))}
     assert worker_wired_events=={'SubagentStart','SubagentStop','PostToolUseFailure'},worker_wired_events
     p=subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'s','prompt':'Update 12 files across independent modules.'}),env=env,capture_output=True,text=True)
@@ -328,20 +330,26 @@ def main():
       for name in ('Read', 'Grep', 'Bash', 'Edit', 'opaque_tool'):
         result=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'open-actions','tool_name':name,'tool_input':{'command':'git status'}}),env=env,capture_output=True,text=True,check=True)
         assert json.loads(result.stdout) == {}, (name, result.stdout)
-    # Stop detects unsatisfied delegation instead of silently ending the turn.
+    # Stop only finishes per-turn bookkeeping. Required delegation remains a
+    # pre-mutation gate, so a turn with no worker observations may still end.
     stop_unmet=subprocess.run([sys.executable,str(HOOK),'turn-stop'],input=json.dumps({'session_id':'pm'}),env=env,capture_output=True,text=True)
     stop_body=json.loads(stop_unmet.stdout)
-    assert stop_body.get('decision')=='block' and stop_body.get('reason'),stop_body
+    assert stop_body == {},stop_body
     # Multi-agent/fan-out requires real concurrent overlap: two workers that
     # each start and complete before the next starts never overlap, so the
-    # requirement must still read as unmet even though two distinct workers
-    # were observed.
+    # requirement remains unmet for pre-mutation, but Stop does not reject it.
     subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'seq','prompt':'Update 12 files across independent modules.'}),env=env,capture_output=True,text=True)
     for event,worker in (('worker-start','worker-a'),('worker-complete','worker-a'),('worker-start','worker-b'),('worker-complete','worker-b')):
       subprocess.run([sys.executable,str(HOOK),event],input=json.dumps({'session_id':'seq','agent_id':worker}),env=env,capture_output=True,text=True)
     seq_stop=subprocess.run([sys.executable,str(HOOK),'turn-stop'],input=json.dumps({'session_id':'seq'}),env=env,capture_output=True,text=True)
     seq_body=json.loads(seq_stop.stdout)
-    assert seq_body.get('decision')=='block' and 'concurrently' in seq_body.get('reason',''),seq_body
+    assert seq_body == {},seq_body
+    # An unused authorization expires at Stop even though Stop no longer
+    # rejects an unmet delegation requirement.
+    subprocess.run([sys.executable,str(HOOK),'prompt'],input=json.dumps({'session_id':'expired-auth','prompt':'Update 12 files across independent modules. I explicitly authorize this action.'}),env=env,capture_output=True,text=True)
+    assert json.loads(subprocess.run([sys.executable,str(HOOK),'turn-stop'],input=json.dumps({'session_id':'expired-auth'}),env=env,capture_output=True,text=True).stdout) == {}
+    expired_denied=subprocess.run([sys.executable,str(HOOK),'pre-mutation'],input=json.dumps({'session_id':'expired-auth','tool_name':'Edit'}),env=env,capture_output=True,text=True)
+    assert json.loads(expired_denied.stdout)['hookSpecificOutput']['permissionDecision']=='deny',expired_denied.stdout
     # A process environment flag cannot identify the current hook caller.
     # Parent Agent/Task calls remain available even with that inherited flag.
     inherited_env = dict(env, CLAUDE_CODE_CHILD_SESSION="1")
@@ -355,7 +363,8 @@ def main():
     # agent_type alone also occurs on a parent launched with --agent.
     assert invoke('pre-mutation', {'session_id': 'pm', 'agent_type': 'bulk-worker',
         'tool_name': 'Agent'}) == {}
-    # Workers execute within a parent's session without clearing its debt.
+    # Workers execute within a parent's session without clearing its
+    # pre-mutation delegation requirement.
     invoke('prompt', {'session_id': 'worker-scope',
         'prompt': 'Review and update 12 files across independent modules.'})
     import hashlib
@@ -374,7 +383,8 @@ def main():
       assert 'lowest capable worker' in invoke('prompt', dict(worker_payload, prompt='Say hi.'), hook_env)['hookSpecificOutput']['additionalContext']
       assert invoke('turn-stop', worker_payload, hook_env) == {}
     assert state_path.read_bytes() == before
-    assert invoke('turn-stop', {'session_id': 'worker-scope'})['decision'] == 'block'
+    assert invoke('turn-stop', {'session_id': 'worker-scope'}) == {}
+    assert json.loads(state_path.read_text())['completed'] is True
     # Native lifecycle events still record workers under the parent session.
     invoke('worker-start', worker_payload)
     assert 'leaf-a' in json.loads(state_path.read_text())['observed']

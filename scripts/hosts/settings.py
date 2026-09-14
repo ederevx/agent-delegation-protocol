@@ -63,7 +63,7 @@ def groups(host: str, hook_path: Path, python_executable: str) -> dict[str, list
         "SubagentStart": [{"hooks": [handler(base + " worker-start", "track worker start")]}],
         "SubagentStop": [{"hooks": [handler(base + " worker-complete", "track worker completion")]}],
         "PreToolUse": [{"matcher": "*", "hooks": [handler(base + " pre-mutation", "enforce delegation")]}],
-        "Stop": [{"hooks": [handler(base + " turn-stop", "verify delegation")]}],
+        "Stop": [{"hooks": [handler(base + " turn-stop", "finish turn bookkeeping")]}],
     }
     if host == "claude":
         common["PostToolUseFailure"] = [{
