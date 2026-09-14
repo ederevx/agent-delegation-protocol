@@ -895,6 +895,47 @@ def test_verify_reports_missing_installation() -> None:
         home = root / "claude-home"
         home.mkdir()
         assert install.verify(home, "claude", repo) == 1
+def test_reinstall_unlinks_orphaned_owned_copies() -> None:
+    """A resource dropped from resources() cannot strand its deployed copy."""
+    with tempfile.TemporaryDirectory(prefix="adp-orphan-") as raw:
+        root, repo, home = Path(raw), fixture(Path(raw) / "repo"), Path(raw) / "home"
+        install.install(repo, home, "claude")
+        orphan = home / "agents/retired-worker.md"
+        install.atomic_copy(repo / "claude/agents/quick-worker.md", orphan)
+        manifest = manifest_for(home)
+        manifest["owned"].append(str(orphan))
+        manifest["resources"].append({
+            "source": str(repo / "claude/agents/quick-worker.md"),
+            "destination": str(orphan), "kind": "copy",
+        })
+        manifest["hashes"][str(orphan)] = install.digest(orphan)
+        (home / ".delegation-protocol/manifest.json").write_text(json.dumps(manifest))
+
+        install.install(repo, home, "claude")
+
+        assert not orphan.exists()
+
+
+def test_reinstall_preserves_modified_orphaned_copy() -> None:
+    """An orphaned copy the user changed stays; it is no longer ours."""
+    with tempfile.TemporaryDirectory(prefix="adp-orphan-modified-") as raw:
+        root, repo, home = Path(raw), fixture(Path(raw) / "repo"), Path(raw) / "home"
+        install.install(repo, home, "claude")
+        orphan = home / "agents/retired-worker.md"
+        install.atomic_copy(repo / "claude/agents/quick-worker.md", orphan)
+        manifest = manifest_for(home)
+        manifest["owned"].append(str(orphan))
+        manifest["resources"].append({
+            "source": str(repo / "claude/agents/quick-worker.md"),
+            "destination": str(orphan), "kind": "copy",
+        })
+        manifest["hashes"][str(orphan)] = install.digest(orphan)
+        (home / ".delegation-protocol/manifest.json").write_text(json.dumps(manifest))
+        orphan.write_text("user edited\n", encoding="utf-8")
+
+        install.install(repo, home, "claude")
+
+        assert orphan.read_text(encoding="utf-8") == "user edited\n"
 
 
 def main() -> None:
@@ -917,6 +958,8 @@ def main() -> None:
     test_uninstall_preserves_changed_composed_policy_backup()
     test_uninstall_keeps_changed_assets_and_restores_user_state()
     test_late_failure_restores_legacy_links_and_exact_bytes()
+    test_reinstall_unlinks_orphaned_owned_copies()
+    test_reinstall_preserves_modified_orphaned_copy()
     test_verify_detects_checkout_drift_and_resyncs()
     test_verify_reports_missing_installation()
     print("Host installation tests: PASS")
