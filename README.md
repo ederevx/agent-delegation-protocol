@@ -108,6 +108,12 @@ Codex and Claude installations are independent. Both use the same core
 classifier and hook adapter, while their manifests declare different lifecycle
 release modes.
 
+Lifecycle compatibility supports Claude's `automatic_release` and Codex's
+`session_release`. Legacy `explicit_release` manifest values fall back to
+`session_release`; there is no manual-dismissal `Stop` block. Retired
+worker-release and session-end event names no longer alter lifecycle state, and
+currently installed hooks never emit them.
+
 ## Delegation evidence
 
 There is no request schema, receipt, or backend selection. The only proof of

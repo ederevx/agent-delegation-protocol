@@ -44,6 +44,12 @@ def _classifier(home: Path):
 
 
 def _release_mode(home: Path) -> str:
+    """Load a supported release mode, retaining legacy manifests safely.
+
+    ``explicit_release`` is not used by current host installers. Existing
+    manifests may still name it, so normalize it to the conservative
+    session-retention behavior instead of refusing an otherwise valid turn.
+    """
     try:
         manifest = json.loads(
             (home / ".delegation-protocol" / "manifest.json").read_text(
@@ -53,9 +59,8 @@ def _release_mode(home: Path) -> str:
         mode = manifest.get("release")
     except (OSError, json.JSONDecodeError):
         mode = None
-    return mode if mode in {
-        "automatic_release", "explicit_release", "session_release"
-    } else "session_release"
+    return (mode if mode in {"automatic_release", "session_release"}
+            else "session_release")
 
 
 def _session(payload: dict[str, Any]) -> str | None:
@@ -458,8 +463,6 @@ class TurnEventHandler:
             "prompt": self._handle_prompt,
             "worker-start": self._handle_worker_start,
             "worker-complete": self._handle_worker_complete,
-            "worker-release": self._handle_worker_release,
-            "session-end": self._handle_session_end,
             "pre-mutation": self._handle_pre_mutation,
             "turn-stop": self._handle_turn_stop,
         }
@@ -548,19 +551,6 @@ class TurnEventHandler:
         _release_failed_reservation(self.state, payload)
         return None
 
-    def _handle_worker_release(self, payload: dict[str, Any]) -> None:
-        worker = _worker(payload)
-        if worker:
-            self.lifecycle.release(worker)
-        return None
-
-    def _handle_session_end(self, payload: dict[str, Any]) -> None:
-        self.lifecycle.end_session()
-        self.state["pending_spawns"] = []
-        self.state["denied_spawns"] = []
-        self.state["completed"] = True
-        return None
-
     def _handle_pre_mutation(self, payload: dict[str, Any]) -> dict[str, Any] | None:
         # Workload delegation applies regardless of model. Reading, analysis,
         # and ordinary tool use have no tier-specific capability restrictions.
@@ -591,11 +581,6 @@ class TurnEventHandler:
         # An authorization granted but never consumed by a blocked action
         # must not survive past the turn it was granted in.
         self.state["pending_authorization"] = False
-        if self.mode == "explicit_release" and self.lifecycle.finished:
-            return {
-                "decision": "block",
-                "reason": "Release completed workers before ending this turn.",
-            }
         self.state["completed"] = True
         return None
 

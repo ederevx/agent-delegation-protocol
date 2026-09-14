@@ -215,11 +215,8 @@ def test_active_worker_cap(home, env):
   assert 'Active worker cap' in denied(spawn('cap-auth'))
 
 
-def test_active_cap_non_automatic_release(home, env):
-  """A completed-but-unreleased worker under explicit/session release still
-  frees its cap slot: `concurrent` (not `active`) is what the cap counts, so
-  a worker held in `active` for later dismissal bookkeeping must not also be
-  treated as still occupying an active-worker slot."""
+def test_legacy_explicit_release_falls_back_to_session(home, env):
+  """An old manifest remains usable with safe session-retention semantics."""
   import hashlib
   manifest_path = home / '.delegation-protocol/manifest.json'
   manifest = json.loads(manifest_path.read_text())
@@ -251,14 +248,15 @@ def test_active_cap_non_automatic_release(home, env):
     for index in range(10):
       start('noauto', f'noauto-{index}')
     assert 'Active worker cap' in denied(spawn('noauto'))
-    # SubagentStop (worker-complete) under explicit_release leaves the worker
-    # in `active` (it is only resumable, not dismissed) but must drop it from
-    # `concurrent`, so the next spawn is admitted despite the held worker.
+    # The legacy value normalizes to session_release: completion retains the
+    # resumable record but frees the active-worker slot.
     complete('noauto', agent_id='noauto-0')
     held = state('noauto')
+    assert held['mode'] == 'session_release', held
     assert 'noauto-0' in held['active'], held
     assert 'noauto-0' not in held['concurrent'], held
     assert spawn('noauto') == {}
+    assert invoke('turn-stop', {'session_id': 'noauto'}) == {}
   finally:
     manifest['release'] = original_release
     manifest_path.write_text(json.dumps(manifest))
@@ -274,7 +272,7 @@ def main():
     test_checkout_hook_runtime(home, env)
     test_routing_and_limits(env)
     test_active_worker_cap(home, env)
-    test_active_cap_non_automatic_release(home, env)
+    test_legacy_explicit_release_falls_back_to_session(home, env)
     m=json.loads((home/'.delegation-protocol/manifest.json').read_text()); assert m['version']==3 and m['release']=='automatic_release'
     assert not (home/'.delegation-protocol/hook_adapter.py').is_symlink()
     assert not (home/'agents/frontier-worker.md').is_symlink()

@@ -240,6 +240,35 @@ def test_active_worker_cap(home, env):
   assert spawn('cap-auth') == {}
   assert 'Active worker cap' in denied(spawn('cap-auth'))
 
+def test_legacy_explicit_release_falls_back_to_session(home, env):
+  """An old manifest remains usable with safe session-retention semantics."""
+  import hashlib
+  manifest_path = home / '.delegation-protocol/manifest.json'
+  manifest = json.loads(manifest_path.read_text())
+  original_release = manifest['release']
+  manifest['release'] = 'explicit_release'
+  manifest_path.write_text(json.dumps(manifest))
+  try:
+    def invoke(event, payload):
+      result = subprocess.run([sys.executable, str(HOOK), event],
+          input=json.dumps(payload), env=env, capture_output=True, text=True)
+      assert result.returncode == 0, result.stderr
+      return json.loads(result.stdout)
+    session = 'legacy-explicit'
+    invoke('worker-start', {'session_id': session, 'agent_id': 'resumed'})
+    invoke('worker-complete', {'session_id': session, 'agent_id': 'resumed'})
+    invoke('worker-start', {'session_id': session, 'agent_id': 'resumed'})
+    key = hashlib.sha256(session.encode()).hexdigest()
+    state = json.loads((home / '.delegation-protocol/hook-state' /
+        (key + '.json')).read_text())
+    assert state['mode'] == 'session_release', state
+    assert state['active'] == state['concurrent'] == ['resumed'], state
+    assert state['finished'] == [], state
+    assert invoke('turn-stop', {'session_id': session}) == {}
+  finally:
+    manifest['release'] = original_release
+    manifest_path.write_text(json.dumps(manifest))
+
 
 def test_tool_budgets(home, env):
   import hashlib
@@ -351,6 +380,7 @@ def main():
     test_checkout_hook_runtime(home, env)
     test_routing_and_limits(env)
     test_active_worker_cap(home, env)
+    test_legacy_explicit_release_falls_back_to_session(home, env)
     test_tool_budgets(home, env)
     test_budget_failures(home)
     m=json.loads((home/'.delegation-protocol/manifest.json').read_text()); assert m['version']==3 and m['release']=='session_release'
