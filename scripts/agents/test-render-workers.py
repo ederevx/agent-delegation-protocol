@@ -36,15 +36,23 @@ class WorkerRenderingTests(unittest.TestCase):
                     output = profile(tier, host)["output"]
                     text = outputs[ROOT / output["path"]]
                     self.assertEqual(text.count(renderer.ROUTING_POLICY), 1)
+                    self.assertIn("remaining work before exhausting the budget", text)
                     if host == "claude":
                         self.assertIn(f"maxTurns: {limit}\n", text)
-                        self.assertIn(f"Native agentic-turn limit: {limit}", text)
+                        self.assertIn(f"native agentic-turn limit is {limit} through maxTurns", text)
                     else:
                         parsed = tomllib.loads(text)
                         self.assertNotIn("max_turns", parsed)
                         self.assertNotIn("maxTurns", parsed)
-                        self.assertIn(f"Advisory agentic-turn budget: {limit}", text)
-                        self.assertIn(f"hard budget of {limit} PreToolUse tool-call attempts", text)
+                        self.assertIn(f"advisory budget of {limit} agentic turns", text)
+                        self.assertIn(f"enforces {limit} PreToolUse tool-call attempts", text)
+
+    def test_all_tiers_use_one_common_worker_contract(self):
+        source = json.loads((ROOT / "agents/worker-profiles.json").read_text())
+        self.assertEqual(source["template"], "agents/worker-common.md.tmpl")
+        for tier in source["tiers"].values():
+            self.assertNotIn("template", tier)
+            self.assertNotIn("body_renderer", tier)
 
     def test_all_tiers_inherit_host_tool_access_without_scope_contracts(self):
         outputs = renderer.rendered_outputs()

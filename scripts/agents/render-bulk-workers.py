@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render host bulk-worker definitions from the common semantic contract."""
+"""Render host worker definitions from the common semantic contract."""
 from __future__ import annotations
 
 import argparse
@@ -41,11 +41,9 @@ def paragraph_text(value: Any, name: str) -> str:
 
 def render_body(template: str, profile: dict[str, Any]) -> str:
     replacements = {
-        "HOST_NAME": profile["host_name"],
         "PARENT_CHANNEL": profile["parent_channel"],
         "ROUTING_POLICY": ROUTING_POLICY,
         "RUNTIME_CONTRACT": runtime_contract(profile["output"]),
-        "CONFLICT_CONTRACT": paragraph_text(profile["conflict_contract"], "conflict_contract"),
         "LIFECYCLE_CONTRACT": paragraph_text(profile["lifecycle_contract"], "lifecycle_contract"),
     }
     expected = set(TOKEN.findall(template))
@@ -54,27 +52,6 @@ def render_body(template: str, profile: dict[str, Any]) -> str:
     body = TOKEN.sub(lambda match: replacements[match.group(1)], template).rstrip() + "\n"
     if TOKEN.search(body):
         raise ValueError("unresolved template token")
-    return body
-
-
-def render_balanced_body(template: str, profile: dict[str, Any]) -> str:
-    replacements = {
-        "PARENT_CHANNEL": profile["parent_channel"],
-        "ROUTING_POLICY": ROUTING_POLICY,
-        "RUNTIME_CONTRACT": runtime_contract(profile["output"]),
-        "LIFECYCLE_CONTRACT": paragraph_text(
-            profile["lifecycle_contract"], "lifecycle_contract"
-        ),
-    }
-    expected = set(TOKEN.findall(template))
-    if expected != set(replacements):
-        raise ValueError(
-            f"balanced template/profile token mismatch: expected={sorted(expected)} "
-            f"actual={sorted(replacements)}"
-        )
-    body = TOKEN.sub(lambda match: replacements[match.group(1)], template).rstrip() + "\n"
-    if TOKEN.search(body):
-        raise ValueError("unresolved balanced template token")
     return body
 
 
@@ -91,16 +68,12 @@ def worker_turn_limit(output: dict[str, Any]) -> int:
 def runtime_contract(output: dict[str, Any]) -> str:
     limit = worker_turn_limit(output)
     if output["format"] == "claude-markdown":
-        return (
-            f"Native agentic-turn limit: {limit} (maxTurns). Return useful results "
-            "and remaining work before exhausting the budget."
-        )
+        return f"This profile's native agentic-turn limit is {limit} through maxTurns."
     return (
-        f"Advisory agentic-turn budget: {limit}. Codex has no native per-worker "
-        f"turn-limit field. ADP separately enforces a hard budget of {limit} "
-        "PreToolUse tool-call attempts per identified worker lifetime, including attempts later denied; tool calls are "
-        "not agentic turns. Return useful results and remaining work before "
-        "exhausting either budget."
+        f"This profile has an advisory budget of {limit} agentic turns; Codex has "
+        f"no native per-worker turn-limit field. ADP separately enforces {limit} "
+        "PreToolUse tool-call attempts per identified worker lifetime, including "
+        "resumes and attempts later denied. Tool calls are not agentic turns."
     )
 
 
@@ -148,20 +121,18 @@ def rendered_outputs() -> dict[Path, str]:
     source = json.loads(WORKER_PROFILES_PATH.read_text(encoding="utf-8"))
     if source.get("schema_version") != 2:
         raise ValueError(f"unsupported worker profile schema: {WORKER_PROFILES_PATH}")
-    body_renderers = {"bulk": render_body, "balanced": render_balanced_body}
+    try:
+        template_relative_path = Path(source["template"])
+    except KeyError as exc:
+        raise ValueError(f"missing worker template: {WORKER_PROFILES_PATH}") from exc
+    if template_relative_path.is_absolute() or ".." in template_relative_path.parts:
+        raise ValueError(f"template path must stay inside the repository: {template_relative_path}")
+    template = (REPO_ROOT / template_relative_path).read_text(encoding="utf-8")
     for tier, tier_profile in source["tiers"].items():
-        try:
-            template_relative_path = Path(tier_profile["template"])
-            body_renderer = body_renderers[tier_profile["body_renderer"]]
-        except KeyError as exc:
-            raise ValueError(f"unsupported tier matrix entry for {tier!r}: {exc}") from exc
-        if template_relative_path.is_absolute() or ".." in template_relative_path.parts:
-            raise ValueError(f"template path must stay inside the repository: {template_relative_path}")
-        template = (REPO_ROOT / template_relative_path).read_text(encoding="utf-8")
         description = tier_profile["description"]
         for profile in tier_profile["profiles"].values():
             output = profile["output"]
-            body = body_renderer(template, profile)
+            body = render_body(template, profile)
             if output["format"] == "claude-markdown":
                 text = render_claude(body, description, output)
             elif output["format"] == "codex-toml":

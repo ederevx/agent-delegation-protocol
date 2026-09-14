@@ -1,17 +1,12 @@
 {
   "schema_version": 2,
+  "template": "agents/worker-common.md.tmpl",
   "tiers": {
     "bulk": {
-      "template": "agents/bulk-worker-common.md.tmpl",
-      "body_renderer": "bulk",
       "description": "Default worker for routine bounded implementation, commands, and tests needing little interpretation.",
       "profiles": {
         "claude": {
-          "host_name": "Claude",
           "parent_channel": "`SendMessage` (use `ListAgents` to identify the parent)",
-          "conflict_contract": [
-            "Use the same parent escalation path for an operation outside the assigned ownership; a single-use permission never becomes a standing grant."
-          ],
           "lifecycle_contract": [
             "Return the evidence report through the foreground Agent result or `SendMessage` for a named background teammate. Claude automatically releases a foreground Agent when its result returns; do not issue a stop operation for that completed worker."
           ],
@@ -24,11 +19,7 @@
           }
         },
         "codex": {
-          "host_name": "Codex",
           "parent_channel": "the collaboration channel available to the worker",
-          "conflict_contract": [
-            "If no parent channel is available, stop and report instead of guessing."
-          ],
           "lifecycle_contract": [
             "Return the evidence report and stop. The host session lifecycle releases the worker; no nonexistent post-result worker action is required."
           ],
@@ -43,16 +34,10 @@
       }
     },
     "quick": {
-      "template": "agents/bulk-worker-common.md.tmpl",
-      "body_renderer": "bulk",
       "description": "Preferred worker for trivial, mechanical, single-step work using the least adequate compute.",
       "profiles": {
         "claude": {
-          "host_name": "Claude",
           "parent_channel": "`SendMessage` (use `ListAgents` to identify the parent)",
-          "conflict_contract": [
-            "Use the same parent escalation path for an operation outside the assigned ownership; a single-use permission never becomes a standing grant."
-          ],
           "lifecycle_contract": [
             "Return the evidence report through the foreground Agent result or `SendMessage` for a named background teammate. Claude automatically releases a foreground Agent when its result returns; do not issue a stop operation for that completed worker."
           ],
@@ -65,11 +50,7 @@
           }
         },
         "codex": {
-          "host_name": "Codex",
           "parent_channel": "the collaboration channel available to the worker",
-          "conflict_contract": [
-            "If no parent channel is available, stop and report instead of guessing."
-          ],
           "lifecycle_contract": [
             "Return the evidence report and stop. The host session lifecycle releases the worker; no nonexistent post-result worker action is required."
           ],
@@ -84,12 +65,9 @@
       }
     },
     "balanced": {
-      "template": "agents/balanced-worker-common.md.tmpl",
-      "body_renderer": "balanced",
       "description": "Analysis-first worker that can also execute; use when lower tiers need more reasoning.",
       "profiles": {
         "claude": {
-          "host_name": "Claude",
           "parent_channel": "`SendMessage` (use `ListAgents` to identify the parent)",
           "lifecycle_contract": [
             "Return the evidence report through the foreground Agent result or `SendMessage` for a named background teammate. Claude automatically releases a foreground Agent when its result returns; do not issue a stop operation for that completed worker."
@@ -103,7 +81,6 @@
           }
         },
         "codex": {
-          "host_name": "Codex",
           "parent_channel": "the collaboration channel available to the worker",
           "lifecycle_contract": [
             "Return the evidence report and stop. The host session lifecycle releases the worker; no nonexistent post-result worker action is required."
@@ -119,12 +96,9 @@
       }
     },
     "frontier": {
-      "template": "agents/balanced-worker-common.md.tmpl",
-      "body_renderer": "balanced",
       "description": "Highest-cost worker for difficult reasoning or execution when lower tiers are insufficient; shortest runtime budget.",
       "profiles": {
         "claude": {
-          "host_name": "Claude",
           "parent_channel": "`SendMessage` (use `ListAgents` to identify the parent)",
           "lifecycle_contract": [
             "Return the evidence report through the foreground Agent result or `SendMessage` for a named background teammate. Claude automatically releases a foreground Agent when its result returns; do not issue a stop operation for that completed worker."
@@ -138,7 +112,6 @@
           }
         },
         "codex": {
-          "host_name": "Codex",
           "parent_channel": "the collaboration channel available to the worker",
           "lifecycle_contract": [
             "Return the evidence report and stop. The host session lifecycle releases the worker; no nonexistent post-result worker action is required."
