@@ -281,16 +281,6 @@ RELAYED_MESSAGE = re.compile(
     re.IGNORECASE,
 )
 
-# The union of what each half recognized as "spawning is not available here",
-# so a runtime that reports unavailability in one host's wording still causes
-# the other to fail open rather than block the turn forever.
-SPAWN_UNAVAILABLE = re.compile(
-    r"(?:concurrent.*limit|agent(?: tool)?.*(?:unavailable|disabled|not available)|"
-    r"subagent.*(?:unavailable|disabled|not available)|model not found|no available model|"
-    r"unsupported model|not permitted|permission denied|unknown agent)",
-    re.IGNORECASE,
-)
-
 def contains_any(text: str, words: tuple[str, ...]) -> bool:
     return any(word in text for word in words)
 
@@ -527,5 +517,4 @@ def classify(
 ) -> dict[str, Any]:
     """Decide whether a turn must be delegated, and to how many workers."""
     return _TurnClassifier(prompt, previous, context_env).classify()
-
 

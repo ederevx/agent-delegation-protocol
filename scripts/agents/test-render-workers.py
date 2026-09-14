@@ -19,11 +19,11 @@ spec.loader.exec_module(renderer)
 
 
 def profile(tier: str, host: str = "claude") -> dict:
-    return json.loads((ROOT / f"agents/{tier}-worker-profiles.json").read_text())["profiles"][host]
+    return profile_document(tier)["profiles"][host]
 
 
 def profile_document(tier: str) -> dict:
-    return json.loads((ROOT / f"agents/{tier}-worker-profiles.json").read_text())
+    return json.loads((ROOT / "agents/worker-profiles.json").read_text())["tiers"][tier]
 
 
 class WorkerRenderingTests(unittest.TestCase):

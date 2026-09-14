@@ -525,6 +525,7 @@ def test_fresh_copy_install_and_managed_refresh() -> None:
         for host in ("claude", "codex"):
             repo, home = fixture(root / host), root / f"{host}-home"
             install.install(repo, home, host)
+            assert not (home / ".delegation-protocol/host-settings.json").exists()
             first = assert_regular_resources(repo, home, host)
             tracked = next(item for item in first["resources"] if item["destination"].endswith(
                 "delegation-enforcer.py"
@@ -537,6 +538,50 @@ def test_fresh_copy_install_and_managed_refresh() -> None:
             assert second["hashes"][str(destination)] == hashlib.sha256(
                 b"managed refresh\n"
             ).hexdigest()
+
+
+def test_legacy_claude_environment_ownership_survives_reinstall() -> None:
+    """Only a legacy uninstall removes the exact values it formerly added."""
+    with tempfile.TemporaryDirectory(prefix="adp-legacy-claude-env-") as raw:
+        root = Path(raw)
+        repo, home = fixture(root), root / "claude-home"
+        install.install(repo, home, "claude")
+        state = home / ".delegation-protocol"
+        legacy_path = state / "host-settings.json"
+        settings_path = home / "settings.json"
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        settings["env"] = {
+            "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+            "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "3",
+            "USER_SETTING": "keep",
+        }
+        settings_path.write_text(json.dumps(settings), encoding="utf-8")
+        legacy = {
+            "schema_version": 2,
+            "host": "claude",
+            "settings_path": str(settings_path),
+            "added_environment": {
+                "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+                "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "3",
+            },
+        }
+        legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+        legacy_bytes = legacy_path.read_bytes()
+
+        install.install(repo, home, "claude")
+        assert legacy_path.read_bytes() == legacy_bytes
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        assert settings["env"]["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] == "1"
+        assert settings["env"]["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"] == "3"
+
+        settings["env"]["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"] = "user-choice"
+        settings_path.write_text(json.dumps(settings), encoding="utf-8")
+        install.uninstall(home, "claude")
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        assert "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS" not in settings["env"]
+        assert settings["env"]["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"] == "user-choice"
+        assert settings["env"]["USER_SETTING"] == "keep"
+        assert not legacy_path.exists()
 
 
 @requires_symlink_fixture
@@ -758,7 +803,6 @@ def test_late_failure_restores_legacy_links_and_exact_bytes() -> None:
         manifest_path = home / ".delegation-protocol/manifest.json"
         before = {path: path.read_bytes() for path in (
             home / "settings.json", manifest_path,
-            home / ".delegation-protocol/host-settings.json",
         )}
         manifest_path.write_text(json.dumps(legacy), encoding="utf-8")
         before[manifest_path] = manifest_path.read_bytes()
@@ -783,6 +827,7 @@ def main() -> None:
     test_codex_config_is_restored_byte_for_byte()
     test_codex_thread_capacity_upgrade_preserves_original_restore()
     test_fresh_copy_install_and_managed_refresh()
+    test_legacy_claude_environment_ownership_survives_reinstall()
     test_legacy_v116_links_migrate_from_a_different_checkout()
     test_refuses_foreign_copies_and_foreign_symlinks()
     test_reinstall_refuses_former_policy_links()

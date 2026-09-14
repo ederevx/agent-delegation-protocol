@@ -431,10 +431,6 @@ def _deny(reason: str) -> dict[str, Any]:
     }
 
 
-class _SkipSave(Exception):
-    """Raised by a handler to signal the in-flight state must not be persisted."""
-
-
 class TurnEventHandler:
     """Applies one normalized hook event against a single turn's saved state.
 
@@ -758,10 +754,7 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         with _locked(lock):
             state = _load(path, mode)
             handler = TurnEventHandler(host, classifier, mode, state)
-            try:
-                output = handler.handle(event, payload)
-            except _SkipSave:
-                return None
+            output = handler.handle(event, payload)
             _save(path, state)
             return output
     except (OSError, ValueError, TypeError) as error:

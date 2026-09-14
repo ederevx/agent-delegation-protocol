@@ -29,12 +29,7 @@ def _load_classifier() -> Any:
 _CLASSIFIER = _load_classifier()
 WORKER_TURN_LIMITS = _CLASSIFIER.WORKER_TURN_LIMITS
 ROUTING_POLICY = _CLASSIFIER.ROUTING_POLICY
-TEMPLATE_PATH = REPO_ROOT / "agents" / "bulk-worker-common.md.tmpl"
-PROFILES_PATH = REPO_ROOT / "agents" / "bulk-worker-profiles.json"
-QUICK_PROFILES_PATH = REPO_ROOT / "agents" / "quick-worker-profiles.json"
-BALANCED_TEMPLATE_PATH = REPO_ROOT / "agents" / "balanced-worker-common.md.tmpl"
-BALANCED_PROFILES_PATH = REPO_ROOT / "agents" / "balanced-worker-profiles.json"
-FRONTIER_PROFILES_PATH = REPO_ROOT / "agents" / "frontier-worker-profiles.json"
+WORKER_PROFILES_PATH = REPO_ROOT / "agents" / "worker-profiles.json"
 TOKEN = re.compile(r"{{([A-Z_]+)}}")
 
 
@@ -150,19 +145,21 @@ def render_codex(body: str, description: str, output: dict[str, Any]) -> str:
 
 def rendered_outputs() -> dict[Path, str]:
     outputs: dict[Path, str] = {}
-    sources = (
-        (TEMPLATE_PATH, PROFILES_PATH, 2, render_body),
-        (TEMPLATE_PATH, QUICK_PROFILES_PATH, 2, render_body),
-        (BALANCED_TEMPLATE_PATH, BALANCED_PROFILES_PATH, 2, render_balanced_body),
-        (BALANCED_TEMPLATE_PATH, FRONTIER_PROFILES_PATH, 2, render_balanced_body),
-    )
-    for template_path, profiles_path, schema_version, body_renderer in sources:
-        template = template_path.read_text(encoding="utf-8")
-        source = json.loads(profiles_path.read_text(encoding="utf-8"))
-        if source.get("schema_version") != schema_version:
-            raise ValueError(f"unsupported worker profile schema: {profiles_path}")
-        description = source["description"]
-        for profile in source["profiles"].values():
+    source = json.loads(WORKER_PROFILES_PATH.read_text(encoding="utf-8"))
+    if source.get("schema_version") != 2:
+        raise ValueError(f"unsupported worker profile schema: {WORKER_PROFILES_PATH}")
+    body_renderers = {"bulk": render_body, "balanced": render_balanced_body}
+    for tier, tier_profile in source["tiers"].items():
+        try:
+            template_relative_path = Path(tier_profile["template"])
+            body_renderer = body_renderers[tier_profile["body_renderer"]]
+        except KeyError as exc:
+            raise ValueError(f"unsupported tier matrix entry for {tier!r}: {exc}") from exc
+        if template_relative_path.is_absolute() or ".." in template_relative_path.parts:
+            raise ValueError(f"template path must stay inside the repository: {template_relative_path}")
+        template = (REPO_ROOT / template_relative_path).read_text(encoding="utf-8")
+        description = tier_profile["description"]
+        for profile in tier_profile["profiles"].values():
             output = profile["output"]
             body = body_renderer(template, profile)
             if output["format"] == "claude-markdown":

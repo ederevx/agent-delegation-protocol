@@ -784,10 +784,6 @@ def install(repo: Path, home: Path, host: str) -> None:
     rollback_policy: Callable[[], None] = lambda: None
     settings_path = home / ("settings.json" if host == "claude" else "hooks.json")
     prior_settings = settings_path.read_bytes() if settings_path.exists() else None
-    settings_manifest = state / "host-settings.json"
-    prior_settings_manifest = (
-        settings_manifest.read_bytes() if settings_manifest.exists() else None
-    )
     settings_backup = state / f"{settings_path.name}.before-first-install"
     prior_settings_backup = (
         settings_backup.read_bytes() if settings_backup.exists() else None
@@ -851,10 +847,6 @@ def install(repo: Path, home: Path, host: str) -> None:
             settings_path.unlink(missing_ok=True)
         else:
             settings_path.write_bytes(prior_settings)
-        if prior_settings_manifest is None:
-            settings_manifest.unlink(missing_ok=True)
-        else:
-            settings_manifest.write_bytes(prior_settings_manifest)
         if prior_settings_backup is None:
             settings_backup.unlink(missing_ok=True)
         else:
