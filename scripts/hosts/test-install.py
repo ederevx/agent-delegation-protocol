@@ -610,6 +610,7 @@ def test_late_failure_restores_retired_lifecycle_copy() -> None:
         install.install(repo, home, "claude")
         lifecycle = add_owned_lifecycle_copy(repo, home, b"old lifecycle\n")
         os.chmod(lifecycle, 0o640)
+        previous_mode = lifecycle.stat().st_mode & 0o7777
         manifest_path = home / ".delegation-protocol/manifest.json"
         before_manifest = manifest_path.read_bytes()
 
@@ -622,7 +623,7 @@ def test_late_failure_restores_retired_lifecycle_copy() -> None:
                 raise AssertionError("late failure did not abort installation")
 
         assert lifecycle.read_bytes() == b"old lifecycle\n"
-        assert lifecycle.stat().st_mode & 0o7777 == 0o640
+        assert lifecycle.stat().st_mode & 0o7777 == previous_mode
         assert manifest_path.read_bytes() == before_manifest
 
 
