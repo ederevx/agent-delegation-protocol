@@ -195,7 +195,6 @@ def resources(repo: Path, home: Path, host: str) -> list[tuple[Path, Path, str]]
     common = [
         (repo / "scripts/agents/delegation-classifier.py", state / "delegation-classifier.py", "copy"),
         (repo / "scripts/hosts/hook_adapter.py", state / "hook_adapter.py", "copy"),
-        (repo / "scripts/hosts/lifecycle.py", state / "lifecycle.py", "copy"),
     ]
     if host == "claude":
         return [
@@ -730,6 +729,30 @@ def _legacy_resource_source(
     return None
 
 
+def retire_owned_lifecycle(
+    state: Path, manifest: dict[str, Any] | None,
+    changed: list[tuple[Path, tuple[str, bytes | str | None, int | None]]],
+) -> None:
+    """Retire only the unchanged lifecycle copy owned by the prior manifest."""
+    destination = state / "lifecycle.py"
+    name = str(destination)
+    if name not in set((manifest or {}).get("owned", [])):
+        return
+    resource = next((
+        item for item in (manifest or {}).get("resources", [])
+        if isinstance(item, dict) and item.get("destination") == name
+    ), None)
+    recorded = (manifest or {}).get("hashes", {}).get(name)
+    if not (
+        isinstance(resource, dict) and resource.get("kind") == "copy" and
+        isinstance(recorded, str) and destination.is_file() and
+        not destination.is_symlink() and digest(destination) == recorded
+    ):
+        return
+    changed.append((destination, capture_path(destination)))
+    destination.unlink()
+
+
 def validate_destination(source: Path, destination: Path, kind: str, owned: bool,
                          recorded: str | None = None,
                          legacy: tuple[Path, str] | None = None) -> None:
@@ -784,10 +807,6 @@ def install(repo: Path, home: Path, host: str) -> None:
     rollback_policy: Callable[[], None] = lambda: None
     settings_path = home / ("settings.json" if host == "claude" else "hooks.json")
     prior_settings = settings_path.read_bytes() if settings_path.exists() else None
-    settings_manifest = state / "host-settings.json"
-    prior_settings_manifest = (
-        settings_manifest.read_bytes() if settings_manifest.exists() else None
-    )
     settings_backup = state / f"{settings_path.name}.before-first-install"
     prior_settings_backup = (
         settings_backup.read_bytes() if settings_backup.exists() else None
@@ -813,6 +832,7 @@ def install(repo: Path, home: Path, host: str) -> None:
                 continue
             changed.append((destination, capture_path(destination)))
             atomic_copy(source, destination)
+        retire_owned_lifecycle(state, previous, changed)
         policy = None
         codex_config = None
         if host == "codex":
@@ -829,7 +849,6 @@ def install(repo: Path, home: Path, host: str) -> None:
             sys.executable,
         )
         manifest = {"version": VERSION, "host": host, "repo": str(repo),
-                    "release": "automatic_release" if host == "claude" else "session_release",
                     "owned": [str(destination) for _, destination, _ in items],
                     "resources": [{"source": str(source), "destination": str(destination), "kind": kind}
                                   for source, destination, kind in items],
@@ -851,10 +870,6 @@ def install(repo: Path, home: Path, host: str) -> None:
             settings_path.unlink(missing_ok=True)
         else:
             settings_path.write_bytes(prior_settings)
-        if prior_settings_manifest is None:
-            settings_manifest.unlink(missing_ok=True)
-        else:
-            settings_manifest.write_bytes(prior_settings_manifest)
         if prior_settings_backup is None:
             settings_backup.unlink(missing_ok=True)
         else:

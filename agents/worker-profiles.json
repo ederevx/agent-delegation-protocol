@@ -1,0 +1,94 @@
+{
+  "schema_version": 2,
+  "template": "agents/worker-common.md.tmpl",
+  "hosts": {
+    "claude": {
+      "parent_channel": "`SendMessage` (use `ListAgents` to identify the parent)",
+      "lifecycle_contract": [
+        "Return the evidence report through the foreground Agent result or `SendMessage` for a named background teammate. Claude automatically releases a foreground Agent when its result returns; do not issue a stop operation for that completed worker."
+      ],
+      "output": {
+        "format": "claude-markdown"
+      }
+    },
+    "codex": {
+      "parent_channel": "the collaboration channel available to the worker",
+      "lifecycle_contract": [
+        "Return the evidence report and stop. The host session lifecycle releases the worker; no nonexistent post-result worker action is required."
+      ],
+      "output": {
+        "format": "codex-toml"
+      }
+    }
+  },
+  "tiers": {
+    "bulk": {
+      "description": "Default worker for routine bounded implementation, commands, and tests needing little interpretation.",
+      "profiles": {
+        "claude": {
+          "path": "claude/agents/bulk-worker.md",
+          "name": "bulk-worker",
+          "model": "sonnet",
+          "effort": "medium"
+        },
+        "codex": {
+          "path": "codex/agents/bulk_worker.toml",
+          "name": "bulk_worker",
+          "model": "gpt-5.6-terra",
+          "reasoning_effort": "medium"
+        }
+      }
+    },
+    "quick": {
+      "description": "Preferred worker for trivial, mechanical, single-step work using the least adequate compute.",
+      "profiles": {
+        "claude": {
+          "path": "claude/agents/quick-worker.md",
+          "name": "quick-worker",
+          "model": "haiku",
+          "effort": "low"
+        },
+        "codex": {
+          "path": "codex/agents/quick_worker.toml",
+          "name": "quick_worker",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "low"
+        }
+      }
+    },
+    "balanced": {
+      "description": "Analysis-first worker that can also execute; use when lower tiers need more reasoning.",
+      "profiles": {
+        "claude": {
+          "path": "claude/agents/balanced-worker.md",
+          "name": "balanced-worker",
+          "model": "opus",
+          "effort": "high"
+        },
+        "codex": {
+          "path": "codex/agents/balanced-worker.toml",
+          "name": "balanced_worker",
+          "model": "gpt-5.6-sol",
+          "reasoning_effort": "high"
+        }
+      }
+    },
+    "frontier": {
+      "description": "Highest-cost worker for difficult reasoning or execution when lower tiers are insufficient; shortest runtime budget.",
+      "profiles": {
+        "claude": {
+          "path": "claude/agents/frontier-worker.md",
+          "name": "frontier-worker",
+          "model": "fable",
+          "effort": "xhigh"
+        },
+        "codex": {
+          "path": "codex/agents/frontier_worker.toml",
+          "name": "frontier_worker",
+          "model": "gpt-6-astra",
+          "reasoning_effort": "xhigh"
+        }
+      }
+    }
+  }
+}

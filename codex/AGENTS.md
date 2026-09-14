@@ -91,8 +91,8 @@ no longer appears in `list_agents` and that `read_thread` reports it unloaded.
 Never treat deleting session files, editing SQLite or the ledger, or killing
 processes as closure. If native closure is missing or fails, report the
 concrete blocker; do not inflate capacity or claim that bookkeeping freed the
-host thread. Completion frees the hook's active-worker slot; `session_release`
-retains completion bookkeeping separately from native host closure. For V2,
+host thread. Completion frees the hook's active-worker slot; native host
+closure remains a separate operation. For V2,
 a native thread-limit error immediately after
 confirmed archival can be stale residency pruning; refresh live status and
 retry once. Report a repeated failure rather than increasing the limit.

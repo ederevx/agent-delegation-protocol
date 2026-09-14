@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 STATUS_PREFIX = "Delegation protocol v2:"
-CLAUDE_ENV_DEFAULTS: dict[str, str] = {}
 
 
 def quote(value: str) -> str:
@@ -121,34 +120,22 @@ def install(host: str, home: Path, hook_path: Path, python_executable: str) -> N
         state_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(settings_path, backup)
     merge_groups(settings, groups(host, hook_path, python_executable))
-    added_environment: dict[str, str] = {}
-    if host == "claude":
-        environment = settings.setdefault("env", {})
-        if not isinstance(environment, dict):
-            raise ValueError("refusing to replace non-object env setting")
-        for key, value in CLAUDE_ENV_DEFAULTS.items():
-            if key not in environment:
-                environment[key] = value
-                added_environment[key] = value
     atomic_json(settings_path, settings)
-    atomic_json(state_dir / "host-settings.json", {
-        "schema_version": 2,
-        "host": host,
-        "settings_path": str(settings_path),
-        "added_environment": added_environment,
-    })
 
 
 def uninstall(host: str, home: Path) -> None:
     settings_path = home / ("settings.json" if host == "claude" else "hooks.json")
     state_dir = home / ".delegation-protocol"
     manifest_path = state_dir / "host-settings.json"
-    manifest = load_json(manifest_path) if manifest_path.exists() else {}
+    # Older installs recorded only the environment entries they inserted.
+    # Keep that record intact during later installs, then remove precisely
+    # those unchanged values on uninstall. New installs do not create it.
+    legacy_manifest = load_json(manifest_path) if manifest_path.exists() else {}
     if settings_path.exists():
         settings = load_json(settings_path)
         strip_owned_hooks(settings)
         environment = settings.get("env")
-        installed = manifest.get("added_environment", {})
+        installed = legacy_manifest.get("added_environment", {})
         if isinstance(environment, dict) and isinstance(installed, dict):
             for key, value in installed.items():
                 if environment.get(key) == value:

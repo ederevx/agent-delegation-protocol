@@ -240,7 +240,6 @@ def test_active_worker_cap(home, env):
   assert spawn('cap-auth') == {}
   assert 'Active worker cap' in denied(spawn('cap-auth'))
 
-
 def test_tool_budgets(home, env):
   import hashlib
   def invoke(event, payload):
@@ -353,7 +352,7 @@ def main():
     test_active_worker_cap(home, env)
     test_tool_budgets(home, env)
     test_budget_failures(home)
-    m=json.loads((home/'.delegation-protocol/manifest.json').read_text()); assert m['version']==3 and m['release']=='session_release'
+    m=json.loads((home/'.delegation-protocol/manifest.json').read_text()); assert m['version']==3 and 'release' not in m
     hooks=json.loads((home/'hooks.json').read_text())['hooks']
     assert 'SubagentStart' in hooks and 'SubagentStop' in hooks
     assert 'PostToolUse' not in hooks, 'Codex completion must use native subagent lifecycle events'

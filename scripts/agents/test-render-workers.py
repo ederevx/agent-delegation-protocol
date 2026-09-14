@@ -18,12 +18,17 @@ renderer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(renderer)
 
 
-def profile(tier: str, host: str = "claude") -> dict:
-    return json.loads((ROOT / f"agents/{tier}-worker-profiles.json").read_text())["profiles"][host]
+def worker(tier: str, host: str = "claude") -> dict:
+    return profile_document(tier)["profiles"][host]
+
+
+def output(tier: str, host: str = "claude") -> dict:
+    source = json.loads((ROOT / "agents/worker-profiles.json").read_text())
+    return renderer.profile_output(source["hosts"][host], worker(tier, host))
 
 
 def profile_document(tier: str) -> dict:
-    return json.loads((ROOT / f"agents/{tier}-worker-profiles.json").read_text())
+    return json.loads((ROOT / "agents/worker-profiles.json").read_text())["tiers"][tier]
 
 
 class WorkerRenderingTests(unittest.TestCase):
@@ -33,18 +38,39 @@ class WorkerRenderingTests(unittest.TestCase):
         for tier, limit in expected.items():
             for host in ("claude", "codex"):
                 with self.subTest(tier=tier, host=host):
-                    output = profile(tier, host)["output"]
-                    text = outputs[ROOT / output["path"]]
+                    rendered = output(tier, host)
+                    text = outputs[ROOT / rendered["path"]]
                     self.assertEqual(text.count(renderer.ROUTING_POLICY), 1)
+                    self.assertIn("remaining work before exhausting the budget", text)
                     if host == "claude":
                         self.assertIn(f"maxTurns: {limit}\n", text)
-                        self.assertIn(f"Native agentic-turn limit: {limit}", text)
+                        self.assertIn(f"native agentic-turn limit is {limit} through maxTurns", text)
                     else:
                         parsed = tomllib.loads(text)
                         self.assertNotIn("max_turns", parsed)
                         self.assertNotIn("maxTurns", parsed)
-                        self.assertIn(f"Advisory agentic-turn budget: {limit}", text)
-                        self.assertIn(f"hard budget of {limit} PreToolUse tool-call attempts", text)
+                        self.assertIn(f"advisory budget of {limit} agentic turns", text)
+                        self.assertIn(f"enforces {limit} PreToolUse tool-call attempts", text)
+
+    def test_all_tiers_use_one_common_worker_contract(self):
+        source = json.loads((ROOT / "agents/worker-profiles.json").read_text())
+        self.assertEqual(source["template"], "agents/worker-common.md.tmpl")
+        self.assertEqual(set(source["hosts"]), {"claude", "codex"})
+        self.assertEqual(
+            source["hosts"]["claude"]["output"],
+            {"format": "claude-markdown"},
+        )
+        self.assertEqual(
+            source["hosts"]["codex"]["output"],
+            {"format": "codex-toml"},
+        )
+        for tier in source["tiers"].values():
+            self.assertNotIn("template", tier)
+            self.assertNotIn("body_renderer", tier)
+            for worker_profile in tier["profiles"].values():
+                self.assertNotIn("parent_channel", worker_profile)
+                self.assertNotIn("lifecycle_contract", worker_profile)
+                self.assertNotIn("output", worker_profile)
 
     def test_all_tiers_inherit_host_tool_access_without_scope_contracts(self):
         outputs = renderer.rendered_outputs()
@@ -53,10 +79,10 @@ class WorkerRenderingTests(unittest.TestCase):
             self.assertNotIn("scope_contract", source)
             for host in ("claude", "codex"):
                 with self.subTest(tier=tier, host=host):
-                    output = source["profiles"][host]["output"]
-                    self.assertNotIn("tools", output)
-                    self.assertNotIn("disallowedTools", output)
-                    text = outputs[ROOT / output["path"]]
+                    rendered = output(tier, host)
+                    self.assertNotIn("tools", rendered)
+                    self.assertNotIn("disallowedTools", rendered)
+                    text = outputs[ROOT / rendered["path"]]
                     self.assertNotIn("## Scope", text)
                     if host == "claude":
                         self.assertNotIn("tools:", text)
@@ -74,23 +100,36 @@ class WorkerRenderingTests(unittest.TestCase):
         for tier, hosts in expected.items():
             for host, (model, effort) in hosts.items():
                 with self.subTest(tier=tier, host=host):
-                    output = profile(tier, host)["output"]
-                    self.assertEqual(output["model"], model)
+                    rendered = output(tier, host)
+                    self.assertEqual(rendered["model"], model)
                     self.assertEqual(
-                        output["effort"] if host == "claude" else output["reasoning_effort"],
+                        rendered["effort"] if host == "claude" else rendered["reasoning_effort"],
                         effort,
                     )
 
     def test_unknown_roles_fail_for_both_hosts(self):
         for host, render in (("claude", renderer.render_claude), ("codex", renderer.render_codex)):
-            output = copy.deepcopy(profile("frontier", host)["output"])
-            output["name"] = "frontier-workre"
+            rendered = copy.deepcopy(output("frontier", host))
+            rendered["name"] = "frontier-workre"
             with self.subTest(host=host), self.assertRaisesRegex(ValueError, "unknown worker"):
-                render("body", "description", output)
+                render("body", "description", rendered)
 
     def test_generated_outputs_are_current_and_have_no_execution_prohibitions(self):
         outputs = renderer.rendered_outputs()
         self.assertEqual(len(outputs), 8)
+        self.assertEqual(
+            {path.relative_to(ROOT) for path in outputs},
+            {
+                Path("claude/agents/quick-worker.md"),
+                Path("claude/agents/bulk-worker.md"),
+                Path("claude/agents/balanced-worker.md"),
+                Path("claude/agents/frontier-worker.md"),
+                Path("codex/agents/quick_worker.toml"),
+                Path("codex/agents/bulk_worker.toml"),
+                Path("codex/agents/balanced-worker.toml"),
+                Path("codex/agents/frontier_worker.toml"),
+            },
+        )
         for path, generated in outputs.items():
             with self.subTest(path=path):
                 self.assertEqual(path.read_text(), generated)

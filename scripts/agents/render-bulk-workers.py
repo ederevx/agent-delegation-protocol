@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render host bulk-worker definitions from the common semantic contract."""
+"""Render host worker definitions from the common semantic contract."""
 from __future__ import annotations
 
 import argparse
@@ -29,12 +29,7 @@ def _load_classifier() -> Any:
 _CLASSIFIER = _load_classifier()
 WORKER_TURN_LIMITS = _CLASSIFIER.WORKER_TURN_LIMITS
 ROUTING_POLICY = _CLASSIFIER.ROUTING_POLICY
-TEMPLATE_PATH = REPO_ROOT / "agents" / "bulk-worker-common.md.tmpl"
-PROFILES_PATH = REPO_ROOT / "agents" / "bulk-worker-profiles.json"
-QUICK_PROFILES_PATH = REPO_ROOT / "agents" / "quick-worker-profiles.json"
-BALANCED_TEMPLATE_PATH = REPO_ROOT / "agents" / "balanced-worker-common.md.tmpl"
-BALANCED_PROFILES_PATH = REPO_ROOT / "agents" / "balanced-worker-profiles.json"
-FRONTIER_PROFILES_PATH = REPO_ROOT / "agents" / "frontier-worker-profiles.json"
+WORKER_PROFILES_PATH = REPO_ROOT / "agents" / "worker-profiles.json"
 TOKEN = re.compile(r"{{([A-Z_]+)}}")
 
 
@@ -44,14 +39,12 @@ def paragraph_text(value: Any, name: str) -> str:
     return "\n\n".join(value)
 
 
-def render_body(template: str, profile: dict[str, Any]) -> str:
+def render_body(template: str, host: dict[str, Any], output: dict[str, Any]) -> str:
     replacements = {
-        "HOST_NAME": profile["host_name"],
-        "PARENT_CHANNEL": profile["parent_channel"],
+        "PARENT_CHANNEL": host["parent_channel"],
         "ROUTING_POLICY": ROUTING_POLICY,
-        "RUNTIME_CONTRACT": runtime_contract(profile["output"]),
-        "CONFLICT_CONTRACT": paragraph_text(profile["conflict_contract"], "conflict_contract"),
-        "LIFECYCLE_CONTRACT": paragraph_text(profile["lifecycle_contract"], "lifecycle_contract"),
+        "RUNTIME_CONTRACT": runtime_contract(output),
+        "LIFECYCLE_CONTRACT": paragraph_text(host["lifecycle_contract"], "lifecycle_contract"),
     }
     expected = set(TOKEN.findall(template))
     if expected != set(replacements):
@@ -62,25 +55,12 @@ def render_body(template: str, profile: dict[str, Any]) -> str:
     return body
 
 
-def render_balanced_body(template: str, profile: dict[str, Any]) -> str:
-    replacements = {
-        "PARENT_CHANNEL": profile["parent_channel"],
-        "ROUTING_POLICY": ROUTING_POLICY,
-        "RUNTIME_CONTRACT": runtime_contract(profile["output"]),
-        "LIFECYCLE_CONTRACT": paragraph_text(
-            profile["lifecycle_contract"], "lifecycle_contract"
-        ),
+def profile_output(host: dict[str, Any], worker: dict[str, Any]) -> dict[str, Any]:
+    output = host["output"]
+    return {
+        "format": output["format"],
+        **worker,
     }
-    expected = set(TOKEN.findall(template))
-    if expected != set(replacements):
-        raise ValueError(
-            f"balanced template/profile token mismatch: expected={sorted(expected)} "
-            f"actual={sorted(replacements)}"
-        )
-    body = TOKEN.sub(lambda match: replacements[match.group(1)], template).rstrip() + "\n"
-    if TOKEN.search(body):
-        raise ValueError("unresolved balanced template token")
-    return body
 
 
 def worker_turn_limit(output: dict[str, Any]) -> int:
@@ -96,16 +76,12 @@ def worker_turn_limit(output: dict[str, Any]) -> int:
 def runtime_contract(output: dict[str, Any]) -> str:
     limit = worker_turn_limit(output)
     if output["format"] == "claude-markdown":
-        return (
-            f"Native agentic-turn limit: {limit} (maxTurns). Return useful results "
-            "and remaining work before exhausting the budget."
-        )
+        return f"This profile's native agentic-turn limit is {limit} through maxTurns."
     return (
-        f"Advisory agentic-turn budget: {limit}. Codex has no native per-worker "
-        f"turn-limit field. ADP separately enforces a hard budget of {limit} "
-        "PreToolUse tool-call attempts per identified worker lifetime, including attempts later denied; tool calls are "
-        "not agentic turns. Return useful results and remaining work before "
-        "exhausting either budget."
+        f"This profile has an advisory budget of {limit} agentic turns; Codex has "
+        f"no native per-worker turn-limit field. ADP separately enforces {limit} "
+        "PreToolUse tool-call attempts per identified worker lifetime, including "
+        "resumes and attempts later denied. Tool calls are not agentic turns."
     )
 
 
@@ -150,21 +126,22 @@ def render_codex(body: str, description: str, output: dict[str, Any]) -> str:
 
 def rendered_outputs() -> dict[Path, str]:
     outputs: dict[Path, str] = {}
-    sources = (
-        (TEMPLATE_PATH, PROFILES_PATH, 2, render_body),
-        (TEMPLATE_PATH, QUICK_PROFILES_PATH, 2, render_body),
-        (BALANCED_TEMPLATE_PATH, BALANCED_PROFILES_PATH, 2, render_balanced_body),
-        (BALANCED_TEMPLATE_PATH, FRONTIER_PROFILES_PATH, 2, render_balanced_body),
-    )
-    for template_path, profiles_path, schema_version, body_renderer in sources:
-        template = template_path.read_text(encoding="utf-8")
-        source = json.loads(profiles_path.read_text(encoding="utf-8"))
-        if source.get("schema_version") != schema_version:
-            raise ValueError(f"unsupported worker profile schema: {profiles_path}")
-        description = source["description"]
-        for profile in source["profiles"].values():
-            output = profile["output"]
-            body = body_renderer(template, profile)
+    source = json.loads(WORKER_PROFILES_PATH.read_text(encoding="utf-8"))
+    if source.get("schema_version") != 2:
+        raise ValueError(f"unsupported worker profile schema: {WORKER_PROFILES_PATH}")
+    try:
+        template_relative_path = Path(source["template"])
+    except KeyError as exc:
+        raise ValueError(f"missing worker template: {WORKER_PROFILES_PATH}") from exc
+    if template_relative_path.is_absolute() or ".." in template_relative_path.parts:
+        raise ValueError(f"template path must stay inside the repository: {template_relative_path}")
+    template = (REPO_ROOT / template_relative_path).read_text(encoding="utf-8")
+    for tier, tier_profile in source["tiers"].items():
+        description = tier_profile["description"]
+        for host_name, worker in tier_profile["profiles"].items():
+            host = source["hosts"][host_name]
+            output = profile_output(host, worker)
+            body = render_body(template, host, output)
             if output["format"] == "claude-markdown":
                 text = render_claude(body, description, output)
             elif output["format"] == "codex-toml":

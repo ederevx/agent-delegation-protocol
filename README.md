@@ -105,8 +105,9 @@ docs/audit/              history rewrite ledger and convention evidence
 ```
 
 Codex and Claude installations are independent. Both use the same core
-classifier and hook adapter, while their manifests declare different lifecycle
-release modes.
+classifier and hook adapter. Manifest release metadata is retained for legacy
+compatibility but is ignored by the runtime; native host lifecycle behavior
+continues to determine worker completion and closure.
 
 ## Delegation evidence
 
@@ -114,10 +115,13 @@ There is no request schema, receipt, or backend selection. The only proof of
 delegation the protocol recognizes is the host's own native subagent
 lifecycle: a `SubagentStart` event opens a worker slot for the session, and a
 matching `SubagentStop` (or, on Claude, a foreground Agent result) closes it.
-`scripts/hosts/hook_adapter.py` tracks per-session lifecycle state under
-`.delegation-protocol/hook-state/`; `scripts/agents/delegation-classifier.py`
-decides, purely from the prompt, whether delegation is required at all and
-how many concurrent workers it must reach.
+`scripts/hosts/hook_adapter.py` tracks only enforcement evidence under
+`.delegation-protocol/hook-state/`: concurrent, pending, observed, peak, and
+budget records. Legacy analysis, execution, active, finished, and mode fields
+are ignored on read without resetting enforced fields. A completed worker
+leaves the concurrent count directly. The classifier decides, purely from the
+prompt, whether delegation is required at all and how many concurrent workers
+it must reach.
 
 `PreToolUse` checks parent delegation evidence for eligible mutations and
 applies Codex worker budgets to intercepted tool calls. `Stop` expires unused
@@ -170,8 +174,7 @@ The two lock formats do not interoperate. Ledger contents are preserved, and
 legacy lock directories remain intact for separate recovery. A legacy lock
 still blocks its affected session or worker identity with a diagnostic.
 
-Codex uses `session_release`; a completed worker never creates an impossible
-dismissal warning. Completion frees the hook's active-worker slot, not the
+Codex completion frees the hook's active-worker slot, not the
 native host thread. After collecting and validating a completed Codex subtree,
 the parent promptly closes it if it will not be resumed. Prefer a direct native
 close operation; the verified Codex 0.154.0 V2 app-server route is
@@ -184,9 +187,8 @@ do not substitute session-file deletion, SQLite or ledger edits, process
 termination, or a larger thread limit. In V2, a native limit error immediately
 after verified archival can prune stale residency entries; refresh status and
 retry once, reporting a repeated failure. V1 requires native `close_agent`
-because archival does not release its counted spawn slot. Claude uses
-`automatic_release`; a
-foreground result clears its lifecycle automatically. The hook adapter checks
+because archival does not release its counted spawn slot. A Claude foreground
+result clears its native lifecycle automatically. The hook adapter checks
 worker budgets, observed delegation, and concurrent fan-out when required.
 
 ## Owner bypass
@@ -208,6 +210,7 @@ configuration directory in `.delegation-protocol/`.
 ```bash
 python3 scripts/agents/render-bulk-workers.py --check
 python3 scripts/agents/test-render-workers.py
+python3 scripts/agents/test-delegation-classifier.py
 python3 scripts/hosts/test-install.py
 python3 scripts/hosts/test-lifecycle.py
 python3 scripts/codex/test-protocol.py
