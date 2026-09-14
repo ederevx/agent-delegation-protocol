@@ -8,14 +8,12 @@ from pathlib import Path
 
 from hook_adapter import (
     LegacyLockLayoutError,
-    TurnEventHandler,
     _classifier,
     _locked,
     _paths,
     _worker_tool_budget,
     run,
 )
-from lifecycle import LifecycleState
 
 
 def test_advisory_lock_recovery() -> None:
@@ -180,37 +178,7 @@ def main() -> None:
     test_advisory_lock_prevents_lost_updates()
     test_windows_lock_contention_retries_eacces()
     test_legacy_locks_fail_closed_with_actionable_feedback()
-    automatic = LifecycleState("automatic_release")
-    automatic.start("a"); automatic.complete("a")
-    assert automatic.active == automatic.finished == automatic.concurrent == set()
-    # Session state retains completed workers without treating them as still
-    # running. A resumed worker moves out of finished and back into concurrent.
-    overlap = LifecycleState("session_release")
-    overlap.start("a")
-    assert overlap.concurrent == {"a"}
-    overlap.complete("a")
-    assert overlap.active == overlap.finished == {"a"}
-    assert overlap.concurrent == set()
-    overlap.start("a")
-    assert overlap.active == overlap.concurrent == {"a"}
-    assert overlap.finished == set()
-    try:
-        LifecycleState("explicit_release")
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("retired explicit release mode was accepted")
-    # Retired lifecycle event names follow the established unknown-event path:
-    # no decision and no lifecycle mutation.
-    state = {
-        "active": ["kept"], "finished": ["kept"], "concurrent": [],
-        "mode": "session_release",
-    }
-    handler = TurnEventHandler("codex", object(), "session_release", state)
-    assert handler.handle("worker-release", {"agent_id": "kept"}) is None
-    assert state["active"] == state["finished"] == ["kept"]
-    assert state["concurrent"] == []
-    print("Host lifecycle tests: PASS")
+    print("Host lock tests: PASS")
 
 
 if __name__ == "__main__":

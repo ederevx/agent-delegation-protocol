@@ -53,7 +53,6 @@ $CODEX_HOME/agents/quick_worker.toml
 $CODEX_HOME/hooks/delegation-enforcer.py
 $CODEX_HOME/.delegation-protocol/delegation-classifier.py
 $CODEX_HOME/.delegation-protocol/hook_adapter.py
-$CODEX_HOME/.delegation-protocol/lifecycle.py
 ```
 
 The installer records source hashes for every managed copy and refreshes only
@@ -103,8 +102,8 @@ the verified Codex 0.154.0 V2 app-server route is
 child UUID>})`. Verify every descendant is complete before cascading archive,
 obtain IDs from native metadata or a read-only parent-child mapping, and then
 confirm the subtree is absent from `list_agents` and unloaded by `read_thread`.
-Completion frees the hook's active-worker slot; `session_release` retains
-completion bookkeeping and does not close the host thread. V2 can report a
+Completion frees the hook's active-worker slot and does not close the host
+thread. V2 can report a
 native limit error while pruning residency entries left by archival; refresh
 live status and retry once, then report any repeated failure.
 V1 requires its native `close_agent`; archival does not release its counted
@@ -158,5 +157,9 @@ bash scripts/codex/uninstall.sh
 ```
 
 Uninstall removes only unchanged protocol-owned handlers, copies, and state.
+When retiring an older install, `lifecycle.py` is removed transactionally only
+when it is an unchanged protocol-owned copy; altered or foreign files are
+preserved. Legacy manifest release metadata is retained but ignored by the
+runtime.
 It restores preserved user configuration where recorded, keeps unrelated files,
 and never modifies Claude.

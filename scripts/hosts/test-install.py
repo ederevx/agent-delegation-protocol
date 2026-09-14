@@ -66,13 +66,31 @@ def fixture(root: Path) -> Path:
         "codex/agents/frontier_worker.toml", "codex/agents/balanced-worker.toml",
         "codex/agents/bulk_worker.toml", "codex/agents/quick_worker.toml",
         "codex/hooks/delegation-enforcer.py",
-        "scripts/hosts/hook_adapter.py", "scripts/hosts/lifecycle.py",
+        "scripts/hosts/hook_adapter.py",
         "scripts/agents/delegation-classifier.py",
     ):
         target = repo / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(path + "\n", encoding="utf-8")
     return repo
+
+
+def add_owned_lifecycle_copy(repo: Path, home: Path, payload: bytes) -> Path:
+    """Add the v3 ownership evidence left by the retired lifecycle resource."""
+    destination = home / ".delegation-protocol/lifecycle.py"
+    destination.write_bytes(payload)
+    manifest_path = home / ".delegation-protocol/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    name = str(destination)
+    manifest["owned"].append(name)
+    manifest["resources"].append({
+        "source": str(repo / "scripts/hosts/lifecycle.py"),
+        "destination": name,
+        "kind": "copy",
+    })
+    manifest["hashes"][name] = hashlib.sha256(payload).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    return destination
 
 
 def test_same_link_paths() -> None:
@@ -526,6 +544,7 @@ def test_fresh_copy_install_and_managed_refresh() -> None:
             repo, home = fixture(root / host), root / f"{host}-home"
             install.install(repo, home, host)
             assert not (home / ".delegation-protocol/host-settings.json").exists()
+            assert not (home / ".delegation-protocol/lifecycle.py").exists()
             first = assert_regular_resources(repo, home, host)
             tracked = next(item for item in first["resources"] if item["destination"].endswith(
                 "delegation-enforcer.py"
@@ -538,6 +557,72 @@ def test_fresh_copy_install_and_managed_refresh() -> None:
             assert second["hashes"][str(destination)] == hashlib.sha256(
                 b"managed refresh\n"
             ).hexdigest()
+
+
+def test_reinstall_retires_unchanged_owned_lifecycle_copy() -> None:
+    """An old manifest-owned lifecycle copy is removed during upgrade."""
+    with tempfile.TemporaryDirectory(prefix="adp-retire-lifecycle-") as raw:
+        root, repo, home = Path(raw), fixture(Path(raw) / "repo"), Path(raw) / "home"
+        install.install(repo, home, "claude")
+        lifecycle = add_owned_lifecycle_copy(repo, home, b"old lifecycle\n")
+
+        install.install(repo, home, "claude")
+
+        assert not lifecycle.exists()
+        manifest = manifest_for(home)
+        assert str(lifecycle) not in manifest["owned"]
+        assert all(item["destination"] != str(lifecycle) for item in manifest["resources"])
+        assert str(lifecycle) not in manifest["hashes"]
+
+
+def test_reinstall_preserves_modified_lifecycle_copy() -> None:
+    """Changed retired copies are no longer owned, so upgrades leave them alone."""
+    with tempfile.TemporaryDirectory(prefix="adp-retire-lifecycle-modified-") as raw:
+        root, repo, home = Path(raw), fixture(Path(raw) / "repo"), Path(raw) / "home"
+        install.install(repo, home, "claude")
+        lifecycle = add_owned_lifecycle_copy(repo, home, b"old lifecycle\n")
+        lifecycle.write_bytes(b"user changed lifecycle\n")
+
+        install.install(repo, home, "claude")
+
+        assert lifecycle.read_bytes() == b"user changed lifecycle\n"
+        assert str(lifecycle) not in manifest_for(home)["owned"]
+
+
+def test_reinstall_preserves_foreign_lifecycle_file() -> None:
+    """A lifecycle path with no prior ownership evidence is foreign data."""
+    with tempfile.TemporaryDirectory(prefix="adp-retire-lifecycle-foreign-") as raw:
+        root, repo, home = Path(raw), fixture(Path(raw) / "repo"), Path(raw) / "home"
+        install.install(repo, home, "claude")
+        lifecycle = home / ".delegation-protocol/lifecycle.py"
+        lifecycle.write_bytes(b"foreign lifecycle\n")
+
+        install.install(repo, home, "claude")
+
+        assert lifecycle.read_bytes() == b"foreign lifecycle\n"
+
+
+def test_late_failure_restores_retired_lifecycle_copy() -> None:
+    """Rollback restores the exact retired bytes and mode after a later error."""
+    with tempfile.TemporaryDirectory(prefix="adp-retire-lifecycle-rollback-") as raw:
+        root, repo, home = Path(raw), fixture(Path(raw) / "repo"), Path(raw) / "home"
+        install.install(repo, home, "claude")
+        lifecycle = add_owned_lifecycle_copy(repo, home, b"old lifecycle\n")
+        os.chmod(lifecycle, 0o640)
+        manifest_path = home / ".delegation-protocol/manifest.json"
+        before_manifest = manifest_path.read_bytes()
+
+        with patch.object(install.settings, "install", side_effect=RuntimeError("late failure")):
+            try:
+                install.install(repo, home, "claude")
+            except RuntimeError as error:
+                assert str(error) == "late failure"
+            else:
+                raise AssertionError("late failure did not abort installation")
+
+        assert lifecycle.read_bytes() == b"old lifecycle\n"
+        assert lifecycle.stat().st_mode & 0o7777 == 0o640
+        assert manifest_path.read_bytes() == before_manifest
 
 
 def test_legacy_claude_environment_ownership_survives_reinstall() -> None:
@@ -827,6 +912,10 @@ def main() -> None:
     test_codex_config_is_restored_byte_for_byte()
     test_codex_thread_capacity_upgrade_preserves_original_restore()
     test_fresh_copy_install_and_managed_refresh()
+    test_reinstall_retires_unchanged_owned_lifecycle_copy()
+    test_reinstall_preserves_modified_lifecycle_copy()
+    test_reinstall_preserves_foreign_lifecycle_file()
+    test_late_failure_restores_retired_lifecycle_copy()
     test_legacy_claude_environment_ownership_survives_reinstall()
     test_legacy_v116_links_migrate_from_a_different_checkout()
     test_refuses_foreign_copies_and_foreign_symlinks()

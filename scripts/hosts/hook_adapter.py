@@ -13,12 +13,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-try:
-    from .lifecycle import LifecycleState
-except ImportError:
-    from lifecycle import LifecycleState
-
-
 def _home(host: str) -> Path:
     variable = "CLAUDE_CONFIG_DIR" if host == "claude" else "CODEX_HOME"
     default = ".claude" if host == "claude" else ".codex"
@@ -41,26 +35,6 @@ def _classifier(home: Path):
             specification.loader.exec_module(module)
             return module
     raise RuntimeError("protocol-v2 classifier is not installed")
-
-
-def _release_mode(home: Path) -> str:
-    """Load a supported release mode, retaining legacy manifests safely.
-
-    ``explicit_release`` is not used by current host installers. Existing
-    manifests may still name it, so normalize it to the conservative
-    session-retention behavior instead of refusing an otherwise valid turn.
-    """
-    try:
-        manifest = json.loads(
-            (home / ".delegation-protocol" / "manifest.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        mode = manifest.get("release")
-    except (OSError, json.JSONDecodeError):
-        mode = None
-    return (mode if mode in {"automatic_release", "session_release"}
-            else "session_release")
 
 
 def _session(payload: dict[str, Any]) -> str | None:
@@ -146,7 +120,7 @@ def _locked(lock: Path) -> Iterator[None]:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def _load(path: Path, mode: str) -> dict[str, Any]:
+def _load(path: Path) -> dict[str, Any]:
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -157,11 +131,7 @@ def _load(path: Path, mode: str) -> dict[str, Any]:
         "schema_version": 2,
         "requires_delegation": bool(state.get("requires_delegation")),
         "requires_multi": bool(state.get("requires_multi")),
-        "analysis_signal": bool(state.get("analysis_signal")),
-        "execution_signal": bool(state.get("execution_signal")),
         "min_agents": int(state.get("min_agents", 0)),
-        "active": list(state.get("active", [])),
-        "finished": list(state.get("finished", [])),
         "concurrent": list(state.get("concurrent", [])),
         "pending_spawns": list(state.get("pending_spawns", [])),
         "denied_spawns": list(state.get("denied_spawns", [])),
@@ -169,7 +139,6 @@ def _load(path: Path, mode: str) -> dict[str, Any]:
         "peak_active": int(state.get("peak_active", 0)),
         "completed": bool(state.get("completed")),
         "pending_authorization": bool(state.get("pending_authorization")),
-        "mode": mode,
     }
 
 
@@ -308,11 +277,10 @@ def _active_cap_violation(state: dict[str, Any], classifier: Any,
                           payload: dict[str, Any]) -> str | None:
     """Reason a further worker spawn must be denied for an over-full session.
 
-    `concurrent` holds the workers genuinely in flight right now (see
-    `lifecycle.LifecycleState`), so a completed worker stops counting against
-    the cap even under a release mode that still holds it in `active`. Nested
-    workers run under their parent's `session_id`, so this one per-session set
-    already counts the whole delegation tree rather than a single level of it.
+    `concurrent` holds the workers genuinely in flight right now, so a
+    completed worker stops counting against the cap. Nested workers run under
+    their parent's `session_id`, so this one per-session set already counts
+    the whole delegation tree rather than a single level of it.
 
     `pending_spawns` closes the window between an admitted spawn and the
     `SubagentStart` that records it: without it, several spawn calls issued in
@@ -445,18 +413,11 @@ class TurnEventHandler:
     function's behavior of updating the caller-owned dict directly.
     """
 
-    def __init__(self, host: str, classifier: Any, mode: str,
+    def __init__(self, host: str, classifier: Any,
                  state: dict[str, Any]) -> None:
         self.host = host
         self.classifier = classifier
-        self.mode = mode
         self.state = state
-        self.lifecycle = LifecycleState(
-            mode,
-            set(state["active"]),
-            set(state["finished"]),
-            set(state["concurrent"]),
-        )
 
     def handle(self, event: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         handlers = {
@@ -468,12 +429,7 @@ class TurnEventHandler:
         }
         handler = handlers.get(event)
         output = handler(payload) if handler else None
-        self.state.update({
-            "active": sorted(self.lifecycle.active),
-            "finished": sorted(self.lifecycle.finished),
-            "concurrent": sorted(self.lifecycle.concurrent),
-            "mode": self.mode,
-        })
+        self.state["concurrent"] = sorted(set(self.state["concurrent"]))
         return output
 
     def _handle_prompt(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -504,16 +460,11 @@ class TurnEventHandler:
             # background workers still genuinely in flight are not evidence --
             # they are running processes, and forgetting them would let the
             # active-worker cap be reset simply by typing another prompt.
-            self.lifecycle = LifecycleState(
-                self.mode, concurrent=set(self.lifecycle.concurrent)
-            )
             self.state["observed"] = []
             self.state["peak_active"] = 0
         self.state.update({
             "requires_delegation": bool(decision["requires_delegation"]),
             "requires_multi": bool(decision["requires_multi"]),
-            "analysis_signal": bool(decision.get("analysis_signal")),
-            "execution_signal": bool(decision.get("execution_signal")),
             "min_agents": int(decision["min_agents"]),
             "completed": False,
             # A one-shot authorization is set fresh from this prompt's own
@@ -532,20 +483,24 @@ class TurnEventHandler:
                 # A native start pins the initial limit before any tool call.
                 # Corrupt ledgers remain untouched and deny at PreToolUse.
                 _worker_tool_budget(_home(self.host), payload, self.classifier, charge=False)
-            self.lifecycle.start(worker)
+            concurrent = set(self.state["concurrent"])
+            concurrent.add(worker)
+            self.state["concurrent"] = sorted(concurrent)
             _consume_reservation(self.state, payload)
             observed = set(self.state["observed"])
             observed.add(worker)
             self.state["observed"] = sorted(observed)
             self.state["peak_active"] = max(
-                self.state["peak_active"], len(self.lifecycle.concurrent)
+                self.state["peak_active"], len(self.state["concurrent"])
             )
         return _routing_context("SubagentStart", self.classifier)
 
     def _handle_worker_complete(self, payload: dict[str, Any]) -> None:
         worker = _worker(payload)
         if worker:
-            self.lifecycle.complete(worker)
+            concurrent = set(self.state["concurrent"])
+            concurrent.discard(worker)
+            self.state["concurrent"] = sorted(concurrent)
         # Also reached by Claude's Agent-failure signal, where the spawn never
         # became a worker and its reservation would otherwise never be freed.
         _release_failed_reservation(self.state, payload)
@@ -714,7 +669,7 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
                 try:
                     path, lock = _paths(home, session)
                     with _locked(lock):
-                        parent_state = _load(path, _release_mode(home))
+                        parent_state = _load(path)
                         if reason is None:
                             reason = _active_cap_violation(
                                 parent_state, classifier, payload)
@@ -734,11 +689,10 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
     if session is None:
         return None
     path, lock = _paths(home, session)
-    mode = _release_mode(home)
     try:
         with _locked(lock):
-            state = _load(path, mode)
-            handler = TurnEventHandler(host, classifier, mode, state)
+            state = _load(path)
+            handler = TurnEventHandler(host, classifier, state)
             output = handler.handle(event, payload)
             _save(path, state)
             return output

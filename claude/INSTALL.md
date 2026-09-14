@@ -45,7 +45,6 @@ $CLAUDE_CONFIG_DIR/agents/quick-worker.md
 $CLAUDE_CONFIG_DIR/hooks/delegation-enforcer.py
 $CLAUDE_CONFIG_DIR/.delegation-protocol/delegation-classifier.py
 $CLAUDE_CONFIG_DIR/.delegation-protocol/hook_adapter.py
-$CLAUDE_CONFIG_DIR/.delegation-protocol/lifecycle.py
 ```
 
 The quick worker handles trivial, mechanical, single-step work through the
@@ -86,6 +85,13 @@ complete; it does not gate turn completion. Foreground Agent results
 automatically release the worker lifecycle. A completed foreground worker does
 not require a further stop action; a stop action is reserved for a running
 background task that needs cancellation.
+
+The hook state retains concurrent, pending, observed, peak, and budget evidence.
+Legacy analysis, execution, active, finished, and mode fields are ignored on
+read without resetting enforced fields. Legacy manifest release metadata is
+ignored by the runtime. When retiring an older install, `lifecycle.py` is
+removed transactionally only when it is an unchanged protocol-owned copy;
+altered or foreign files are preserved.
 
 ## Owner bypass
 

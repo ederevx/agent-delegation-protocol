@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Regression checks for classifier diagnostics retirement."""
+from __future__ import annotations
+
+import importlib.util
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+classifier = load_module(
+    "delegation_classifier", ROOT / "scripts/agents/delegation-classifier.py"
+)
+sys.path.insert(0, str(ROOT / "scripts/hosts"))
+adapter = load_module("hook_adapter", ROOT / "scripts/hosts/hook_adapter.py")
+
+
+def test_retired_diagnostics_do_not_affect_classification() -> None:
+    prior = {
+        "requires_delegation": True,
+        "requires_multi": True,
+        "completed": False,
+        "analysis_signal": True,
+        "execution_signal": True,
+    }
+    decision = classifier.classify("continue", prior)
+    assert decision["requires_delegation"] is True
+    assert decision["requires_multi"] is True
+    assert decision["carry_forward"] is True
+    assert "analysis_signal" not in decision
+    assert "execution_signal" not in decision
+    assert "execution_token_threshold" not in decision
+
+
+def test_legacy_state_ignores_retired_fields_without_losing_enforcement_state() -> None:
+    legacy = {
+        "schema_version": 2,
+        "requires_delegation": True,
+        "requires_multi": True,
+        "analysis_signal": True,
+        "execution_signal": True,
+        "min_agents": 2,
+        "mode": "session_release",
+        "active": ["active"],
+        "finished": ["finished"],
+        "concurrent": ["concurrent"],
+        "pending_spawns": ["pending"],
+        "denied_spawns": ["denied"],
+        "observed": ["observed"],
+        "peak_active": 3,
+        "completed": False,
+        "pending_authorization": True,
+    }
+    with tempfile.TemporaryDirectory(prefix="adp-classifier-") as raw:
+        path = Path(raw) / "state.json"
+        path.write_text(json.dumps(legacy), encoding="utf-8")
+        state = adapter._load(path)
+    assert state == {
+        key: value for key, value in legacy.items()
+        if key not in {
+            "analysis_signal", "execution_signal", "active", "finished",
+            "mode",
+        }
+    }
+
+
+if __name__ == "__main__":
+    test_retired_diagnostics_do_not_affect_classification()
+    test_legacy_state_ignores_retired_fields_without_losing_enforcement_state()

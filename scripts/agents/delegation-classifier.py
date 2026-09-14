@@ -46,10 +46,6 @@ DEFAULT_CONTEXT_WINDOW = 200_000
 STEP_DELEGATION_THRESHOLD = 3
 LONG_BRIEF_WORDS = 150
 
-# Retained execution-size diagnostic; it no longer imposes an independent
-# parent execution prohibition. Workload delegation uses the threshold above.
-EXECUTION_WINDOW_SHARE = 0.05
-
 # A continuation is short by construction. The two halves disagreed here (12
 # words against 14); the longer cutoff wins because carry-forward only ever
 # fires when the previous turn already required delegation and did not finish,
@@ -96,10 +92,6 @@ EVALUATION_WORDS = (
     "verify", "diagnose",
 )
 
-# Open-ended investigation/exploration, as distinct from EVALUATION_WORDS:
-# assessing something already understood (review/check/verify) versus digging
-# in to understand something that isn't yet. Either one names in-depth
-# research that execution should not attempt to do inline.
 RESEARCH_WORDS = (
     "investigate", "research", "explore", "dig into", "look into",
     "find out", "figure out", "discover", "uncover", "understand how",
@@ -382,9 +374,6 @@ class _TurnClassifier:
         self.tokens = explicit_tokens(lower)
         self.steps = step_count(lower)
         self.threshold = token_threshold(self.context_env)
-        self.execution_threshold = token_threshold(
-            self.context_env, EXECUTION_WINDOW_SHARE
-        )
         self.token_signal = self.tokens >= self.threshold
         self.size_signal = (
             self.token_signal
@@ -436,23 +425,6 @@ class _TurnClassifier:
                 or bool(self.previous.get("requires_multi") and carry)
             )
         )
-        # Carried forward the same way `multi` is: a short continuation like
-        # "continue" carries no analysis wording of its own, but the task it
-        # continues is still the analysis task that started it.
-        self.analysis = self.evaluation_signal or bool(
-            self.previous.get("analysis_signal") and carry
-        )
-        # Execution clears delegation at a much lower bar than `requires`
-        # above: a stated budget at or above EXECUTION_WINDOW_SHARE (rather
-        # than the full DELEGATION_WINDOW_SHARE), or in-depth-research
-        # wording, pushes even a turn otherwise too small for `requires` to a
-        # worker. Anything that already set `requires` clears this lower bar
-        # automatically.
-        self.execution = False if explicit_no else (
-            self.requires or self.research_signal
-            or self.tokens >= self.execution_threshold
-            or bool(self.previous.get("execution_signal") and carry)
-        )
         if not self.requires:
             self.min_agents = 0
         elif self.multi:
@@ -497,11 +469,8 @@ class _TurnClassifier:
         return {
             "requires_delegation": self.requires,
             "requires_multi": self.multi,
-            "analysis_signal": self.analysis,
-            "execution_signal": self.execution,
             "min_agents": self.min_agents,
             "token_threshold": self.threshold,
-            "execution_token_threshold": self.execution_threshold,
             "classification_reasons": reasons,
             "explicit_no_delegation": self.explicit_no,
             "explicit_authorization": self.explicit_authorization,
@@ -517,4 +486,3 @@ def classify(
 ) -> dict[str, Any]:
     """Decide whether a turn must be delegated, and to how many workers."""
     return _TurnClassifier(prompt, previous, context_env).classify()
-

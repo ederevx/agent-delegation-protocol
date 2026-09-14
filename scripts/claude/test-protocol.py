@@ -215,53 +215,6 @@ def test_active_worker_cap(home, env):
   assert 'Active worker cap' in denied(spawn('cap-auth'))
 
 
-def test_legacy_explicit_release_falls_back_to_session(home, env):
-  """An old manifest remains usable with safe session-retention semantics."""
-  import hashlib
-  manifest_path = home / '.delegation-protocol/manifest.json'
-  manifest = json.loads(manifest_path.read_text())
-  original_release = manifest['release']
-  manifest['release'] = 'explicit_release'
-  manifest_path.write_text(json.dumps(manifest))
-  try:
-    def invoke(event, payload):
-      result = subprocess.run([sys.executable, str(HOOK), event],
-          input=json.dumps(payload), env=env, capture_output=True, text=True)
-      assert result.returncode == 0, result.stderr
-      return json.loads(result.stdout)
-    def denied(body):
-      assert body['hookSpecificOutput']['permissionDecision'] == 'deny', body
-      return body['hookSpecificOutput']['permissionDecisionReason']
-    def spawn(session, **extra):
-      return invoke('pre-mutation', dict({'session_id': session,
-          'tool_name': 'Agent',
-          'tool_input': {'subagent_type': 'bulk-worker'}}, **extra))
-    def start(session, worker, **extra):
-      invoke('worker-start', dict({'session_id': session, 'agent_id': worker,
-          'agent_type': 'bulk-worker'}, **extra))
-    def complete(session, **extra):
-      invoke('worker-complete', dict({'session_id': session}, **extra))
-    def state(session):
-      key = hashlib.sha256(session.encode()).hexdigest()
-      return json.loads(
-          (home / '.delegation-protocol/hook-state' / (key + '.json')).read_text())
-    for index in range(10):
-      start('noauto', f'noauto-{index}')
-    assert 'Active worker cap' in denied(spawn('noauto'))
-    # The legacy value normalizes to session_release: completion retains the
-    # resumable record but frees the active-worker slot.
-    complete('noauto', agent_id='noauto-0')
-    held = state('noauto')
-    assert held['mode'] == 'session_release', held
-    assert 'noauto-0' in held['active'], held
-    assert 'noauto-0' not in held['concurrent'], held
-    assert spawn('noauto') == {}
-    assert invoke('turn-stop', {'session_id': 'noauto'}) == {}
-  finally:
-    manifest['release'] = original_release
-    manifest_path.write_text(json.dumps(manifest))
-
-
 def main():
   with tempfile.TemporaryDirectory(prefix="claude-v2-") as raw:
     test_installed_hook_without_source(Path(raw))
@@ -272,7 +225,6 @@ def main():
     test_checkout_hook_runtime(home, env)
     test_routing_and_limits(env)
     test_active_worker_cap(home, env)
-    test_legacy_explicit_release_falls_back_to_session(home, env)
     m=json.loads((home/'.delegation-protocol/manifest.json').read_text()); assert m['version']==3 and m['release']=='automatic_release'
     assert not (home/'.delegation-protocol/hook_adapter.py').is_symlink()
     assert not (home/'agents/frontier-worker.md').is_symlink()
@@ -387,7 +339,7 @@ def main():
     invoke('worker-start', worker_payload)
     assert 'leaf-a' in json.loads(state_path.read_text())['observed']
     invoke('worker-complete', worker_payload)
-    assert 'leaf-a' not in json.loads(state_path.read_text())['active']
+    assert 'leaf-a' not in json.loads(state_path.read_text())['concurrent']
     # Recursive delegation: a worker may spawn another worker only of a
     # strictly lower tier than its own, identified by the caller's own
     # `agent_type` and the Agent/Task call's own `subagent_type` argument.
