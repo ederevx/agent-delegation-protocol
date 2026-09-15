@@ -4,7 +4,7 @@ import json, os, shutil, subprocess, sys, tempfile, importlib.util
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 ENGINE = ROOT / "scripts/hosts/install.py"
-HOOK = ROOT / "pi/hooks/delegation-enforcer.py"
+HOOK = ROOT / "pi/.delegation-protocol/delegation-enforcer.py"
 SETTINGS = ROOT / "scripts/hosts/settings.py"
 ALL_TIERS = ("quick-worker", "bulk-worker", "balanced-worker", "frontier-worker")
 
@@ -32,7 +32,7 @@ def main():
   assert not (home / "settings.json").exists()
   for name in ("rules/delegation-protocol.md", "agents/frontier-worker.md",
       "agents/balanced-worker.md", "agents/bulk-worker.md",
-      "agents/quick-worker.md", "hooks/delegation-enforcer.py",
+      "agents/quick-worker.md", ".delegation-protocol/delegation-enforcer.py",
       "extensions/adp-enforcer.ts",
       ".delegation-protocol/delegation-protocol.py" if False else
       ".delegation-protocol/delegation-classifier.py",
@@ -40,7 +40,7 @@ def main():
     assert (home / name).is_file() and not (home / name).is_symlink(), name
   manifest = json.loads((home / ".delegation-protocol/manifest.json").read_text())
   assert manifest["host"] == "pi" and manifest["version"] == 3, manifest
-  assert "hooks/delegation-enforcer.py" in " ".join(manifest["owned"])
+  assert ".delegation-protocol/delegation-enforcer.py" in " ".join(manifest["owned"])
   assert "extensions/adp-enforcer.ts" in " ".join(manifest["owned"])
 
   # Routing context and budget texts flow through the shared classifier.
@@ -130,7 +130,7 @@ def main():
   assert uninstall.returncode == 0, uninstall.stderr
   assert not (home / "settings.json").exists()
   for name in ("agents/frontier-worker.md", "agents/quick-worker.md",
-      "hooks/delegation-enforcer.py", "extensions/adp-enforcer.ts",
+      ".delegation-protocol/delegation-enforcer.py", "extensions/adp-enforcer.ts",
       ".delegation-protocol/manifest.json"):
     assert not (home / name).exists(), name
 

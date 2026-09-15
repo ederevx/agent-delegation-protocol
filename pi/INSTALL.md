@@ -42,7 +42,7 @@ $PI_CODING_AGENT_DIR/agents/frontier-worker.md
 $PI_CODING_AGENT_DIR/agents/balanced-worker.md
 $PI_CODING_AGENT_DIR/agents/bulk-worker.md
 $PI_CODING_AGENT_DIR/agents/quick-worker.md
-$PI_CODING_AGENT_DIR/hooks/delegation-enforcer.py
+$PI_CODING_AGENT_DIR/.delegation-protocol/delegation-enforcer.py
 $PI_CODING_AGENT_DIR/extensions/adp-enforcer.ts
 $PI_CODING_AGENT_DIR/.delegation-protocol/delegation-classifier.py
 $PI_CODING_AGENT_DIR/.delegation-protocol/hook_adapter.py

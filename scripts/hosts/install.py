@@ -36,9 +36,10 @@ VERSION = 3
 HOST_DIRECTORIES = {
     "claude": ("rules", "agents", "hooks", ".delegation-protocol"),
     "codex": ("", "agents", "hooks", ".delegation-protocol"),
-    # Pi enforces through a discovered extension, so its layout adds the
-    # extensions directory to the common agents/hooks/state set.
-    "pi": ("agents", "hooks", "extensions", ".delegation-protocol"),
+    # Pi enforces through a discovered extension, and its bridge lives in the
+    # shared state directory: no hooks/ directory exists, so pi never emits
+    # pi's "hooks/ directory found" deprecation warning.
+    "pi": ("agents", "extensions", ".delegation-protocol"),
 }
 
 # Codex caps concurrently open spawned-agent threads per session through an
@@ -227,7 +228,8 @@ def resources(repo: Path, home: Path, host: str) -> list[tuple[Path, Path, str]]
             (repo / "pi/agents/balanced-worker.md", home / "agents/balanced-worker.md", "copy"),
             (repo / "pi/agents/bulk-worker.md", home / "agents/bulk-worker.md", "copy"),
             (repo / "pi/agents/quick-worker.md", home / "agents/quick-worker.md", "copy"),
-            (repo / "pi/hooks/delegation-enforcer.py", home / "hooks/delegation-enforcer.py", "copy"),
+            (repo / "pi/.delegation-protocol/delegation-enforcer.py",
+             state / "delegation-enforcer.py", "copy"),
             (repo / "pi/extensions/adp-enforcer.ts", home / "extensions/adp-enforcer.ts", "copy"),
             *common,
         ]
