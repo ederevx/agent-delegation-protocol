@@ -4,10 +4,13 @@
  * Adapted from the Agent Delegation Protocol host hooks: this extension only
  * adapts Pi lifecycle events to the shared adapter's normalized hook payloads.
  * Classification, state, worker budgets, and ledgers live in the installed
- * Python adapter, called through the delegation-enforcer bridge. It never
- * spawns subagents itself: delegation evidence is Pi's native `subagent`
- * tool (the official subagent extension), which this file does not depend on
- * or re-implement. When the bridge is absent the extension is inert.
+ * Python adapter, called through the delegation-enforcer bridge in the
+ * protocol state directory (`.delegation-protocol/`, next to the adapter) so
+ * no legacy `hooks/` directory exists and Pi's deprecation warning stays
+ * silent. It never spawns subagents itself: delegation evidence is Pi's
+ * native `subagent` tool (the official subagent extension), which this file
+ * does not depend on or re-implement. When the bridge is absent the extension
+ * is inert.
  *
  * Event mapping:
  *   before_agent_start          -> prompt         (classify; append routing policy)
@@ -41,7 +44,7 @@ function agentHome(): string {
 }
 
 function bridgePath(): string {
-	return path.join(agentHome(), "hooks", "delegation-enforcer.py");
+	return path.join(agentHome(), ".delegation-protocol", "delegation-enforcer.py");
 }
 
 function detectWorker(): WorkerIdentity | null {
