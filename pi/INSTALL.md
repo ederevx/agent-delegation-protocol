@@ -44,6 +44,8 @@ $PI_CODING_AGENT_DIR/agents/bulk-worker.md
 $PI_CODING_AGENT_DIR/agents/quick-worker.md
 $PI_CODING_AGENT_DIR/.delegation-protocol/delegation-enforcer.py
 $PI_CODING_AGENT_DIR/extensions/adp-enforcer.ts
+$PI_CODING_AGENT_DIR/extensions/subagent/index.ts
+$PI_CODING_AGENT_DIR/extensions/subagent/agents.ts
 $PI_CODING_AGENT_DIR/.delegation-protocol/delegation-classifier.py
 $PI_CODING_AGENT_DIR/.delegation-protocol/hook_adapter.py
 ```
@@ -56,8 +58,9 @@ the balanced tier for bounded work needing near-parent reasoning, without
 taking over parent architecture or integration. All four are ordinary native
 Pi agents; the protocol observes their lifecycle, it does not launch or route
 them. Spawning itself is Pi's native `subagent` tool from the official
-subagent extension; ADP provides no launcher and does not depend on that
-extension for its own resources — when the tool is absent, required
+subagent extension, which the Pi installer now deploys as a vendored copy
+maintained in this repository; ADP provides no launcher and does not depend on
+that extension for its own resources — when the tool is absent, required
 delegation is reported blocked rather than done in the parent.
 
 Each worker inherits the parent Pi host's tool access, including configured

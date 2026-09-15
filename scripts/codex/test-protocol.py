@@ -266,7 +266,7 @@ def test_tool_budgets(home, env):
     body = call(actor, 'excess')
     denied(body)
     assert '0 remaining' in body['hookSpecificOutput']['permissionDecisionReason']
-    assert 'plain final report' in body['hookSpecificOutput']['permissionDecisionReason']
+    assert 'Do not call any further tools' in body['hookSpecificOutput']['permissionDecisionReason']
     assert ledger(actor['agent_id']).read_bytes() == before
     assert call(actor, '0') == {}  # duplicate is idempotent even at the boundary
     assert invoke('turn-stop', actor) == {}  # final textual result is never blocked

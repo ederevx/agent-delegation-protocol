@@ -715,9 +715,12 @@ def _worker_tool_budget_locked(home: Path, payload: dict[str, Any],
             return None
         if used >= limit:
             return _deny(
-                f"Worker tool-call budget exhausted ({used}/{limit}; 0 remaining). "
-                "Return a plain final report with evidence and remaining work; "
-                "do not make further tool calls. Completion is permitted.",
+                f"Worker tool-call budget exhausted ({used}/{limit}; 0 "
+                "remaining). Do not call any further tools. Output your final "
+                "evidence report as plain text now — work done, files touched, "
+                "validation results, failures, assumptions, blockers, "
+                "remaining work — then end your turn. Completing your turn "
+                "is permitted.",
                 terminal=True,
             )
         if call_id:
