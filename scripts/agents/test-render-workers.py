@@ -36,7 +36,7 @@ class WorkerRenderingTests(unittest.TestCase):
         expected = {"quick": 128, "bulk": 64, "balanced": 32, "frontier": 16}
         outputs = renderer.rendered_outputs()
         for tier, limit in expected.items():
-            for host in ("claude", "codex"):
+            for host in ("claude", "codex", "pi"):
                 with self.subTest(tier=tier, host=host):
                     rendered = output(tier, host)
                     text = outputs[ROOT / rendered["path"]]
@@ -45,6 +45,10 @@ class WorkerRenderingTests(unittest.TestCase):
                     if host == "claude":
                         self.assertIn(f"maxTurns: {limit}\n", text)
                         self.assertIn(f"native agentic-turn limit is {limit} through maxTurns", text)
+                    elif host == "pi":
+                        self.assertIn(f"advisory budget of {limit} agentic turns", text)
+                        self.assertIn("Pi has no native per-worker turn-limit field", text)
+                        self.assertIn(f"enforces {limit} tool-call attempts", text)
                     else:
                         parsed = tomllib.loads(text)
                         self.assertNotIn("max_turns", parsed)
@@ -55,7 +59,7 @@ class WorkerRenderingTests(unittest.TestCase):
     def test_all_tiers_use_one_common_worker_contract(self):
         source = json.loads((ROOT / "agents/worker-profiles.json").read_text())
         self.assertEqual(source["template"], "agents/worker-common.md.tmpl")
-        self.assertEqual(set(source["hosts"]), {"claude", "codex"})
+        self.assertEqual(set(source["hosts"]), {"claude", "codex", "pi"})
         self.assertEqual(
             source["hosts"]["claude"]["output"],
             {"format": "claude-markdown"},
@@ -70,6 +74,7 @@ class WorkerRenderingTests(unittest.TestCase):
             for worker_profile in tier["profiles"].values():
                 self.assertNotIn("parent_channel", worker_profile)
                 self.assertNotIn("lifecycle_contract", worker_profile)
+                self.assertNotIn("escalation_contract", worker_profile)
                 self.assertNotIn("output", worker_profile)
 
     def test_all_tiers_inherit_host_tool_access_without_scope_contracts(self):
@@ -77,7 +82,7 @@ class WorkerRenderingTests(unittest.TestCase):
         for tier in ("frontier", "balanced", "bulk", "quick"):
             source = profile_document(tier)
             self.assertNotIn("scope_contract", source)
-            for host in ("claude", "codex"):
+            for host in ("claude", "codex", "pi"):
                 with self.subTest(tier=tier, host=host):
                     rendered = output(tier, host)
                     self.assertNotIn("tools", rendered)
@@ -87,28 +92,46 @@ class WorkerRenderingTests(unittest.TestCase):
                     if host == "claude":
                         self.assertNotIn("tools:", text)
                         self.assertNotIn("disallowedTools:", text)
+                    elif host == "pi":
+                        self.assertNotIn("tools:", text)
+                        self.assertNotIn("disallowedTools:", text)
                     else:
                         self.assertNotIn("tools", tomllib.loads(text))
 
     def test_tier_models_and_efforts_remain_configured(self):
         expected = {
-            "quick": {"claude": ("haiku", "low"), "codex": ("gpt-5.6-luna", "low")},
-            "bulk": {"claude": ("sonnet", "medium"), "codex": ("gpt-5.6-terra", "medium")},
-            "balanced": {"claude": ("opus", "high"), "codex": ("gpt-5.6-sol", "high")},
-            "frontier": {"claude": ("fable", "xhigh"), "codex": ("gpt-6-astra", "xhigh")},
+            "quick": {"claude": ("haiku", "low"), "codex": ("gpt-5.6-luna", "low"),
+                      "pi": ("z-ai/glm-5.3-flash:low",)},
+            "bulk": {"claude": ("sonnet", "medium"), "codex": ("gpt-5.6-terra", "medium"),
+                     "pi": ("z-ai/glm-5.3-flash:medium",)},
+            "balanced": {"claude": ("opus", "high"), "codex": ("gpt-5.6-sol", "high"),
+                         "pi": ("z-ai/glm-5.3-flash:high",)},
+            "frontier": {"claude": ("fable", "xhigh"), "codex": ("gpt-6-astra", "xhigh"),
+                         "pi": ("z-ai/glm-5.3:xhigh",)},
         }
         for tier, hosts in expected.items():
-            for host, (model, effort) in hosts.items():
+            for host, values in hosts.items():
                 with self.subTest(tier=tier, host=host):
                     rendered = output(tier, host)
-                    self.assertEqual(rendered["model"], model)
-                    self.assertEqual(
-                        rendered["effort"] if host == "claude" else rendered["reasoning_effort"],
-                        effort,
-                    )
+                    if host == "pi":
+                        # Pi encodes the tier effort in the model slug suffix;
+                        # there is no separate effort field on this host.
+                        (model,) = values
+                        self.assertEqual(rendered["model"], model)
+                        self.assertNotIn("effort", rendered)
+                        self.assertNotIn("reasoning_effort", rendered)
+                    else:
+                        model, effort = values
+                        self.assertEqual(rendered["model"], model)
+                        self.assertEqual(
+                            rendered["effort"] if host == "claude" else rendered["reasoning_effort"],
+                            effort,
+                        )
 
-    def test_unknown_roles_fail_for_both_hosts(self):
-        for host, render in (("claude", renderer.render_claude), ("codex", renderer.render_codex)):
+    def test_unknown_roles_fail_for_all_hosts(self):
+        for host, render in (("claude", renderer.render_claude),
+                             ("codex", renderer.render_codex),
+                             ("pi", renderer.render_pi)):
             rendered = copy.deepcopy(output("frontier", host))
             rendered["name"] = "frontier-workre"
             with self.subTest(host=host), self.assertRaisesRegex(ValueError, "unknown worker"):
@@ -116,7 +139,7 @@ class WorkerRenderingTests(unittest.TestCase):
 
     def test_generated_outputs_are_current_and_have_no_execution_prohibitions(self):
         outputs = renderer.rendered_outputs()
-        self.assertEqual(len(outputs), 8)
+        self.assertEqual(len(outputs), 12)
         self.assertEqual(
             {path.relative_to(ROOT) for path in outputs},
             {
@@ -128,6 +151,10 @@ class WorkerRenderingTests(unittest.TestCase):
                 Path("codex/agents/bulk_worker.toml"),
                 Path("codex/agents/balanced-worker.toml"),
                 Path("codex/agents/frontier_worker.toml"),
+                Path("pi/agents/quick-worker.md"),
+                Path("pi/agents/bulk-worker.md"),
+                Path("pi/agents/balanced-worker.md"),
+                Path("pi/agents/frontier-worker.md"),
             },
         )
         for path, generated in outputs.items():

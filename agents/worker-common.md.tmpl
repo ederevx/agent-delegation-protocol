@@ -10,15 +10,7 @@ Complete the bounded task assigned by the parent.
 
 ## Escalation boundary
 
-Native shared-workspace workers can see current working-tree changes; isolated
-workers cannot see uncommitted parent changes. Ask the parent before any work
-outside assigned ownership, repository-wide version-control action, work on
-another worker's files,
-dependency change, branch or index change, operation leaving the machine, or
-material architectural, security-sensitive, destructive, or deeply ambiguous
-decision. Use {{PARENT_CHANNEL}} and wait for the answer; only the parent may
-take questions to the user. If the parent channel is unavailable, stop and
-report instead of guessing.
+{{ESCALATION_CONTRACT}}
 
 ## Routing and runtime
 

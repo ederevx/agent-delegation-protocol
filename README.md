@@ -1,6 +1,7 @@
 # Agent Delegation Protocol
 
-The protocol enforces native delegation and worker budgets on Codex and Claude.
+The protocol enforces native delegation and worker budgets on Codex, Claude,
+and Pi.
 The parent retains planning, judgment, integration, conflict resolution, and
 final validation. All tiers can analyze and execute with their normal tools,
 subject to workload delegation rules and worker budgets. ADP has no scheduler,
@@ -70,6 +71,12 @@ start until its native stop, plus spawns admitted but not yet started. Idle
 workers do not count, including one that has finished and is held or
 resumable; it counts again only while a resume is running.
 
+Pi has no native per-worker turn limit either: the same numbers serve as an
+advisory agentic-turn budget and a separate hard budget of tool-call
+attempts per identified worker lifetime, enforced by the Pi enforcer
+extension through the shared adapter. One `subagent` tool call holds one
+active slot, whatever it fans out to internally.
+
 An agentic turn is a model round within a worker's task, not the entire task,
 a parent prompt, or an individual tool call. One turn can produce several
 tool calls. Claude enforces agentic rounds through native `maxTurns` on each
@@ -99,12 +106,14 @@ scripts/agents/          classifier and worker-rendering tooling
 scripts/hosts/           shared installer, settings and lifecycle engine
 scripts/codex/           thin Codex install/uninstall wrappers
 scripts/claude/          thin Claude install/uninstall wrappers
+scripts/pi/              thin Pi install/uninstall wrappers
 codex/                   Codex policy, hook and generated worker
 claude/                  Claude policy, hook and generated worker
+pi/                      Pi policy, bridge, enforcer extension and generated worker
 docs/audit/              history rewrite ledger and convention evidence
 ```
 
-Codex and Claude installations are independent. Both use the same core
+Codex, Claude, and Pi installations are independent. All use the same core
 classifier and hook adapter. Manifest release metadata is retained for legacy
 compatibility but is ignored by the runtime; native host lifecycle behavior
 continues to determine worker completion and closure.
@@ -114,7 +123,8 @@ continues to determine worker completion and closure.
 There is no request schema, receipt, or backend selection. The only proof of
 delegation the protocol recognizes is the host's own native subagent
 lifecycle: a `SubagentStart` event opens a worker slot for the session, and a
-matching `SubagentStop` (or, on Claude, a foreground Agent result) closes it.
+matching `SubagentStop` (or, on Claude, a foreground Agent result; on Pi, the
+subagent tool result) closes it.
 `scripts/hosts/hook_adapter.py` tracks only enforcement evidence under
 `.delegation-protocol/hook-state/`: concurrent, pending, observed, peak, and
 budget records. Legacy analysis, execution, active, finished, and mode fields
@@ -124,11 +134,15 @@ prompt, whether delegation is required at all and how many concurrent workers
 it must reach.
 
 `PreToolUse` checks parent delegation evidence for eligible mutations and
-applies Codex worker budgets to intercepted tool calls. `Stop` expires unused
+applies Codex and Pi worker budgets to intercepted tool calls. `Stop` expires unused
 authorization and marks the turn complete; it does not require delegation
 evidence for turn completion. Native lifecycle identity is needed to attribute
 a tool call to a worker budget. Missing worker identity or missing hook events
-limit what the ledger can enforce.
+limit what the ledger can enforce. On Pi the enforcement surface is the
+delegation enforcer extension, which bridges `before_agent_start`, `tool_call`,
+`tool_result`, and `turn_end` onto this same adapter; Pi has no native
+SubagentStart/Stop events, so the `subagent` tool call itself opens and closes
+the worker slot.
 
 Hooks enforce only calls delivered to them and are not a security sandbox.
 Codex's `write_stdin` input and polling have no `PreToolUse` hook, specialized
@@ -154,6 +168,12 @@ Claude Code:
 bash scripts/claude/install.sh
 ```
 
+Pi:
+
+```bash
+bash scripts/pi/install.sh
+```
+
 Use the corresponding `.ps1` wrapper on Windows. The shared installer
 preflights every source, destination, manifest, and host JSON file before
 mutation. It uses a lock, atomic settings writes, rollback, and a complete
@@ -173,6 +193,7 @@ healthy — run the read-only verifier:
 ```bash
 python3 scripts/hosts/install.py verify --host claude --home "$HOME/.claude" --repo .
 python3 scripts/hosts/install.py verify --host codex --home "$HOME/.codex" --repo .
+python3 scripts/hosts/install.py verify --host pi --home "$HOME/.pi/agent" --repo .
 ```
 
 A non-zero exit lists every managed copy that differs from the checkout or is
