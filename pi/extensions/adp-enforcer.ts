@@ -57,7 +57,7 @@ function detectWorker(): WorkerIdentity | null {
 		try {
 			const profile = fs.readFileSync(profilePath, "utf8");
 			const match = profile.match(/^#\s+(quick|bulk|balanced|frontier)\s+worker\b/im);
-			if (match) tier = `${match[1]}-worker`;
+			if (match) tier = `${match[1].toLowerCase()}-worker`;
 		} catch {
 			// Missing or unreadable profile: leave the tier unknown; the
 			// adapter then pins the conservative limit of 16.
