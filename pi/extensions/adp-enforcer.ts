@@ -85,6 +85,44 @@ export default function (pi: ExtensionAPI) {
 	let warnedBridgeFailure = false;
 	let pythonExecutable = process.env.ADP_PYTHON || "python3";
 
+	// A worker that keeps calling tools after a terminal deny (budget
+	// exhausted, unreadable protocol state) spins forever: pi has no
+	// native per-worker timeout, and the deny text alone does not
+	// reliably stop a spinning model. The adapter marks such denys with
+	// hookSpecificOutput.terminal. The first terminal deny buys a grace
+	// period to produce the final report; the next one terminates the
+	// process so the parent gets its evidence instead of a hang.
+	let denyGraceTimer: NodeJS.Timeout | null = null;
+	let terminated = false;
+
+	function terminateWorker(reason: string) {
+		try {
+			process.stderr.write(
+				`ADP: worker terminated after a terminal deny: ${reason}\n`,
+			);
+			process.kill(process.pid, "SIGTERM");
+		} catch {
+			/* already gone */
+		}
+	}
+
+	function noteTerminalDeny() {
+		if (terminated) return;
+		if (denyGraceTimer) {
+			clearTimeout(denyGraceTimer);
+			denyGraceTimer = null;
+			terminated = true;
+			terminateWorker("terminal deny");
+			return;
+		}
+		denyGraceTimer = setTimeout(() => {
+			denyGraceTimer = null;
+			terminated = true;
+			terminateWorker("terminal deny grace elapsed");
+		}, 60_000);
+		if (denyGraceTimer.unref) denyGraceTimer.unref();
+	}
+
 	function sessionId(ctx: any): string | undefined {
 		try {
 			return ctx.sessionManager?.getSessionId?.() || undefined;
@@ -128,20 +166,25 @@ export default function (pi: ExtensionAPI) {
 		payload: Payload,
 	): Promise<any | null> {
 		const response = await callBridge(mode, payload, ctx?.model?.contextWindow);
-		if (response === null && !worker) {
-			// Bridge failure behaves like an unavailable hook: the call
-			// proceeds, once per process a warning is surfaced.
+		if (response === null) {
 			if (!warnedBridgeFailure) {
 				warnedBridgeFailure = true;
 				try {
-					if (ctx?.hasUI) {
+					if (worker) {
+						// Workers have no UI; make the degraded state visible
+						// in the parent's captured stderr instead of silently
+						// bypassing enforcement.
+						process.stderr.write(
+							"ADP: delegation enforcer bridge failed; enforcement is degraded\n",
+						);
+					} else if (ctx?.hasUI) {
 						ctx.ui.notify(
 							"ADP: delegation enforcer bridge failed; enforcement is degraded",
 							"warning",
 						);
 					}
 				} catch {
-					/* no UI available */
+					/* no sink available */
 				}
 			}
 		}
@@ -191,6 +234,9 @@ export default function (pi: ExtensionAPI) {
 			} catch {
 				/* no UI available */
 			}
+			if (worker && (response as any)?.hookSpecificOutput?.terminal === true) {
+				noteTerminalDeny();
+			}
 			return { block: true, reason: denied };
 		}
 		// Parent side: an admitted spawn consumes its reservation at once,
@@ -217,6 +263,28 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("turn_end", async (_event, ctx) => {
 		if (worker) return;
-		await invoke(ctx, "turn-stop", { session_id: sessionId(ctx) });
+		const response = await invoke(ctx, "turn-stop", { session_id: sessionId(ctx) });
+		// pi has no veto point at turn end; a block decision here (protocol
+		// state errors) can only be surfaced, never enforced.
+		const decision = (response as any)?.decision;
+		if (decision === "block") {
+			const reason = (response as any)?.reason || "turn-stop blocked";
+			let surfaced = false;
+			try {
+				if (ctx?.hasUI) {
+					ctx.ui.notify(`ADP: ${reason}`, "warning");
+					surfaced = true;
+				}
+			} catch {
+				/* no UI available */
+			}
+			if (!surfaced) {
+				try {
+					process.stderr.write(`ADP: ${reason}\n`);
+				} catch {
+					/* no sink available */
+				}
+			}
+		}
 	});
 }
