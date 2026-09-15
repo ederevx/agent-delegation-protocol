@@ -3,7 +3,9 @@
   "template": "agents/worker-common.md.tmpl",
   "hosts": {
     "claude": {
-      "parent_channel": "`SendMessage` (use `ListAgents` to identify the parent)",
+      "escalation_contract": [
+        "Native shared-workspace workers can see current working-tree changes; isolated\nworkers cannot see uncommitted parent changes. Ask the parent before any work\noutside assigned ownership, repository-wide version-control action, work on\nanother worker's files,\ndependency change, branch or index change, operation leaving the machine, or\nmaterial architectural, security-sensitive, destructive, or deeply ambiguous\ndecision. Use `SendMessage` (use `ListAgents` to identify the parent) and wait for the answer; only the parent may\ntake questions to the user. If the parent channel is unavailable, stop and\nreport instead of guessing."
+      ],
       "lifecycle_contract": [
         "Return the evidence report through the foreground Agent result or `SendMessage` for a named background teammate. Claude automatically releases a foreground Agent when its result returns; do not issue a stop operation for that completed worker."
       ],
@@ -12,12 +14,25 @@
       }
     },
     "codex": {
-      "parent_channel": "the collaboration channel available to the worker",
+      "escalation_contract": [
+        "Native shared-workspace workers can see current working-tree changes; isolated\nworkers cannot see uncommitted parent changes. Ask the parent before any work\noutside assigned ownership, repository-wide version-control action, work on\nanother worker's files,\ndependency change, branch or index change, operation leaving the machine, or\nmaterial architectural, security-sensitive, destructive, or deeply ambiguous\ndecision. Use the collaboration channel available to the worker and wait for the answer; only the parent may\ntake questions to the user. If the parent channel is unavailable, stop and\nreport instead of guessing."
+      ],
       "lifecycle_contract": [
         "Return the evidence report and stop. The host session lifecycle releases the worker; no nonexistent post-result worker action is required."
       ],
       "output": {
         "format": "codex-toml"
+      }
+    },
+    "pi": {
+      "escalation_contract": [
+        "Pi runs every worker as an isolated `pi --mode json -p --no-session` process\nin the parent's working directory: a worker sees current working-tree changes\nbut never the parent's conversation, and workers cannot message the parent\nmid-task. Raise anything outside assigned ownership, any repository-wide\nversion-control action, work on another worker's files, a dependency change,\na branch or index change, any operation leaving the machine, or any material\narchitectural, security-sensitive, destructive, or deeply ambiguous decision\nin your final evidence report and stop; only the parent may take questions\nto the user, and it reads your report when you finish."
+      ],
+      "lifecycle_contract": [
+        "Return the evidence report as your final output and end. Pi releases a foreground subagent automatically when its result returns; do not issue any stop operation for that completed worker."
+      ],
+      "output": {
+        "format": "pi-markdown"
       }
     }
   },
@@ -36,6 +51,11 @@
           "name": "bulk_worker",
           "model": "gpt-5.6-terra",
           "reasoning_effort": "medium"
+        },
+        "pi": {
+          "path": "pi/agents/bulk-worker.md",
+          "name": "bulk-worker",
+          "model": "z-ai/glm-5.3-flash:medium"
         }
       }
     },
@@ -53,6 +73,11 @@
           "name": "quick_worker",
           "model": "gpt-5.6-luna",
           "reasoning_effort": "low"
+        },
+        "pi": {
+          "path": "pi/agents/quick-worker.md",
+          "name": "quick-worker",
+          "model": "z-ai/glm-5.3-flash:low"
         }
       }
     },
@@ -70,6 +95,11 @@
           "name": "balanced_worker",
           "model": "gpt-5.6-sol",
           "reasoning_effort": "high"
+        },
+        "pi": {
+          "path": "pi/agents/balanced-worker.md",
+          "name": "balanced-worker",
+          "model": "z-ai/glm-5.3-flash:high"
         }
       }
     },
@@ -87,6 +117,11 @@
           "name": "frontier_worker",
           "model": "gpt-6-astra",
           "reasoning_effort": "xhigh"
+        },
+        "pi": {
+          "path": "pi/agents/frontier-worker.md",
+          "name": "frontier-worker",
+          "model": "z-ai/glm-5.3:xhigh"
         }
       }
     }

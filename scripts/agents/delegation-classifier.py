@@ -186,7 +186,11 @@ MUTATING_TOOL_NAME = re.compile(
 
 # Exact native delegation aliases avoid matching unrelated opaque tools.
 # Workers may delegate only to lower tiers, independently of tool budgets.
-AGENT_TOOL_NAME = re.compile(r"^(?:(?:collaboration|functions)\.)?(?:agent|task|spawn_agent)$", re.IGNORECASE)
+# `subagent` is Pi's native delegation tool (official subagent extension).
+AGENT_TOOL_NAME = re.compile(
+    r"^(?:(?:collaboration|functions)\.)?(?:agent|task|spawn_agent|subagent)$",
+    re.IGNORECASE,
+)
 
 # Worker tiers, lowest first. A worker may delegate (via the Agent/Task tool)
 # only to a strictly lower tier than its own -- never to itself or to a

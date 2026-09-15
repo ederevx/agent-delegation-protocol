@@ -13,8 +13,10 @@ STATUS_PREFIX = "Delegation protocol v2:"
 
 # Single source of truth for which settings file each host's hook entries
 # live in. install.py imports this table; every host-specific read of the
-# filename goes through it.
-HOST_SETTINGS_FILE = {"claude": "settings.json", "codex": "hooks.json"}
+# filename goes through it. A None value means the host has no hook
+# configuration JSON: Pi's enforcement is a discovered extension, so its
+# integration is deployed as plain resources and no settings are edited.
+HOST_SETTINGS_FILE = {"claude": "settings.json", "codex": "hooks.json", "pi": None}
 
 
 def quote(value: str) -> str:
@@ -129,7 +131,14 @@ def install(host: str, home: Path, hook_path: Path, python_executable: str) -> N
 
 
 def uninstall(host: str, home: Path) -> None:
-    settings_path = home / HOST_SETTINGS_FILE[host]
+    settings_file = HOST_SETTINGS_FILE.get(host)
+    if settings_file is None:
+        # A host with no settings file only ever owns the host-settings
+        # manifest record, never settings content.
+        manifest_path = home / ".delegation-protocol" / "host-settings.json"
+        manifest_path.unlink(missing_ok=True)
+        return
+    settings_path = home / settings_file
     state_dir = home / ".delegation-protocol"
     manifest_path = state_dir / "host-settings.json"
     # Older installs recorded only the environment entries they inserted.

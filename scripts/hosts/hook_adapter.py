@@ -25,6 +25,7 @@ STALE_WORKER_SECONDS = 6 * 60 * 60
 HOST_ENVIRONMENT = {
     "claude": ("CLAUDE_CONFIG_DIR", ".claude"),
     "codex": ("CODEX_HOME", ".codex"),
+    "pi": ("PI_CODING_AGENT_DIR", ".pi/agent"),
 }
 
 
@@ -477,6 +478,9 @@ def _deny(reason: str) -> dict[str, Any]:
 HOST_CONTEXT_ENVIRONMENT = {
     "claude": ("CLAUDE_CODE_MAX_CONTEXT_TOKENS",),
     "codex": ("CODEX_MAX_CONTEXT_TOKENS",),
+    # The Pi enforcer extension sets this from the session model's context
+    # window when it shells out to the adapter.
+    "pi": ("PI_CONTEXT_TOKENS",),
 }
 
 
@@ -724,7 +728,7 @@ def _state_error(event: str, error: Exception) -> dict[str, Any]:
 
 def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     """Apply one normalized hook event and return host-compatible feedback."""
-    if host not in {"claude", "codex"} or not isinstance(payload, dict):
+    if host not in {"claude", "codex", "pi"} or not isinstance(payload, dict):
         return None
     session = _session(payload)
     home = _home(host)
@@ -735,7 +739,9 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         if event == "prompt":
             return _routing_context("UserPromptSubmit", classifier)
         if event == "pre-mutation":
-            if host == "codex":
+            # Codex and Pi have no native per-worker turn limit, so both
+            # enforce the hard hook-covered tool-call budget here.
+            if host in {"codex", "pi"}:
                 denial = _worker_tool_budget(home, payload, classifier)
                 if denial:
                     return denial

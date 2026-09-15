@@ -36,6 +36,9 @@ VERSION = 3
 HOST_DIRECTORIES = {
     "claude": ("rules", "agents", "hooks", ".delegation-protocol"),
     "codex": ("", "agents", "hooks", ".delegation-protocol"),
+    # Pi enforces through a discovered extension, so its layout adds the
+    # extensions directory to the common agents/hooks/state set.
+    "pi": ("agents", "hooks", "extensions", ".delegation-protocol"),
 }
 
 # Codex caps concurrently open spawned-agent threads per session through an
@@ -215,6 +218,17 @@ def resources(repo: Path, home: Path, host: str) -> list[tuple[Path, Path, str]]
             (repo / "claude/agents/bulk-worker.md", home / "agents/bulk-worker.md", "copy"),
             (repo / "claude/agents/quick-worker.md", home / "agents/quick-worker.md", "copy"),
             (repo / "claude/hooks/delegation-enforcer.py", home / "hooks/delegation-enforcer.py", "copy"),
+            *common,
+        ]
+    if host == "pi":
+        return [
+            (repo / "pi/rules/delegation-protocol.md", home / "rules/delegation-protocol.md", "copy"),
+            (repo / "pi/agents/frontier-worker.md", home / "agents/frontier-worker.md", "copy"),
+            (repo / "pi/agents/balanced-worker.md", home / "agents/balanced-worker.md", "copy"),
+            (repo / "pi/agents/bulk-worker.md", home / "agents/bulk-worker.md", "copy"),
+            (repo / "pi/agents/quick-worker.md", home / "agents/quick-worker.md", "copy"),
+            (repo / "pi/hooks/delegation-enforcer.py", home / "hooks/delegation-enforcer.py", "copy"),
+            (repo / "pi/extensions/adp-enforcer.ts", home / "extensions/adp-enforcer.ts", "copy"),
             *common,
         ]
     return [
