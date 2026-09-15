@@ -229,6 +229,80 @@ def test_stale_concurrent_entries_are_swept_at_cap_check() -> None:
                 os.environ["CODEX_HOME"] = previous_home
 
 
+def test_pi_host_sweeps_at_its_shorter_ceiling() -> None:
+    """pi's 30-minute ceiling sweeps entries the shared 6h one would keep."""
+    import json as _json
+    import time as _time
+
+    with tempfile.TemporaryDirectory(prefix="protocol-sweep-pi-") as raw:
+        home = Path(raw)
+        previous = (os.environ.get("PI_CODING_AGENT_DIR"),
+                    os.environ.get("CLAUDE_CONFIG_DIR"))
+        os.environ["PI_CODING_AGENT_DIR"] = str(home)
+        os.environ["CLAUDE_CONFIG_DIR"] = str(home)
+        try:
+            classifier = _classifier(home)
+            cap = classifier.MAX_ACTIVE_WORKERS
+            path, _ = _paths(home, "pi-sweep-session")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            hour_old = _time.time() - 60 * 60
+            entries = [{"id": f"pi-stale-{n}", "started_at": hour_old}
+                       for n in range(cap - 1)]
+            entries.append({"id": "fresh-worker", "started_at": _time.time()})
+            path.write_text(_json.dumps({
+                "schema_version": 3, "concurrent": entries,
+                "pending_spawns": [], "denied_spawns": [], "observed": [],
+                "peak_active": cap, "requires_delegation": False,
+                "requires_multi": False, "min_agents": 0,
+                "completed": False, "pending_authorization": False,
+            }))
+            # pi's ceiling sweeps the hour-old entries at the cap check.
+            denied = run("pi", "pre-mutation", {
+                "session_id": "pi-sweep-session", "tool_name": "subagent",
+                "tool_use_id": "spawn-pi-1",
+                "tool_input": {"agent": "bulk-worker",
+                               "subagent_type": "bulk-worker"},
+            })
+            assert denied is None, denied
+            state = _json.loads(path.read_text())
+            assert not any(
+                e["id"].startswith("pi-stale-") for e in state["concurrent"]
+            )
+            assert any(e["id"] == "fresh-worker" for e in state["concurrent"])
+            assert "spawn-pi-1" in state["pending_spawns"]
+            # The same age under the shared ceiling (claude) still counts
+            # against the cap: the sweep is host-keyed, not global.
+            other = _paths(home, "claude-sweep-session")[0]
+            claude_state = _json.loads(path.read_text())
+            # Reset spawn bookkeeping so the denial rests purely on the
+            # hour-old concurrent entries, not the pi run's reservation.
+            claude_state["pending_spawns"] = []
+            claude_state["denied_spawns"] = []
+            hour_old_entries = [{"id": f"stale-{n}", "started_at": hour_old}
+                                for n in range(cap - 1)]
+            fresh = [e for e in claude_state["concurrent"]
+                     if e["id"] == "fresh-worker"]
+            claude_state["concurrent"] = hour_old_entries + fresh
+            other.write_text(_json.dumps(claude_state))
+            denied = run("claude", "pre-mutation", {
+                "session_id": "claude-sweep-session", "tool_name": "Agent",
+                "tool_use_id": "spawn-claude-1",
+                "tool_input": {"subagent_type": "bulk-worker"},
+            })
+            assert denied is not None and "cap" in denied["hookSpecificOutput"][
+                "permissionDecisionReason"
+            ], denied
+        finally:
+            if previous[0] is None:
+                os.environ.pop("PI_CODING_AGENT_DIR", None)
+            else:
+                os.environ["PI_CODING_AGENT_DIR"] = previous[0]
+            if previous[1] is None:
+                os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            else:
+                os.environ["CLAUDE_CONFIG_DIR"] = previous[1]
+
+
 def test_fresh_workers_still_count_against_the_cap() -> None:
     """Only stale entries are swept; live workers keep consuming their slot."""
     import json as _json

@@ -21,6 +21,11 @@ from typing import Any, Iterator
 # leaked: its slot is freed at the next cap check even if no completion
 # event ever arrives (host crash, kill -9, abort mid-fan-out).
 STALE_WORKER_SECONDS = 6 * 60 * 60
+# pi has no failure event either, and a user abort of a subagent tool call
+# never emits a completion, so leaked slots wedge the cap until swept. Its
+# workers are one-shot processes that rarely run for hours, so a shorter
+# ceiling bounds the leak while Codex keeps the shared default.
+STALE_WORKER_SECONDS_BY_HOST = {"pi": 30 * 60}
 
 HOST_ENVIRONMENT = {
     "claude": ("CLAUDE_CONFIG_DIR", ".claude"),
@@ -323,7 +328,7 @@ def _normalize_concurrent(state: dict[str, Any]) -> list[dict[str, Any]]:
             for worker in sorted(earliest)]
 
 
-def _sweep_stale_workers(state: dict[str, Any]) -> None:
+def _sweep_stale_workers(state: dict[str, Any], host: str = "") -> None:
     """Free slots of workers whose start event predates the staleness ceiling.
 
     Claude papers over the common leak with a failure event; Codex and pi
@@ -332,7 +337,8 @@ def _sweep_stale_workers(state: dict[str, Any]) -> None:
     arrives. Sweeping here means every spawn attempt pays the check while
     only genuinely stale entries pay the removal.
     """
-    cutoff = time.time() - STALE_WORKER_SECONDS
+    cutoff = time.time() - STALE_WORKER_SECONDS_BY_HOST.get(
+        host, STALE_WORKER_SECONDS)
     kept = [
         entry for entry in state.get("concurrent", [])
         if isinstance(entry, dict)
@@ -344,7 +350,7 @@ def _sweep_stale_workers(state: dict[str, Any]) -> None:
 
 
 def _active_cap_violation(state: dict[str, Any], classifier: Any,
-                          payload: dict[str, Any]) -> str | None:
+                          payload: dict[str, Any], host: str = "") -> str | None:
     """Reason a further worker spawn must be denied for an over-full session.
 
     `concurrent` holds the workers genuinely in flight right now, so a
@@ -365,7 +371,7 @@ def _active_cap_violation(state: dict[str, Any], classifier: Any,
     """
     if _holds_reservation(state, payload):
         return None
-    _sweep_stale_workers(state)
+    _sweep_stale_workers(state, host)
     running = (len(state.get("concurrent", []))
                + len(state.get("pending_spawns", [])))
     cap = classifier.MAX_ACTIVE_WORKERS
@@ -465,12 +471,16 @@ def _release_failed_reservation(state: dict[str, Any],
     state["pending_spawns"] = pending
 
 
-def _deny(reason: str) -> dict[str, Any]:
+def _deny(reason: str, *, terminal: bool = False) -> dict[str, Any]:
+    """A denied tool call; `terminal` marks denys a worker cannot recover
+    from by retrying (budget exhausted, unreadable protocol state), so the
+    host shim can stop a worker that would otherwise spin on them."""
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
             "permissionDecisionReason": reason,
+            **({"terminal": True} if terminal else {}),
         }
     }
 
@@ -600,7 +610,8 @@ class TurnEventHandler:
         reason = _spawn_budget_violation(payload, self.classifier)
         delegating = _delegating(payload, self.classifier)
         if reason is None and delegating:
-            reason = _active_cap_violation(self.state, self.classifier, payload)
+            reason = _active_cap_violation(
+                self.state, self.classifier, payload, self.host)
         if reason is None and _mutating(payload, self.classifier):
             reason = _unmet(self.state)
         if reason is not None:
@@ -659,7 +670,8 @@ def _worker_tool_budget(home: Path, payload: dict[str, Any],
         return _deny(
             "Worker tool-call budget could not be verified or saved; "
             f"{error}. Report the ledger/lock error to the parent without "
-            "further tool calls."
+            "further tool calls.",
+            terminal=True,
         )
 
 
@@ -684,13 +696,13 @@ def _worker_tool_budget_locked(home: Path, payload: dict[str, Any],
             ledger = {"tier": tier, "limit": classifier.WORKER_TURN_LIMITS.get(
                 tier, min(classifier.WORKER_TURN_LIMITS.values())), "used": 0, "seen": []}
         except (OSError, json.JSONDecodeError):
-            return _deny("Worker tool-call budget ledger is unreadable or corrupt; report this to the parent without continuing tool calls.")
+            return _deny("Worker tool-call budget ledger is unreadable or corrupt; report this to the parent without continuing tool calls.", terminal=True)
         if (not isinstance(ledger, dict) or type(ledger.get("limit")) is not int or
                 ledger["limit"] <= 0 or type(ledger.get("used")) is not int or
                 not 0 <= ledger["used"] <= ledger["limit"] or
                 not isinstance(ledger.get("seen"), list) or
                 not all(isinstance(item, str) for item in ledger["seen"])):
-            return _deny("Worker tool-call budget ledger is invalid; report this to the parent without resetting the budget.")
+            return _deny("Worker tool-call budget ledger is invalid; report this to the parent without resetting the budget.", terminal=True)
         limit = ledger["limit"]
         if not charge:
             _save(path, ledger)
@@ -705,7 +717,8 @@ def _worker_tool_budget_locked(home: Path, payload: dict[str, Any],
             return _deny(
                 f"Worker tool-call budget exhausted ({used}/{limit}; 0 remaining). "
                 "Return a plain final report with evidence and remaining work; "
-                "do not make further tool calls. Completion is permitted."
+                "do not make further tool calls. Completion is permitted.",
+                terminal=True,
             )
         if call_id:
             seen.add(call_id)
@@ -720,7 +733,7 @@ def _state_error(event: str, error: Exception) -> dict[str, Any]:
         f"{error}. Report this to the parent without further tool calls."
     )
     if event == "pre-mutation":
-        return _deny(reason)
+        return _deny(reason, terminal=True)
     if event == "turn-stop":
         return {"decision": "block", "reason": reason}
     return {"systemMessage": reason}
@@ -762,7 +775,7 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
                         parent_state = _load(path)
                         if reason is None:
                             reason = _active_cap_violation(
-                                parent_state, classifier, payload)
+                                parent_state, classifier, payload, host)
                         if reason is None:
                             _reserve_spawn(parent_state, payload)
                             _save(path, parent_state)
@@ -772,7 +785,8 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
                     return _deny(
                         "Active worker ledger could not be read or updated to "
                         f"verify the concurrent-worker cap; {error}. Report "
-                        "this to the parent instead of spawning another worker."
+                        "this to the parent instead of spawning another worker.",
+                        terminal=True,
                     )
             return _deny(reason) if reason else None
         return None
