@@ -55,7 +55,7 @@
         "pi": {
           "path": "pi/agents/bulk-worker.md",
           "name": "bulk-worker",
-          "model": "z-ai/glm-5.3-flash:medium"
+          "thinking": "medium"
         }
       }
     },
@@ -77,7 +77,7 @@
         "pi": {
           "path": "pi/agents/quick-worker.md",
           "name": "quick-worker",
-          "model": "z-ai/glm-5.3-flash:low"
+          "thinking": "low"
         }
       }
     },
@@ -99,7 +99,7 @@
         "pi": {
           "path": "pi/agents/balanced-worker.md",
           "name": "balanced-worker",
-          "model": "z-ai/glm-5.3-flash:high"
+          "thinking": "high"
         }
       }
     },
@@ -121,7 +121,7 @@
         "pi": {
           "path": "pi/agents/frontier-worker.md",
           "name": "frontier-worker",
-          "model": "z-ai/glm-5.3:xhigh"
+          "thinking": "xhigh"
         }
       }
     }
