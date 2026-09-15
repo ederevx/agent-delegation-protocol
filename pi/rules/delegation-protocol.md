@@ -33,11 +33,13 @@ Do not repeat completed work merely to obtain the same information; review,
 verify, or correct worker claims when needed.
 
 Delegation is proven only by Pi's native subagent lifecycle — the `subagent`
-tool of the official subagent extension — as observed by the delegation
-enforcer extension; there is no alternative request format, launcher, or
-scheduler. ADP owns none of that spawning machinery and does not depend on
-the subagent extension for its own resources: when the native subagent tool
-is unavailable, required delegation cannot be proven and the work is reported
+tool of the ADP-owned subagent extension (vendored from the official
+example) — as observed by the delegation enforcer extension; there is no
+alternative request format, launcher, or scheduler. ADP owns none of that
+spawning machinery and does not depend on the subagent extension for its own
+resources: when the native subagent tool is unavailable, required delegation
+cannot be proven and the work is reported as blocked instead of being
+carried out in the parent.
 as blocked instead of being carried out in the parent.
 
 ## Model tiers
@@ -98,8 +100,11 @@ another hook or the host later denies them, a repeated tool-call id counts
 once, and the ledger survives resumes and new parent prompts. An identified
 worker with an unknown or missing tier gets a conservative limit of 16,
 pinned at the first hook-covered call; later type changes cannot raise or
-reset it. Corrupt, unwritable, or locked ledgers deny further calls. Workers
-can still return a plain final report and stop after exhaustion. Parent
+reset it. Corrupt, unwritable, or locked ledgers deny further calls. The
+first terminal deny orders the worker to stop calling tools and produce its
+final evidence report; repeated terminal denies re-deliver that order and
+never terminate the process; the enforcer decommissions a worker only if a
+120-second grace window elapses without the worker finishing. Parent
 sessions are not capped.
 
 Both this host and the other ADP hosts share a hard cap of 10 concurrently

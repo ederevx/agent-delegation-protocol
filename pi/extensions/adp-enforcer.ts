@@ -8,9 +8,10 @@
  * protocol state directory (`.delegation-protocol/`, next to the adapter) so
  * no legacy `hooks/` directory exists and Pi's deprecation warning stays
  * silent. It never spawns subagents itself: delegation evidence is Pi's
- * native `subagent` tool (the official subagent extension), which this file
- * does not depend on or re-implement. When the bridge is absent the extension
- * is inert.
+ * native `subagent` tool (the ADP-owned subagent extension, vendored from
+ * the official example and deployed by the installer), which this file does
+ * not depend on or re-implement. When the bridge is absent the extension is
+ * inert.
  *
  * Event mapping:
  *   before_agent_start          -> prompt         (classify; append routing policy)
@@ -19,7 +20,7 @@
  *   tool_result (subagent)      -> worker-complete
  *   turn_end                    -> turn-stop
  *
- * Worker sessions are recognized from the spawn argv the official subagent
+ * Worker sessions are recognized from the spawn argv the ADP-owned subagent
  * extension uses (`--mode json -p --no-session`); the tier is read from the
  * spawned profile's --append-system-prompt file. An identified worker whose
  * tier cannot be read gets the adapter's conservative limit of 16.
@@ -49,8 +50,9 @@ function bridgePath(): string {
 
 function detectWorker(): WorkerIdentity | null {
 	const argv = process.argv;
-	// The official subagent extension spawns workers as one-shot processes
-	// with --no-session; a parent session never carries that flag.
+	// The ADP-owned subagent extension (vendored from the official example)
+	// spawns workers as one-shot processes with --no-session; a parent
+	// session never carries that flag.
 	if (!argv.includes("--no-session")) return null;
 	const id = "pi:" + createHash("sha256").update(argv.join("\n")).digest("hex");
 	let tier: string | undefined;
@@ -89,9 +91,13 @@ export default function (pi: ExtensionAPI) {
 	// exhausted, unreadable protocol state) spins forever: pi has no
 	// native per-worker timeout, and the deny text alone does not
 	// reliably stop a spinning model. The adapter marks such denys with
-	// hookSpecificOutput.terminal. The first terminal deny buys a grace
-	// period to produce the final report; the next one terminates the
-	// process so the parent gets its evidence instead of a hang.
+	// hookSpecificOutput.terminal. The first terminal deny starts a
+	// grace window and orders the worker to produce its final evidence
+	// report; later terminal denies within the window only re-deliver
+	// the deny text as tool feedback and never terminate the process.
+	// The grace kill exists only to stop a worker that never finishes,
+	// not to punish a second deny, so a winding-down worker keeps its
+	// final report instead of being killed mid-summary.
 	let denyGraceTimer: NodeJS.Timeout | null = null;
 	let terminated = false;
 
@@ -107,20 +113,16 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function noteTerminalDeny() {
-		if (terminated) return;
-		if (denyGraceTimer) {
-			clearTimeout(denyGraceTimer);
-			denyGraceTimer = null;
-			terminated = true;
-			terminateWorker("terminal deny");
-			return;
-		}
+		if (terminated || denyGraceTimer) return;
 		denyGraceTimer = setTimeout(() => {
 			denyGraceTimer = null;
 			terminated = true;
 			terminateWorker("terminal deny grace elapsed");
-		}, 60_000);
+		}, 120_000);
 		if (denyGraceTimer.unref) denyGraceTimer.unref();
+		process.stderr.write(
+			"ADP: budget exhausted; produce your final evidence report now — the process is decommissioned when the grace window closes.\n",
+		);
 	}
 
 	function sessionId(ctx: any): string | undefined {

@@ -178,11 +178,45 @@ def main() -> None:
     test_advisory_lock_prevents_lost_updates()
     test_windows_lock_contention_retries_eacces()
     test_legacy_locks_fail_closed_with_actionable_feedback()
+    test_exhausted_budget_denies_with_wind_down_order()
     print("Host lock tests: PASS")
 
 
 if __name__ == "__main__":
     main()
+
+
+def test_exhausted_budget_denies_with_wind_down_order() -> None:
+    """A spent ledger returns a terminal wind-down order for the worker."""
+    import json as _json
+
+    with tempfile.TemporaryDirectory(prefix="protocol-budget-") as raw:
+        home = Path(raw)
+        previous_home = os.environ.get("CODEX_HOME")
+        os.environ["CODEX_HOME"] = str(home)
+        try:
+            classifier = _classifier(home)
+            ledger_path, _ = _paths(home, "worker-tool-budget:wind-down-worker")
+            ledger_path.parent.mkdir(parents=True)
+            ledger_path.write_text(_json.dumps(
+                {"tier": "bulk-worker", "limit": 64, "used": 64, "seen": []}))
+            denial = _worker_tool_budget(home, {
+                "agent_id": "wind-down-worker",
+                "agent_type": "bulk-worker",
+                "tool_use_id": "call-1",
+            }, classifier)
+            output = denial["hookSpecificOutput"]
+            assert output["permissionDecision"] == "deny"
+            assert output["terminal"] is True
+            reason = output["permissionDecisionReason"]
+            assert "exhausted (64/64; 0 remaining)" in reason
+            assert "Do not call any further tools" in reason
+            assert "final evidence report" in reason
+        finally:
+            if previous_home is None:
+                os.environ.pop("CODEX_HOME", None)
+            else:
+                os.environ["CODEX_HOME"] = previous_home
 
 
 def test_stale_concurrent_entries_are_swept_at_cap_check() -> None:
