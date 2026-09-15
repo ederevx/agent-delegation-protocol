@@ -46,8 +46,10 @@ class WorkerRenderingTests(unittest.TestCase):
                         self.assertIn(f"maxTurns: {limit}\n", text)
                         self.assertIn(f"native agentic-turn limit is {limit} through maxTurns", text)
                     elif host == "pi":
-                        self.assertIn(f"advisory budget of {limit} agentic turns", text)
-                        self.assertIn("Pi has no native per-worker turn-limit field", text)
+                        self.assertIn(f"maxTurns: {limit}\n", text)
+                        self.assertIn(f"native budget of {limit} agentic turns", text)
+                        self.assertIn("stops the worker at the limit", text)
+                        self.assertNotIn("no native per-worker turn-limit field", text)
                         self.assertIn(f"enforces {limit} tool-call attempts", text)
                     else:
                         parsed = tomllib.loads(text)

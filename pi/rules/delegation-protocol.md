@@ -90,11 +90,17 @@ spawning — parallel tasks inside one call share that call's active slot.
 
 ## Worker budgets and routing
 
-Pi has no native per-worker turn limit, so per-worker agentic-turn budgets
-are advisory: quick 128, bulk 64, balanced 32, and frontier 16. An agentic
-turn is one model round within a task, not the whole task, a parent prompt,
-or a tool call; a round can request multiple tools. ADP separately enforces a
-hard budget of tool-call attempts per identified worker lifetime through the
+Pi enforces the per-tier agentic-turn budget natively through the ADP-owned
+subagent extension: profiles carry `maxTurns`, the extension counts model
+rounds in the child's JSON stream, appends the wind-down order to the child
+prompt, and hard-stops the child at the limit; exhaustion is reported as a
+normal result marked turn-budget-exhausted, never a crash. Limits are quick
+128, bulk 64, balanced 32, and frontier 16. An agentic turn is one model
+round within a task, not the whole task, a parent prompt, or a tool call; a
+round can request multiple tools.
+
+ADP separately enforces a hard budget of tool-call attempts per identified
+worker lifetime through the
 delegation enforcer extension, using the same numbers: attempts count even if
 another hook or the host later denies them, a repeated tool-call id counts
 once, and the ledger survives resumes and new parent prompts. An identified

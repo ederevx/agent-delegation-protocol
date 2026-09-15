@@ -118,6 +118,16 @@ classifier and hook adapter. Manifest release metadata is retained for legacy
 compatibility but is ignored by the runtime; native host lifecycle behavior
 continues to determine worker completion and closure.
 
+## Vendored components
+
+The Pi subagent extension (`pi/extensions/subagent/`) and the four hand-written
+agent profiles (`pi/agents/planner.md`, `reviewer.md`, `scout.md`, `worker.md`)
+are vendored from @earendil-works/pi-coding-agent `examples/extensions/subagent`
+(v0.85.1, MIT) and maintained by this repository. Every adaptation (model
+frontmatter removed for host-neutral deployment, native `maxTurns` turn
+budgets, one-line TUI output) is recorded in each file's provenance header;
+generated worker profiles stay generated and are not hand-edited.
+
 ## Delegation evidence
 
 There is no request schema, receipt, or backend selection. The only proof of

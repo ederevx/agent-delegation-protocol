@@ -84,6 +84,15 @@ def test_legacy_state_ignores_retired_fields_without_losing_enforcement_state() 
     }
 
 
+def test_routing_policy_covers_native_turn_budgets() -> None:
+    policy = classifier.ROUTING_POLICY
+    assert "Claude enforces native maxTurns turn budgets" in policy
+    assert "the Pi subagent extension enforces maxTurns turn budgets" in policy
+    assert "Codex has advisory agentic-turn budgets" in policy
+    assert "Before reaching your turn limit" in policy
+
+
 if __name__ == "__main__":
     test_retired_diagnostics_do_not_affect_classification()
     test_legacy_state_ignores_retired_fields_without_losing_enforcement_state()
+    test_routing_policy_covers_native_turn_budgets()

@@ -242,10 +242,12 @@ ROUTING_POLICY = (
     "once in a session, counting nested workers; idle finished or "
     "resumable workers do not count. Wait for a running worker to finish "
     "before spawning more. "
-    "Claude uses native maxTurns; Codex has advisory "
+    "Claude enforces native maxTurns turn budgets; the Pi subagent "
+    "extension enforces maxTurns turn budgets; Codex has advisory "
     "agentic-turn budgets and a separate hard budget of hook-covered tool "
-    "calls per identified worker lifetime, including resumes. At exhaustion, "
-    "return the evidence report and remaining work instead of continuing."
+    "calls per identified worker lifetime, including resumes. Before "
+    "reaching your turn limit, return the evidence report and remaining "
+    "work instead of continuing."
 )
 
 
