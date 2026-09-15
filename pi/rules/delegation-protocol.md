@@ -42,25 +42,12 @@ as blocked instead of being carried out in the parent.
 
 ## Model tiers
 
-Every tier below frontier binds to the GLM-5.3 flash slug; the frontier tier
-binds to the GLM-5.3 slug without the flash suffix. Nothing else is offered
-below frontier on this host:
-
-| tier              | Pi model slug              |
-|-------------------|-----------------------------|
-| `frontier-worker` | `z-ai/glm-5.3`              |
-| `balanced-worker` | `z-ai/glm-5.3-flash`        |
-| `bulk-worker`     | `z-ai/glm-5.3-flash`        |
-| `quick-worker`    | `z-ai/glm-5.3-flash`        |
-
-Both slugs are explicit OpenRouter model IDs, not aliases that auto-track new
-generations — re-verified against the OpenRouter catalog on 2026-09-14
-(`z-ai/glm-5.3-flash` and `z-ai/glm-5.3` both listed). Reasoning effort steps
-up one level per tier, from `low` at quick to `xhigh` at frontier, encoded in
-the profile's model binding through Pi's `:<thinking>` model suffix:
-`z-ai/glm-5.3-flash:low`, `:medium`, `:high`, and `z-ai/glm-5.3:xhigh`. Pi has
-no separate per-agent effort field, so the suffix is the tier effort; the
-parent uses ordinary session effort.
+Pi worker profiles pin no model: every tier inherits the parent's session
+model. The tier ladder is implemented by the worker itself through its
+profile's thinking-level directive — `quick-worker` applies low reasoning
+effort, `bulk-worker` medium, `balanced-worker` high, and `frontier-worker`
+xhigh. Pi has no separate per-agent effort field, so the profile directive is
+the tier effort; the parent uses ordinary session effort.
 
 ## Recursive delegation
 

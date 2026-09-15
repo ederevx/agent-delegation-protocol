@@ -99,27 +99,40 @@ class WorkerRenderingTests(unittest.TestCase):
                         self.assertNotIn("tools", tomllib.loads(text))
 
     def test_tier_models_and_efforts_remain_configured(self):
+        outputs = renderer.rendered_outputs()
         expected = {
             "quick": {"claude": ("haiku", "low"), "codex": ("gpt-5.6-luna", "low"),
-                      "pi": ("z-ai/glm-5.3-flash:low",)},
+                      "pi": ("low",)},
             "bulk": {"claude": ("sonnet", "medium"), "codex": ("gpt-5.6-terra", "medium"),
-                     "pi": ("z-ai/glm-5.3-flash:medium",)},
+                     "pi": ("medium",)},
             "balanced": {"claude": ("opus", "high"), "codex": ("gpt-5.6-sol", "high"),
-                         "pi": ("z-ai/glm-5.3-flash:high",)},
+                         "pi": ("high",)},
             "frontier": {"claude": ("fable", "xhigh"), "codex": ("gpt-6-astra", "xhigh"),
-                         "pi": ("z-ai/glm-5.3:xhigh",)},
+                         "pi": ("xhigh",)},
         }
         for tier, hosts in expected.items():
             for host, values in hosts.items():
                 with self.subTest(tier=tier, host=host):
                     rendered = output(tier, host)
                     if host == "pi":
-                        # Pi encodes the tier effort in the model slug suffix;
-                        # there is no separate effort field on this host.
-                        (model,) = values
-                        self.assertEqual(rendered["model"], model)
+                        # Pi pins no model and inherits the parent's session
+                        # model; the profile's thinking directive is the tier
+                        # effort on this host.
+                        (thinking,) = values
+                        self.assertNotIn("model", rendered)
+                        self.assertEqual(rendered["thinking"], thinking)
                         self.assertNotIn("effort", rendered)
                         self.assertNotIn("reasoning_effort", rendered)
+                        text = outputs[ROOT / rendered["path"]]
+                        frontmatter = text.split("---\n\n", 1)[0]
+                        self.assertNotIn("\nmodel:", frontmatter)
+                        self.assertIn(
+                            "Pi worker profiles pin no model: this tier inherits "
+                            "the parent's session model. Implement the tier's "
+                            f"thinking level by applying reasoning effort `{thinking}` "
+                            "throughout the task.",
+                            text,
+                        )
                     else:
                         model, effort = values
                         self.assertEqual(rendered["model"], model)
