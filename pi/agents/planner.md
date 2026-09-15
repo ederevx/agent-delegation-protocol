@@ -1,4 +1,6 @@
-<!-- Vendored from @earendil-works/pi-coding-agent examples/extensions/subagent (version 0.85.1, MIT); maintained by the Agent Delegation Protocol. Model frontmatter removed for host-neutral deployment. -->
+<!-- Vendored: @earendil-works/pi-coding-agent examples/extensions/subagent (v0.85.1, MIT)
+     Maintainer: Agent Delegation Protocol (github.com/ederevx/agent-delegation-protocol)
+     Adaptations: model frontmatter removed for host-neutral deployment. -->
 ---
 name: planner
 description: Creates implementation plans from context and requirements

@@ -11,11 +11,15 @@
  *
  * Uses JSON mode to capture structured output from subagents.
  *
- * Vendored from @earendil-works/pi-coding-agent examples/extensions/subagent
- * (version 0.85.1, MIT); maintained by the Agent Delegation Protocol.
+ * Vendored from: @earendil-works/pi-coding-agent v0.85.1 (examples/extensions/subagent, MIT)
+ * Upstream: https://www.npmjs.com/package/@earendil-works/pi-coding-agent
+ * Maintained by: Agent Delegation Protocol
+ * Local modifications: maxTurns turn budgets; child registry + /subagents command;
+ *   spawn notifications; tool_result_end dead-branch removal; expanded renderer
+ *   restored with turn-budget markers
  */
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -25,11 +29,20 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import {
 	CONFIG_DIR_NAME,
 	type ExtensionAPI,
+	DynamicBorder,
 	getAgentDir,
 	getMarkdownTheme,
 	withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
+import {
+	Container,
+	Markdown,
+	matchesKey,
+	type SelectItem,
+	SelectList,
+	Spacer,
+	Text,
+} from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
 
@@ -45,6 +58,10 @@ function formatTokens(count: number): string {
 	return `${(count / 1000000).toFixed(1)}M`;
 }
 
+/**
+ * Upstream usage formatter, extended with an optional `turnLimit`: when a
+ * turn budget is known, turns print as `used/limit` instead of a bare count.
+ */
 function formatUsageStats(
 	usage: {
 		input: number;
@@ -56,9 +73,15 @@ function formatUsageStats(
 		turns?: number;
 	},
 	model?: string,
+	turnLimit?: number,
 ): string {
 	const parts: string[] = [];
-	if (usage.turns) parts.push(`${usage.turns} turn${usage.turns > 1 ? "s" : ""}`);
+	if (usage.turns)
+		parts.push(
+			turnLimit
+				? `${usage.turns}/${turnLimit} turns`
+				: `${usage.turns} turn${usage.turns > 1 ? "s" : ""}`,
+		);
 	if (usage.input) parts.push(`↑${formatTokens(usage.input)}`);
 	if (usage.output) parts.push(`↓${formatTokens(usage.output)}`);
 	if (usage.cacheRead) parts.push(`R${formatTokens(usage.cacheRead)}`);
@@ -139,6 +162,59 @@ function formatToolCall(
 	}
 }
 
+// Same tier heading the delegation enforcer reads from the spawned profile;
+// only the generated worker profiles carry a `# <tier> Worker` heading.
+const WORKER_TIER_PATTERN = /^#\s+(quick|bulk|balanced|frontier)\s+worker\b/im;
+
+function parseWorkerTier(systemPrompt: string): string | undefined {
+	const match = systemPrompt.match(WORKER_TIER_PATTERN);
+	return match ? `${match[1]}-worker` : undefined;
+}
+
+/**
+ * The turn-budget section appended to the worker's system prompt. It goes at
+ * the bottom of the profile body so the `# <tier> Worker` heading the enforcer
+ * keys on stays first.
+ */
+function turnBudgetSection(limit: number): string {
+	return (
+		"## Turn budget\n\n" +
+		`This worker has a hard budget of ${limit} agentic turns, enforced by the parent.\n` +
+		"The budget is the total number of model rounds in this task, not tool calls. Do not\n" +
+		"start new work that cannot finish within the budget; as it nears its end,\n" +
+		"deliver your final evidence report as plain text and end."
+	);
+}
+
+interface RunningSubagent {
+	id: string;
+	agent: string;
+	tier?: string;
+	task: string;
+	mode: "single" | "parallel-task" | "chain-step";
+	startedAt: Date;
+	completedAt?: Date;
+	proc?: ChildProcess;
+	// The live SingleResult; mutated in place as stream events arrive.
+	result: SingleResult;
+	turnLimit?: number;
+	listeners: Set<() => void>;
+}
+
+// Registry backing /subagents. Entries live from spawn until the child
+// closes; on close an entry moves to `finished` (last 20 kept, each with
+// completedAt and its final result), so a killed or errored worker never
+// leaks a running slot.
+const runningSubagents = new Map<string, RunningSubagent>();
+const finishedSubagents: RunningSubagent[] = [];
+const MAX_FINISHED_SUBAGENTS = 20;
+let nextSubagentId = 1;
+
+export const subagentRegistry = {
+	running: runningSubagents,
+	finished: finishedSubagents,
+};
+
 interface UsageStats {
 	input: number;
 	output: number;
@@ -153,13 +229,17 @@ interface SingleResult {
 	agent: string;
 	agentSource: "user" | "project" | "unknown";
 	task: string;
+	// -1 while the child is still running; the real code is assigned on close.
 	exitCode: number;
 	messages: Message[];
 	stderr: string;
 	usage: UsageStats;
+	tier?: string;
 	model?: string;
 	stopReason?: string;
 	errorMessage?: string;
+	turnBudgetExhausted?: boolean;
+	turnLimit?: number;
 	step?: number;
 }
 
@@ -182,7 +262,30 @@ function getFinalOutput(messages: Message[]): string {
 	return "";
 }
 
+type DisplayItem = { type: "text"; text: string } | { type: "toolCall"; name: string; args: Record<string, any> };
+
+// Assistant text and tool calls, in stream order; backs the /subagents
+// activity view.
+function getDisplayItems(messages: Message[]): DisplayItem[] {
+	const items: DisplayItem[] = [];
+	for (const msg of messages) {
+		if (msg.role === "assistant") {
+			for (const part of msg.content) {
+				if (part.type === "text") items.push({ type: "text", text: part.text });
+				else if (part.type === "toolCall")
+					items.push({ type: "toolCall", name: part.name, args: part.arguments as Record<string, any> });
+			}
+		}
+	}
+	return items;
+}
+
 function isFailedResult(result: SingleResult): boolean {
+	// A still-running child (exitCode -1) is neither failed nor finished.
+	if (result.exitCode === -1) return false;
+	// A budget-exhausted child was terminated by us on purpose, so its exit
+	// code and stop reason look like an abort; that is not a task failure.
+	if (result.turnBudgetExhausted) return false;
 	return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
 }
 
@@ -202,21 +305,6 @@ function truncateParallelOutput(output: string): string {
 		truncated = truncated.slice(0, -1);
 	}
 	return `${truncated}\n\n[Output truncated: ${byteLength - Buffer.byteLength(truncated, "utf8")} bytes omitted. Full output preserved in tool details.]`;
-}
-
-type DisplayItem = { type: "text"; text: string } | { type: "toolCall"; name: string; args: Record<string, any> };
-
-function getDisplayItems(messages: Message[]): DisplayItem[] {
-	const items: DisplayItem[] = [];
-	for (const msg of messages) {
-		if (msg.role === "assistant") {
-			for (const part of msg.content) {
-				if (part.type === "text") items.push({ type: "text", text: part.text });
-				else if (part.type === "toolCall") items.push({ type: "toolCall", name: part.name, args: part.arguments });
-			}
-		}
-	}
-	return items;
 }
 
 async function mapWithConcurrencyLimit<TIn, TOut>(
@@ -265,6 +353,19 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	return { command: "pi", args };
 }
 
+/**
+ * SIGTERM the child, escalating to SIGKILL after five seconds if it is still
+ * running. `subprocess.killed` is true the moment kill() is called, so the
+ * escalation checks the exit code and signal instead.
+ */
+function killWithEscalation(proc: ChildProcess): void {
+	proc.kill("SIGTERM");
+	const timer = setTimeout(() => {
+		if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+	}, 5000);
+	timer.unref();
+}
+
 type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 
 interface DispatchDefaults {
@@ -283,6 +384,8 @@ async function runSingleAgent(
 	signal: AbortSignal | undefined,
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
+	mode: "single" | "parallel-task" | "chain-step",
+	notifySpawn: ((message: string) => void) | undefined,
 ): Promise<SingleResult> {
 	const agent = agents.find((a) => a.name === agentName);
 
@@ -312,16 +415,51 @@ async function runSingleAgent(
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
 
+	const tier = parseWorkerTier(agent.systemPrompt);
 	const currentResult: SingleResult = {
 		agent: agentName,
 		agentSource: agent.source,
 		task,
-		exitCode: 0,
+		exitCode: -1,
 		messages: [],
 		stderr: "",
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+		tier,
 		model,
 		step,
+	};
+
+	// Registry entry and listener notification. The entry carries the live
+	// result object, so a /subagents-style consumer sees stream updates.
+	let entry: RunningSubagent | null = null;
+	// Close/error path: move the entry out of `running` into the finished
+	// list, stamp completion time, and wake any listeners watching the live
+	// result.
+	const finishEntry = () => {
+		if (!entry) return;
+		runningSubagents.delete(entry.id);
+		entry.completedAt = new Date();
+		finishedSubagents.push(entry);
+		if (finishedSubagents.length > MAX_FINISHED_SUBAGENTS)
+			finishedSubagents.splice(0, finishedSubagents.length - MAX_FINISHED_SUBAGENTS);
+		for (const listener of entry.listeners) {
+			try {
+				listener();
+			} catch {
+				/* listener errors must not break the close path */
+			}
+		}
+		entry = null;
+	};
+	const notifyListeners = () => {
+		if (!entry) return;
+		for (const listener of entry.listeners) {
+			try {
+				listener();
+			} catch {
+				/* listener errors must not break the stream */
+			}
+		}
 	};
 
 	const emitUpdate = () => {
@@ -331,11 +469,21 @@ async function runSingleAgent(
 				details: makeDetails([currentResult]),
 			});
 		}
+		notifyListeners();
 	};
 
 	try {
-		if (agent.systemPrompt.trim()) {
-			const tmp = await writePromptToTempFile(agent.name, agent.systemPrompt);
+		// The turn-budget section is appended to the same temp profile file,
+		// below the profile body, so the `# <tier> Worker` heading stays first
+		// for the delegation enforcer.
+		let promptContent = agent.systemPrompt;
+		if (agent.maxTurns) {
+			promptContent = promptContent.trimEnd()
+				? `${promptContent.trimEnd()}\n\n${turnBudgetSection(agent.maxTurns)}\n`
+				: `${turnBudgetSection(agent.maxTurns)}\n`;
+		}
+		if (promptContent.trim()) {
+			const tmp = await writePromptToTempFile(agent.name, promptContent);
 			tmpPromptDir = tmp.dir;
 			tmpPromptPath = tmp.filePath;
 			args.push("--append-system-prompt", tmpPromptPath);
@@ -343,14 +491,38 @@ async function runSingleAgent(
 
 		args.push(`Task: ${task}`);
 		let wasAborted = false;
+		let budgetStopped = false;
 
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
+			// Register before spawn so /subagents can show the child from the
+			// very first moment of its run.
+			entry = {
+				id: `${agentName}#${nextSubagentId++}`,
+				agent: agentName,
+				tier,
+				task,
+				mode,
+				startedAt: new Date(),
+				result: currentResult,
+				turnLimit: agent.maxTurns,
+				listeners: new Set(),
+			};
+			runningSubagents.set(entry.id, entry);
+
 			const proc = spawn(invocation.command, invocation.args, {
 				cwd: cwd ?? defaultCwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
 			});
+			entry.proc = proc;
+
+			notifySpawn?.(
+				`Subagent spawned: ${agent.name}${tier ? ` (${tier})` : ""} — ${
+					task.length > 60 ? `${task.slice(0, 60)}...` : task
+				}`,
+			);
+
 			let buffer = "";
 
 			const processLine = (line: string) => {
@@ -364,10 +536,22 @@ async function runSingleAgent(
 
 				if (event.type === "message_end" && event.message) {
 					const msg = event.message as Message;
+					// Both assistant turns and tool results (message.role ===
+					// "toolResult") arrive as message_end events; the push below
+					// collects both. Only the assistant branch increments turns.
 					currentResult.messages.push(msg);
 
 					if (msg.role === "assistant") {
 						currentResult.usage.turns++;
+						// Hard turn budget: stop the child without touching the
+						// tool-level abort signal, so the close handler resolves
+						// normally and no sibling work is rejected.
+						if (agent.maxTurns && !budgetStopped && currentResult.usage.turns >= agent.maxTurns) {
+							budgetStopped = true;
+							currentResult.turnBudgetExhausted = true;
+							currentResult.turnLimit = agent.maxTurns;
+							killWithEscalation(proc);
+						}
 						const usage = msg.usage;
 						if (usage) {
 							currentResult.usage.input += usage.input || 0;
@@ -384,10 +568,9 @@ async function runSingleAgent(
 					emitUpdate();
 				}
 
-				if (event.type === "tool_result_end" && event.message) {
-					currentResult.messages.push(event.message as Message);
-					emitUpdate();
-				}
+				// Tool results need no extra handling beyond the generic push
+				// of message_end events: the former "tool_result_end" branch
+				// was dead code (no such pi event) and has been removed.
 			};
 
 			proc.stdout.on("data", (data) => {
@@ -403,20 +586,19 @@ async function runSingleAgent(
 
 			proc.on("close", (code) => {
 				if (buffer.trim()) processLine(buffer);
+				finishEntry();
 				resolve(code ?? 0);
 			});
 
 			proc.on("error", () => {
+				finishEntry();
 				resolve(1);
 			});
 
 			if (signal) {
 				const killProc = () => {
 					wasAborted = true;
-					proc.kill("SIGTERM");
-					setTimeout(() => {
-						if (!proc.killed) proc.kill("SIGKILL");
-					}, 5000);
+					killWithEscalation(proc);
 				};
 				if (signal.aborted) killProc();
 				else signal.addEventListener("abort", killProc, { once: true });
@@ -427,6 +609,12 @@ async function runSingleAgent(
 		if (wasAborted) throw new Error("Subagent was aborted");
 		return currentResult;
 	} finally {
+		// Safety net: if we exit without a close event (spawn threw), drop the
+		// entry rather than leak it. The close path has already finished it.
+		if (entry && !entry.completedAt) {
+			runningSubagents.delete(entry.id);
+			entry = null;
+		}
 		if (tmpPromptPath)
 			try {
 				fs.unlinkSync(tmpPromptPath);
@@ -492,6 +680,14 @@ export default function (pi: ExtensionAPI) {
 			const discovery = discoverAgents(ctx.cwd, agentScope);
 			const agents = discovery.agents;
 			const confirmProjectAgents = params.confirmProjectAgents ?? true;
+			// Headless-safe: ui.notify is a no-op without a UI; guarded anyway.
+			const spawnNotify = (message: string) => {
+				try {
+					ctx.ui.notify(message, "info");
+				} catch {
+					/* ignore */
+				}
+			};
 
 			const hasChain = (params.chain?.length ?? 0) > 0;
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
@@ -584,6 +780,8 @@ export default function (pi: ExtensionAPI) {
 						signal,
 						chainUpdate,
 						makeDetails("chain"),
+						"chain-step",
+						spawnNotify,
 					);
 					results.push(result);
 
@@ -598,8 +796,13 @@ export default function (pi: ExtensionAPI) {
 					}
 					previousOutput = getFinalOutput(result.messages);
 				}
+				const last = results[results.length - 1];
+				let text = getFinalOutput(last.messages) || "(no output)";
+				if (last.turnBudgetExhausted) {
+					text += `\n\n— turn budget exhausted (${last.usage.turns}/${last.turnLimit} turns)`;
+				}
 				return {
-					content: [{ type: "text", text: getFinalOutput(results[results.length - 1].messages) || "(no output)" }],
+					content: [{ type: "text", text }],
 					details: makeDetails("chain")(results),
 				};
 			}
@@ -663,6 +866,8 @@ export default function (pi: ExtensionAPI) {
 							}
 						},
 						makeDetails("parallel"),
+						"parallel-task",
+						spawnNotify,
 					);
 					allResults[index] = result;
 					emitParallelUpdate();
@@ -672,9 +877,14 @@ export default function (pi: ExtensionAPI) {
 				const successCount = results.filter((r) => !isFailedResult(r)).length;
 				const summaries = results.map((r) => {
 					const output = truncateParallelOutput(getResultOutput(r));
-					const status = isFailedResult(r)
-						? `failed${r.stopReason && r.stopReason !== "end" ? ` (${r.stopReason})` : ""}`
-						: "completed";
+					let status: string;
+					if (isFailedResult(r)) {
+						status = `failed${r.stopReason && r.stopReason !== "end" ? ` (${r.stopReason})` : ""}`;
+					} else if (r.turnBudgetExhausted) {
+						status = `completed — turn budget exhausted (${r.usage.turns}/${r.turnLimit} turns)`;
+					} else {
+						status = "completed";
+					}
 					return `### [${r.agent}] ${status}\n\n${output}`;
 				});
 				return {
@@ -700,6 +910,8 @@ export default function (pi: ExtensionAPI) {
 					signal,
 					onUpdate,
 					makeDetails("single"),
+					"single",
+					spawnNotify,
 				);
 				const isError = isFailedResult(result);
 				if (isError) {
@@ -710,8 +922,12 @@ export default function (pi: ExtensionAPI) {
 						isError: true,
 					};
 				}
+				let text = getFinalOutput(result.messages) || "(no output)";
+				if (result.turnBudgetExhausted) {
+					text += `\n\n— turn budget exhausted (${result.usage.turns}/${result.turnLimit} turns)`;
+				}
 				return {
-					content: [{ type: "text", text: getFinalOutput(result.messages) || "(no output)" }],
+					content: [{ type: "text", text }],
 					details: makeDetails("single")([result]),
 				};
 			}
@@ -724,54 +940,50 @@ export default function (pi: ExtensionAPI) {
 		},
 
 		renderCall(args, theme, _context) {
-			const scope: AgentScope = args.agentScope ?? "user";
+			const scope = args.agentScope as AgentScope | undefined;
+			const scopeSuffix = scope && scope !== "user" ? theme.fg("muted", ` [${scope}]`) : "";
 			if (args.chain && args.chain.length > 0) {
-				let text =
+				return new Text(
 					theme.fg("toolTitle", theme.bold("subagent ")) +
-					theme.fg("accent", `chain (${args.chain.length} steps)`) +
-					theme.fg("muted", ` [${scope}]`);
-				for (let i = 0; i < Math.min(args.chain.length, 3); i++) {
-					const step = args.chain[i];
-					// Clean up {previous} placeholder for display
-					const cleanTask = step.task.replace(/\{previous\}/g, "").trim();
-					const preview = cleanTask.length > 40 ? `${cleanTask.slice(0, 40)}...` : cleanTask;
-					text +=
-						"\n  " +
-						theme.fg("muted", `${i + 1}.`) +
-						" " +
-						theme.fg("accent", step.agent) +
-						theme.fg("dim", ` ${preview}`);
-				}
-				if (args.chain.length > 3) text += `\n  ${theme.fg("muted", `... +${args.chain.length - 3} more`)}`;
-				return new Text(text, 0, 0);
+						theme.fg("accent", `chain (${args.chain.length} steps)`) +
+						scopeSuffix,
+					0,
+					0,
+				);
 			}
 			if (args.tasks && args.tasks.length > 0) {
-				let text =
+				return new Text(
 					theme.fg("toolTitle", theme.bold("subagent ")) +
-					theme.fg("accent", `parallel (${args.tasks.length} tasks)`) +
-					theme.fg("muted", ` [${scope}]`);
-				for (const t of args.tasks.slice(0, 3)) {
-					const preview = t.task.length > 40 ? `${t.task.slice(0, 40)}...` : t.task;
-					text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("dim", ` ${preview}`)}`;
-				}
-				if (args.tasks.length > 3) text += `\n  ${theme.fg("muted", `... +${args.tasks.length - 3} more`)}`;
-				return new Text(text, 0, 0);
+						theme.fg("accent", `parallel (${args.tasks.length} tasks)`) +
+						scopeSuffix,
+					0,
+					0,
+				);
 			}
 			const agentName = args.agent || "...";
 			const preview = args.task ? (args.task.length > 60 ? `${args.task.slice(0, 60)}...` : args.task) : "...";
-			let text =
+			return new Text(
 				theme.fg("toolTitle", theme.bold("subagent ")) +
-				theme.fg("accent", agentName) +
-				theme.fg("muted", ` [${scope}]`);
-			text += `\n  ${theme.fg("dim", preview)}`;
-			return new Text(text, 0, 0);
+					theme.fg("accent", agentName) +
+					scopeSuffix +
+					theme.fg("dim", ` — ${preview}`),
+				0,
+				0,
+			);
 		},
 
 		renderResult(result, { expanded }, theme, _context) {
 			const details = result.details as SubagentDetails | undefined;
+			// Compact one-liner helper for the live views kept from the local
+			// rewrite; finished results use the restored upstream views below.
+			const firstLine = (text: string): string => {
+				const line = text.split("\n").find((l) => l.trim()) || "";
+				return line.length > 80 ? `${line.slice(0, 80)}...` : line;
+			};
+
 			if (!details || details.results.length === 0) {
 				const text = result.content[0];
-				return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
+				return new Text(text?.type === "text" ? firstLine(text.text) : "(no output)", 0, 0);
 			}
 
 			const mdTheme = getMarkdownTheme();
@@ -792,16 +1004,38 @@ export default function (pi: ExtensionAPI) {
 				return text.trimEnd();
 			};
 
+			const budgetMarker = (r: SingleResult): string =>
+				r.turnBudgetExhausted
+					? theme.fg("warning", `⚠ turn budget exhausted (${r.usage.turns}/${r.turnLimit} turns)`)
+					: "";
+
 			if (details.mode === "single" && details.results.length === 1) {
 				const r = details.results[0];
+
+				// Running: keep the compact live one-liner from the local rewrite.
+				if (r.exitCode === -1) {
+					const tierSuffix = r.tier ? theme.fg("muted", ` (${r.tier})`) : "";
+					const turns = r.usage.turns;
+					const plural = turns === 1 ? "" : "s";
+					return new Text(
+						theme.fg("toolTitle", theme.bold("subagent ")) +
+							theme.fg("accent", r.agent) +
+							tierSuffix +
+							theme.fg("muted", ` running (${turns} turn${plural})`),
+						0,
+						0,
+					);
+				}
+
 				const isError = isFailedResult(r);
 				const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+				const sourceSuffix = theme.fg("muted", ` (${r.agentSource}${r.tier ? `, ${r.tier}` : ""})`);
 				const displayItems = getDisplayItems(r.messages);
 				const finalOutput = getFinalOutput(r.messages);
 
 				if (expanded) {
 					const container = new Container();
-					let header = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}`;
+					let header = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${sourceSuffix}`;
 					if (isError && r.stopReason) header += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
 					container.addChild(new Text(header, 0, 0));
 					if (isError && r.errorMessage)
@@ -829,7 +1063,11 @@ export default function (pi: ExtensionAPI) {
 							container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
 						}
 					}
-					const usageStr = formatUsageStats(r.usage, r.model);
+					if (r.turnBudgetExhausted) {
+						container.addChild(new Spacer(1));
+						container.addChild(new Text(budgetMarker(r), 0, 0));
+					}
+					const usageStr = formatUsageStats(r.usage, r.model, r.turnLimit);
 					if (usageStr) {
 						container.addChild(new Spacer(1));
 						container.addChild(new Text(theme.fg("dim", usageStr), 0, 0));
@@ -837,7 +1075,7 @@ export default function (pi: ExtensionAPI) {
 					return container;
 				}
 
-				let text = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}`;
+				let text = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${sourceSuffix}`;
 				if (isError && r.stopReason) text += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
 				if (isError && r.errorMessage) text += `\n${theme.fg("error", `Error: ${r.errorMessage}`)}`;
 				else if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
@@ -845,8 +1083,30 @@ export default function (pi: ExtensionAPI) {
 					text += `\n${renderDisplayItems(displayItems, COLLAPSED_ITEM_COUNT)}`;
 					if (displayItems.length > COLLAPSED_ITEM_COUNT) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
 				}
-				const usageStr = formatUsageStats(r.usage, r.model);
+				if (r.turnBudgetExhausted) text += `\n${budgetMarker(r)}`;
+				const usageStr = formatUsageStats(r.usage, r.model, r.turnLimit);
 				if (usageStr) text += `\n${theme.fg("dim", usageStr)}`;
+				return new Text(text, 0, 0);
+			}
+
+			// Running multi-step states keep the compact live one-liner from the
+			// local rewrite; finished states use the restored upstream views.
+			const isRunning = details.results.some((r) => r.exitCode === -1);
+			if (isRunning) {
+				const total = details.results.length;
+				const done = details.results.filter((r) => r.exitCode !== -1).length;
+				const failed = details.results.filter((r) => r.exitCode !== -1 && isFailedResult(r));
+				let text =
+					theme.fg("toolTitle", theme.bold("subagent ")) +
+					theme.fg(
+						"accent",
+						`${details.mode} (${done}/${total} ${details.mode === "chain" ? "steps" : "done"})`,
+					);
+				if (failed.length > 0) {
+					const r = failed[0];
+					const reason = firstLine(r.errorMessage || r.stderr || "(no output)");
+					text += theme.fg("error", ` — ${r.agent} failed: ${reason}`);
+				}
 				return new Text(text, 0, 0);
 			}
 
@@ -864,7 +1124,7 @@ export default function (pi: ExtensionAPI) {
 			};
 
 			if (details.mode === "chain") {
-				const successCount = details.results.filter((r) => r.exitCode === 0).length;
+				const successCount = details.results.filter((r) => !isFailedResult(r)).length;
 				const icon = successCount === details.results.length ? theme.fg("success", "✓") : theme.fg("error", "✗");
 
 				if (expanded) {
@@ -881,7 +1141,7 @@ export default function (pi: ExtensionAPI) {
 					);
 
 					for (const r of details.results) {
-						const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+						const rIcon = isFailedResult(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
 						const displayItems = getDisplayItems(r.messages);
 						const finalOutput = getFinalOutput(r.messages);
 
@@ -914,7 +1174,9 @@ export default function (pi: ExtensionAPI) {
 							container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
 						}
 
-						const stepUsage = formatUsageStats(r.usage, r.model);
+						if (r.turnBudgetExhausted) container.addChild(new Text(budgetMarker(r), 0, 0));
+
+						const stepUsage = formatUsageStats(r.usage, r.model, r.turnLimit);
 						if (stepUsage) container.addChild(new Text(theme.fg("dim", stepUsage), 0, 0));
 					}
 
@@ -933,9 +1195,10 @@ export default function (pi: ExtensionAPI) {
 					theme.fg("toolTitle", theme.bold("chain ")) +
 					theme.fg("accent", `${successCount}/${details.results.length} steps`);
 				for (const r of details.results) {
-					const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+					const rIcon = isFailedResult(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", `─── Step ${r.step}: `)}${theme.fg("accent", r.agent)} ${rIcon}`;
+					if (r.turnBudgetExhausted) text += ` ${budgetMarker(r)}`;
 					if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;
 				}
@@ -946,20 +1209,12 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (details.mode === "parallel") {
-				const running = details.results.filter((r) => r.exitCode === -1).length;
-				const successCount = details.results.filter((r) => r.exitCode !== -1 && !isFailedResult(r)).length;
-				const failCount = details.results.filter((r) => r.exitCode !== -1 && isFailedResult(r)).length;
-				const isRunning = running > 0;
-				const icon = isRunning
-					? theme.fg("warning", "⏳")
-					: failCount > 0
-						? theme.fg("warning", "◐")
-						: theme.fg("success", "✓");
-				const status = isRunning
-					? `${successCount + failCount}/${details.results.length} done, ${running} running`
-					: `${successCount}/${details.results.length} tasks`;
+				const successCount = details.results.filter((r) => !isFailedResult(r)).length;
+				const failCount = details.results.filter((r) => isFailedResult(r)).length;
+				const icon = failCount > 0 ? theme.fg("warning", "◐") : theme.fg("success", "✓");
+				const status = `${successCount}/${details.results.length} tasks`;
 
-				if (expanded && !isRunning) {
+				if (expanded) {
 					const container = new Container();
 					container.addChild(
 						new Text(
@@ -999,7 +1254,9 @@ export default function (pi: ExtensionAPI) {
 							container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
 						}
 
-						const taskUsage = formatUsageStats(r.usage, r.model);
+						if (r.turnBudgetExhausted) container.addChild(new Text(budgetMarker(r), 0, 0));
+
+						const taskUsage = formatUsageStats(r.usage, r.model, r.turnLimit);
 						if (taskUsage) container.addChild(new Text(theme.fg("dim", taskUsage), 0, 0));
 					}
 
@@ -1011,31 +1268,228 @@ export default function (pi: ExtensionAPI) {
 					return container;
 				}
 
-				// Collapsed view (or still running)
+				// Collapsed view
 				let text = `${icon} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", status)}`;
 				for (const r of details.results) {
-					const rIcon =
-						r.exitCode === -1
-							? theme.fg("warning", "⏳")
-							: isFailedResult(r)
-								? theme.fg("error", "✗")
-								: theme.fg("success", "✓");
+					const rIcon = isFailedResult(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", r.agent)} ${rIcon}`;
-					if (displayItems.length === 0)
-						text += `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
+					if (r.turnBudgetExhausted) text += ` ${budgetMarker(r)}`;
+					if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;
 				}
-				if (!isRunning) {
-					const usageStr = formatUsageStats(aggregateUsage(details.results));
-					if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
-				}
-				if (!expanded) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
+				const usageStr = formatUsageStats(aggregateUsage(details.results));
+				if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
+				text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
 				return new Text(text, 0, 0);
 			}
 
 			const text = result.content[0];
-			return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
+			return new Text(text?.type === "text" ? firstLine(text.text) : "(no output)", 0, 0);
+		},
+	});
+
+	pi.registerCommand("subagents", {
+		description: "List subagents spawned this session; open one to watch its activity",
+		handler: async (_args, cmdCtx) => {
+			if (!cmdCtx?.hasUI) return;
+			const ui = cmdCtx.ui;
+
+			const formatElapsed = (ms: number): string => {
+				const seconds = Math.floor(ms / 1000);
+				if (seconds < 60) return `${seconds}s`;
+				const minutes = Math.floor(seconds / 60);
+				if (minutes < 60) return `${minutes}m${seconds % 60}s`;
+				return `${Math.floor(minutes / 60)}h${minutes % 60}m`;
+			};
+
+			const statusOf = (entry: RunningSubagent): string => {
+				if (!entry.completedAt) return "running";
+				if (entry.result.turnBudgetExhausted) return "exhausted";
+				return `exit ${entry.result.exitCode}`;
+			};
+
+			const elapsedOf = (entry: RunningSubagent): string =>
+				formatElapsed((entry.completedAt ?? new Date()).getTime() - entry.startedAt.getTime());
+
+			// Every exit path unsubscribes exactly once: Escape unsubscribes
+			// inline, and the .finally below covers disposal without Escape
+			// (the overlay rejection lands in the outer catch).
+			const openDetail = (entry: RunningSubagent): Promise<null> => {
+				let unsubscribe: (() => void) | undefined;
+				return ui.custom<null>(
+					(tui, theme, _kb, done) => {
+						const mdTheme = getMarkdownTheme();
+
+						// Rebuild from the live SingleResult on every render so the
+						// view tracks the running child.
+						const buildContainer = () => {
+							const r = entry.result;
+							const container = new Container();
+							const statusColor = !entry.completedAt ? "warning" : isFailedResult(r) ? "error" : "success";
+							container.addChild(
+								new Text(
+									theme.fg("toolTitle", theme.bold(`${entry.agent} (${entry.tier ?? "?"})`)) +
+										theme.fg(statusColor, ` ${statusOf(entry)}`) +
+										theme.fg("muted", ` · ${entry.mode} · ${elapsedOf(entry)}`),
+									0,
+									0,
+								),
+							);
+							const turns = r.usage.turns;
+							const turnInfo = r.turnLimit ? `${turns}/${r.turnLimit} turns` : `${turns} turns`;
+							container.addChild(
+								new Text(theme.fg("muted", turnInfo + (r.model ? ` · ${r.model}` : "")), 0, 0),
+							);
+							container.addChild(new Spacer(1));
+							container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
+							container.addChild(new Text(theme.fg("dim", entry.task), 0, 0));
+							container.addChild(new Spacer(1));
+							container.addChild(new Text(theme.fg("muted", "─── Activity ───"), 0, 0));
+							const items = getDisplayItems(r.messages);
+							if (items.length === 0) {
+								container.addChild(
+									new Text(
+										theme.fg("muted", entry.completedAt ? "(no activity)" : "(waiting for first turn)"),
+										0,
+										0,
+									),
+								);
+							} else {
+								for (const item of items) {
+									if (item.type === "toolCall") {
+										container.addChild(
+											new Text(
+												theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
+												0,
+												0,
+											),
+										);
+									} else {
+										container.addChild(new Text(theme.fg("toolOutput", item.text), 0, 0));
+									}
+								}
+							}
+							const finalOutput = getFinalOutput(r.messages);
+							if (finalOutput) {
+								container.addChild(new Spacer(1));
+								container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
+							}
+							if (r.turnBudgetExhausted) {
+								container.addChild(new Spacer(1));
+								container.addChild(
+									new Text(
+										theme.fg("warning", `⚠ turn budget exhausted (${turns}/${r.turnLimit} turns)`),
+										0,
+										0,
+									),
+								);
+							}
+							if (isFailedResult(r) && r.errorMessage) {
+								container.addChild(new Text(theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
+							}
+							const usageStr = formatUsageStats(r.usage);
+							if (usageStr) {
+								container.addChild(new Text(theme.fg("dim", usageStr), 0, 0));
+							}
+							container.addChild(new Text(theme.fg("dim", "Esc: back to list"), 0, 0));
+							return container;
+						};
+
+						let view = buildContainer();
+						const listener = () => {
+							view = buildContainer();
+							tui.requestRender();
+						};
+						entry.listeners.add(listener);
+						unsubscribe = () => entry.listeners.delete(listener);
+
+						return {
+							render: (width: number) => view.render(width),
+							invalidate: () => view.invalidate(),
+							handleInput: (data: string) => {
+								if (matchesKey(data, "escape")) {
+									unsubscribe?.();
+									unsubscribe = undefined;
+									done(null);
+								}
+							},
+						};
+					},
+					{ overlay: true },
+				).finally(() => {
+					unsubscribe?.();
+					unsubscribe = undefined;
+				});
+			};
+
+			const openList = (): Promise<RunningSubagent | null> =>
+				ui.custom<RunningSubagent | null>(
+					(tui, theme, _kb, done) => {
+						const entries: RunningSubagent[] = [
+							...subagentRegistry.running.values(),
+							...subagentRegistry.finished,
+						];
+						if (entries.length === 0) {
+							const empty = new Text(
+								theme.fg("muted", "No subagents spawned this session.\n\nEsc: close"),
+								1,
+								1,
+							);
+							return {
+								render: (width: number) => empty.render(width),
+								invalidate: () => empty.invalidate(),
+								handleInput: (data: string) => {
+									if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) done(null);
+								},
+							};
+						}
+
+						const items: SelectItem[] = entries.map((entry) => ({
+							value: entry.id,
+							label: `${entry.agent} (${entry.tier ?? "?"}) ${statusOf(entry)} ${elapsedOf(entry)}`,
+							description: entry.task.length > 80 ? `${entry.task.slice(0, 80)}...` : entry.task,
+						}));
+						const container = new Container();
+						container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+						container.addChild(new Text(theme.fg("accent", theme.bold("Subagents")), 0, 0));
+						const selectList = new SelectList(items, Math.min(items.length, 10), {
+							selectedPrefix: (t) => theme.fg("accent", t),
+							selectedText: (t) => theme.fg("accent", t),
+							description: (t) => theme.fg("muted", t),
+							scrollInfo: (t) => theme.fg("dim", t),
+							noMatch: (t) => theme.fg("warning", t),
+						});
+						selectList.onSelect = (item) => {
+							const entry = entries.find((e) => e.id === item.value);
+							if (entry) done(entry);
+						};
+						selectList.onCancel = () => done(null);
+						container.addChild(selectList);
+						container.addChild(new Text(theme.fg("dim", "↑↓ navigate · enter watch · esc close"), 1, 0));
+						container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+
+						return {
+							render: (width: number) => container.render(width),
+							invalidate: () => container.invalidate(),
+							handleInput: (data: string) => {
+								selectList.handleInput(data);
+								tui.requestRender();
+							},
+						};
+					},
+					{ overlay: true },
+				);
+
+			try {
+				while (true) {
+					const selected = await openList();
+					if (!selected) return;
+					await openDetail(selected);
+				}
+			} catch {
+				/* overlay unavailable or canceled mid-loop */
+			}
 		},
 	});
 }
