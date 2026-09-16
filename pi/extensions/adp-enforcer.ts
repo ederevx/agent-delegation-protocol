@@ -243,8 +243,10 @@ export default function (pi: ExtensionAPI) {
 		}
 		// Parent side: an admitted spawn consumes its reservation at once,
 		// because Pi has no native SubagentStart event -- the subagent tool
-		// call itself is the start. One active slot per subagent tool call;
-		// parallel tasks inside one call share that call's slot.
+		// call itself is the start. Accounting is per task: a parallel
+		// `tasks` call takes one active slot per task against the session
+		// cap, so an N-task fan-out holds N slots, while a sequential
+		// `chain` holds a single slot no matter how many steps it runs.
 		if (!worker && event.toolName === "subagent") {
 			await invoke(ctx, "worker-start", {
 				session_id: sessionId(ctx),

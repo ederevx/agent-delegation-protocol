@@ -299,11 +299,16 @@ def _spawn_token(payload: dict[str, Any]) -> str:
 def _holds_reservation(state: dict[str, Any], payload: dict[str, Any]) -> bool:
     """Whether this exact tool call already owns a slot in this session.
 
-    Only an exact tool-call id match counts. An anonymous reservation cannot
-    be attributed to any particular call, so it can never be claimed this way.
+    Only an exact tool-call id match counts, against either reservation
+    shape: a legacy bare-id string (single spawn) or a {"id", "fan_out"}
+    record (fan-out call). An anonymous reservation cannot be attributed to
+    any particular call, so it can never be claimed this way.
     """
     token = _spawn_token(payload)
-    return bool(token) and token in state.get("pending_spawns", [])
+    if not token:
+        return False
+    return any(_pending_id(record) == token
+               for record in state.get("pending_spawns", []))
 
 
 def _worker_id(entry: Any) -> str:
@@ -313,18 +318,73 @@ def _worker_id(entry: Any) -> str:
     return str(entry or "")
 
 
+def _fan_out_count(payload: dict[str, Any]) -> int:
+    """How many concurrent slots one admitted Agent/subagent call takes.
+
+    Pi's parallel (`tasks`) mode launches every entry at once, so it holds
+    one slot per task. A `chain` runs its steps sequentially -- one child
+    at a time -- so it holds a single slot no matter how many steps it
+    names; charging len(chain) would make any chain longer than the cap
+    permanently deniable. Every other call shape -- including Claude's and
+    Codex's single-spawn Agent calls -- spawns exactly one. Read from the
+    tool call's own input, so it is host-neutral and available at admit
+    time, when the reservation that carries it through to the worker's
+    start event is created.
+    """
+    tool = payload.get("tool_input") or payload.get("toolInput") or {}
+    if isinstance(tool, dict):
+        tasks = tool.get("tasks")
+        if isinstance(tasks, list) and tasks:
+            return len(tasks)
+    return 1
+
+
+def _fan_out_of(entry: Any) -> int:
+    """Active slots one ledger entry covers: its fan-out size, else 1.
+
+    Applies to both the `concurrent` ledger and `pending_spawns`. Entries
+    written before per-task accounting carry no fan-out and were single
+    spawns, so they default to 1.
+    """
+    if isinstance(entry, dict):
+        value = entry.get("fan_out")
+        if isinstance(value, int) and value > 0:
+            return value
+    return 1
+
+
+def _ledger_slots(entries: Any) -> int:
+    """Total active slots a list of concurrent entries or reservations holds."""
+    return sum(_fan_out_of(entry) for entry in entries)
+
+
+def _pending_id(record: Any) -> str:
+    """The tool-call id a pending-spawn reservation is keyed by.
+
+    A single spawn is recorded as the bare id string; a fan-out call is a
+    {"id", "fan_out"} record. Both shapes stay readable so state saved by
+    an older hook still loads.
+    """
+    if isinstance(record, dict):
+        value = record.get("id")
+        return value.strip() if isinstance(value, str) else ""
+    return str(record or "").strip()
+
+
 def _normalize_concurrent(state: dict[str, Any]) -> list[dict[str, Any]]:
-    """Dedupe by id keeping the earliest start, then sort by id."""
-    earliest: dict[str, float] = {}
+    """Dedupe by id keeping the earliest start (and its fan-out), then sort."""
+    earliest: dict[str, tuple[float, int]] = {}
     for entry in state.get("concurrent", []):
         worker = _worker_id(entry)
         if not worker:
             continue
         started = entry.get("started_at", 0.0) if isinstance(entry, dict) else 0.0
         started = started if isinstance(started, (int, float)) else 0.0
-        if worker not in earliest or started < earliest[worker]:
-            earliest[worker] = started
-    return [{"id": worker, "started_at": earliest[worker]}
+        fan_out = _fan_out_of(entry)
+        if worker not in earliest or started < earliest[worker][0]:
+            earliest[worker] = (started, fan_out)
+    return [{"id": worker, "started_at": earliest[worker][0],
+             "fan_out": earliest[worker][1]}
             for worker in sorted(earliest)]
 
 
@@ -363,6 +423,11 @@ def _active_cap_violation(state: dict[str, Any], classifier: Any,
     one round each read the same free slot and all pass. A reservation counts
     against the cap exactly like a running worker until its start consumes it.
 
+    Accounting is per task, not per tool call: a parallel `tasks[]` call
+    holds one slot per task while a sequential `chain[]` holds one, both
+    while pending and once the workers run, so the cap is checked against
+    the call's whole concurrent footprint.
+
     A re-delivery of a call that already holds a reservation is admitted
     without consulting the cap at all: it is the same spawn, already paid for,
     so re-testing it would deny an admitted call purely for being delivered
@@ -372,43 +437,62 @@ def _active_cap_violation(state: dict[str, Any], classifier: Any,
     if _holds_reservation(state, payload):
         return None
     _sweep_stale_workers(state, host)
-    running = (len(state.get("concurrent", []))
-               + len(state.get("pending_spawns", [])))
+    running = (_ledger_slots(state.get("concurrent", []))
+               + _ledger_slots(state.get("pending_spawns", [])))
     cap = classifier.MAX_ACTIVE_WORKERS
-    if running >= cap:
+    fan_out = _fan_out_count(payload)
+    if running + fan_out > cap:
         return (
-            f"Active worker cap reached ({running}/{cap}); wait for a running "
-            "worker to finish before spawning another."
+            f"Active worker cap would be exceeded ({running}/{cap} slots "
+            f"in use, {fan_out} more requested); wait for running workers "
+            "to finish or use a smaller fan-out."
         )
     return None
 
 
 def _reserve_spawn(state: dict[str, Any], payload: dict[str, Any]) -> None:
-    """Hold a slot for a spawn that was admitted but has not started yet.
+    """Hold one slot per task for a spawn admitted but not started yet.
 
     A repeated delivery of the same tool-call id is the same spawn, not a
-    second one, so it reuses the reservation it already holds. A call with no
-    id cannot be matched later and is held as an anonymous entry instead,
-    consumed oldest-first by the next unmatched start.
+    second one, so it reuses the reservation it already holds. A single
+    spawn is recorded as its bare tool-call id; a fan-out call is recorded
+    as a {"id", "fan_out"} record so its start event can take the whole
+    footprint. A call with no id cannot be matched later and is held as an
+    anonymous entry instead, consumed oldest-first by the next unmatched
+    start.
     """
     if _holds_reservation(state, payload):
         return
+    fan_out = _fan_out_count(payload)
+    token = _spawn_token(payload)
     pending = list(state.get("pending_spawns", []))
-    pending.append(_spawn_token(payload))
+    pending.append(token if fan_out == 1 else {"id": token, "fan_out": fan_out})
     state["pending_spawns"] = pending
 
 
-def _consume_reservation(state: dict[str, Any], payload: dict[str, Any]) -> None:
-    """Retire the reservation a starting worker was admitted under."""
+def _consume_reservation(state: dict[str, Any], payload: dict[str, Any]) -> int:
+    """Retire the reservation a starting worker was admitted under.
+
+    Returns the fan-out size the reservation carried -- 1 when there is
+    nothing to retire -- so the starting worker takes exactly the slots
+    its call was admitted for. A start carrying a token that matches no
+    reservation (e.g. one arriving after a prompt cleared stale entries)
+    retires nothing: falling back to an arbitrary record would make the
+    new worker inherit that record's fan-out and steal its slot.
+    """
     pending = list(state.get("pending_spawns", []))
     if not pending:
-        return
+        return 1
     token = _spawn_token(payload)
-    if token and token in pending:
-        pending.remove(token)
-    else:
-        pending.pop(0)
+    index = next((i for i, record in enumerate(pending)
+                  if token and _pending_id(record) == token), None)
+    if index is None:
+        if token:
+            return 1
+        index = 0  # Anonymous spawn: consume the oldest reservation.
+    record = pending.pop(index)
     state["pending_spawns"] = pending
+    return _fan_out_of(record)
 
 
 def _record_denied_spawn(state: dict[str, Any], payload: dict[str, Any]) -> bool:
@@ -462,8 +546,10 @@ def _release_failed_reservation(state: dict[str, Any],
     pending = list(state.get("pending_spawns", []))
     if not pending:
         return
-    if token and token in pending:
-        pending.remove(token)
+    index = next((i for i, record in enumerate(pending)
+                  if token and _pending_id(record) == token), None)
+    if index is not None:
+        pending.pop(index)
     elif _names_worker(payload):
         return
     else:
@@ -577,18 +663,23 @@ class TurnEventHandler:
                 # A native start pins the initial limit before any tool call.
                 # Corrupt ledgers remain untouched and deny at PreToolUse.
                 _worker_tool_budget(_home(self.host), payload, self.classifier, charge=False)
+            # The fan-out this start covers was fixed when its call was
+            # admitted: take the reservation first so its record sizes the
+            # worker's own entry (1 when nothing is held, e.g. a start that
+            # arrives after a prompt cleared stale reservations).
+            fan_out = _consume_reservation(self.state, payload)
             concurrent = [
                 entry for entry in self.state.get("concurrent", [])
                 if _worker_id(entry) != worker
             ]
-            concurrent.append({"id": worker, "started_at": time.time()})
+            concurrent.append({"id": worker, "started_at": time.time(),
+                               "fan_out": fan_out})
             self.state["concurrent"] = concurrent
-            _consume_reservation(self.state, payload)
             observed = set(self.state["observed"])
             observed.add(worker)
             self.state["observed"] = sorted(observed)
             self.state["peak_active"] = max(
-                self.state["peak_active"], len(self.state["concurrent"])
+                self.state["peak_active"], _ledger_slots(concurrent)
             )
         return _routing_context("SubagentStart", self.classifier)
 

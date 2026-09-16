@@ -121,7 +121,7 @@ def test_active_worker_cap(home, env):
     key = hashlib.sha256(session.encode()).hexdigest()
     return json.loads(
         (home / '.delegation-protocol/hook-state' / (key + '.json')).read_text())
-  FULL = 'Active worker cap reached (10/10)'
+  FULL = 'Active worker cap would be exceeded (10/10 slots in use, 1 more requested)'
   # Ten workers in flight fill the shared per-session cap; the parent's own
   # next spawn is denied even though nothing else about it is wrong.
   for index in range(10):

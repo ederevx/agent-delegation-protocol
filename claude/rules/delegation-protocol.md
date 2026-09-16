@@ -105,7 +105,7 @@ Per-worker `maxTurns` values are quick 128, bulk 64, balanced 32, and frontier
 turn is one model round within a task, not the whole task, a parent prompt,
 or a tool call; a round can request multiple tools. Resuming a worker may
 start a fresh native budget, so this is not a lifetime cap across resumes.
-Workers should report their result when reaching the cap and stop. Parent
+Workers should report their result before reaching the cap and stop. Parent
 sessions are not capped. The hook rejects explicit `max_turns` above the tier
 cap and accepts lower values. Both hosts also share a hard cap of 10
 concurrently active workers per parent session, counting nested workers; the

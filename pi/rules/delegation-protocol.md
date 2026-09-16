@@ -86,7 +86,8 @@ Collect and integrate the report normally; do not attempt any stop operation
 for a completed worker. Workers are one-shot processes: a new task on a
 different topic from the original deployment gets a fresh worker rather than a
 reuse. The `subagent` tool's parallel and chain modes are ordinary native
-spawning — parallel tasks inside one call share that call's active slot.
+spawning — every task inside one call counts as its own active slot against
+the cap, so concurrent spawns are admitted up to the full cap.
 
 ## Worker budgets and routing
 
@@ -118,8 +119,9 @@ active workers per parent session, counting nested workers; the enforcer
 denies a spawn while the session's active set is full, and the parent waits
 for a worker to finish or fans out in smaller waves. Active means actively
 working: a worker counts from its spawn until its result returns, plus spawns
-admitted but not yet started; one `subagent` tool call holds one active slot
-regardless of how many tasks it fans out to internally.
+admitted but not yet started; each task a `subagent` tool call fans out to
+(parallel or chain) holds its own active slot, and a single-task call holds
+one.
 
 The common `ROUTING_POLICY` supplies generated worker instructions and
 context the enforcer appends at each turn start. All tiers retain their
