@@ -69,13 +69,18 @@ def main():
       "tool_input": {"command": "git commit -m x"}}) == {}
   invoke("worker-complete", {"session_id": "gate"})
 
-  # Worker tool-call budget: distinct calls charge; repeats count once; the
+  # Worker tool-call budget: Pi checks at pre-mutation without charging;
+  # executed calls charge at post-tool-use, repeats count once, and the
   # ledger pins at the first covered call and denies when exhausted.
   worker = {"session_id": "budget", "agent_id": "pi:abc", "agent_type": "quick-worker"}
   for call in range(3):
     assert invoke("pre-mutation", dict(worker, tool_name="bash",
         tool_input={"command": f"echo {call}"}, tool_use_id=f"call-{call}")) == {}
+    assert invoke("post-tool-use", dict(worker, tool_name="bash",
+        tool_input={"command": f"echo {call}"}, tool_use_id=f"call-{call}")) == {}
   assert invoke("pre-mutation", dict(worker, tool_name="bash",
+      tool_input={"command": "echo repeat"}, tool_use_id="call-1")) == {}
+  assert invoke("post-tool-use", dict(worker, tool_name="bash",
       tool_input={"command": "echo repeat"}, tool_use_id="call-1")) == {}
   import hashlib as _hashlib
   key = _hashlib.sha256("worker-tool-budget:pi:abc".encode()).hexdigest()
@@ -88,7 +93,19 @@ def main():
   assert invoke("pre-mutation", dict(unknown, tool_name="read",
       tool_input={"path": "x"}, tool_use_id="u-1")) == {}
   key = _hashlib.sha256("worker-tool-budget:pi:xyz".encode()).hexdigest()
-  assert json.loads((ledger_dir / f"{key}.json").read_text())["limit"] == 16
+  pinned = json.loads((ledger_dir / f"{key}.json").read_text())
+  assert pinned["limit"] == 16 and pinned["used"] == 0, pinned
+
+  # At the limit the pre-mutation check denies terminally and never charges.
+  ledger_path = ledger_dir / (
+      _hashlib.sha256("worker-tool-budget:pi:abc".encode()).hexdigest() + ".json")
+  ledger_path.write_text(json.dumps(dict(ledger, limit=3)))
+  body = invoke("pre-mutation", dict(worker, tool_name="bash",
+      tool_input={"command": "echo more"}, tool_use_id="call-more"))
+  output = body["hookSpecificOutput"]
+  assert output["permissionDecision"] == "deny" and output["terminal"] is True, body
+  assert "exhausted (3/3; 0 remaining)" in output["permissionDecisionReason"], body
+  assert json.loads(ledger_path.read_text())["used"] == 3
 
   # Strictly downward worker recursion, fail-closed on unknown tiers.
   bulk_payload = {"session_id": "tier", "agent_id": "leaf-b", "agent_type": "bulk-worker"}

@@ -332,6 +332,14 @@ def test_budget_failures(home):
   assert results == [None]*8, results
   path, _ = adapter._paths(home, 'worker-tool-budget:concurrent-ledger')
   assert json.loads(path.read_text())['used'] == 1
+  # The combined path must check and charge atomically, not delegate to the
+  # separate charge wrapper between two lock acquisitions.
+  payload = dict(payload, agent_id='atomic-combined')
+  with patch.object(adapter, '_worker_tool_charge',
+                    side_effect=AssertionError('split check/charge path used')):
+    assert adapter._worker_tool_budget(home, payload, classifier) is None
+  path, _ = adapter._paths(home, 'worker-tool-budget:atomic-combined')
+  assert json.loads(path.read_text())['used'] == 1
   for corrupted in ({}, [], {'limit':16,'used':-1,'seen':[]},
       {'limit':16,'used':0,'seen':'bad'}, {'limit':True,'used':0,'seen':[]}):
     path.write_text(json.dumps(corrupted))

@@ -78,7 +78,12 @@ limit the extension appends a wind-down section telling the worker to
 deliver its final report and stop, hard-stops the child with SIGTERM, and
 escalates to SIGKILL after 5 s. The Pi enforcer extension separately keeps
 a hook-covered tool-call ledger per identified worker lifetime as defense
-in depth. One `subagent` tool call holds one active slot, whatever it fans
+in depth. The Pi ledger counts executed tool calls: a call any hook denied
+(including the shared-memory acknowledgment retry) never charges, because a
+blocked call produces no tool_result. The budget is still checked before
+each covered call and denies terminally at the limit, so a final parallel
+tool batch can overshoot that limit by at most the batch's size. One
+`subagent` tool call holds one active slot, whatever it fans
 out to internally.
 
 An agentic turn is a model round within a worker's task, not the entire task,

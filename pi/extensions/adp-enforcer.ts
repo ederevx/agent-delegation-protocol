@@ -15,8 +15,9 @@
  *
  * Event mapping:
  *   before_agent_start          -> prompt         (classify; append routing policy)
- *   tool_call (any)             -> pre-mutation   (delegation gate / worker budget)
+ *   tool_call (any)             -> pre-mutation   (delegation gate / worker budget check)
  *   tool_call (subagent, admit) -> worker-start   (Pi has no native start event)
+ *   tool_result (worker, any)   -> post-tool-use  (charge the executed call)
  *   tool_result (subagent)      -> worker-complete
  *   turn_end                    -> turn-stop
  *
@@ -257,6 +258,25 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_result", async (event, ctx) => {
+		// Pi skips afterToolCall for blocked calls, so a tool_result means the
+		// call actually executed. Charge the worker's hook-covered budget here;
+		// pre-mutation only checks, because Pi fires it before other extensions
+		// may block the call, and charging there would spend the ledger on
+		// denied retries.
+		if (worker) {
+			const input =
+				event.input && typeof event.input === "object"
+					? { ...(event.input as Record<string, unknown>) }
+					: {};
+			await invoke(ctx, "post-tool-use", {
+				session_id: sessionId(ctx),
+				tool_name: event.toolName,
+				tool_input: input,
+				tool_use_id: event.toolCallId,
+				agent_id: worker.id,
+				agent_type: worker.tier,
+			});
+		}
 		// Nested worker spawns must also complete: a worker that fans out
 		// reserves per-task slots, and without the completion event those
 		// slots leak until the stale sweep. Slot bookkeeping is not a parent
