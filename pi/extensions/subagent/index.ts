@@ -14,9 +14,12 @@
  * Vendored from: @earendil-works/pi-coding-agent v0.85.1 (examples/extensions/subagent, MIT)
  * Upstream: https://www.npmjs.com/package/@earendil-works/pi-coding-agent
  * Maintained by: Agent Delegation Protocol
- * Local modifications: maxTurns turn budgets; child registry + /subagents command;
- *   spawn notifications; tool_result_end dead-branch removal; expanded renderer
- *   restored with turn-budget markers
+ * Local modifications: maxTurns turn budgets; child registry (numeric ids,
+ *   recentSubagents ring with proc handles stripped, streamed partialText) +
+ *   /subagents command; spawn notifications; tool_result_end dead-branch
+ *   removal; expanded renderer restored with turn-budget markers; parallel
+ *   fan-out (MAX_PARALLEL_TASKS) and child concurrency (MAX_CONCURRENCY)
+ *   raised to 10 to match the ADP active-worker cap
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -46,8 +49,8 @@ import {
 import { Type } from "typebox";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
 
-const MAX_PARALLEL_TASKS = 8;
-const MAX_CONCURRENCY = 4;
+const MAX_PARALLEL_TASKS = 10;
+const MAX_CONCURRENCY = 10;
 const COLLAPSED_ITEM_COUNT = 10;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
 
@@ -187,12 +190,16 @@ function turnBudgetSection(limit: number): string {
 }
 
 interface RunningSubagent {
-	id: string;
+	id: number;
 	agent: string;
 	tier?: string;
 	task: string;
 	mode: "single" | "parallel-task" | "chain-step";
-	startedAt: Date;
+	// Accumulated assistant text_delta output for the in-flight turn; cleared
+	// when the matching assistant message_end arrives.
+	partialText: string;
+	// Epoch milliseconds.
+	startedAt: number;
 	completedAt?: Date;
 	proc?: ChildProcess;
 	// The live SingleResult; mutated in place as stream events arrive.
@@ -202,18 +209,18 @@ interface RunningSubagent {
 }
 
 // Registry backing /subagents. Entries live from spawn until the child
-// closes; on close an entry moves to `finished` (last 20 kept, each with
-// completedAt and its final result), so a killed or errored worker never
+// closes; on close an entry moves to `recent` (last 10 kept, each with
+// completedAt and its final result, and the child-process handle stripped
+// so finished entries never pin a proc), so a killed or errored worker never
 // leaks a running slot.
-const runningSubagents = new Map<string, RunningSubagent>();
-const finishedSubagents: RunningSubagent[] = [];
-const MAX_FINISHED_SUBAGENTS = 20;
+const runningSubagents = new Map<number, RunningSubagent>();
+const recentSubagents: RunningSubagent[] = [];
+const MAX_RECENT_SUBAGENTS = 10;
 let nextSubagentId = 1;
 
-export const subagentRegistry = {
-	running: runningSubagents,
-	finished: finishedSubagents,
-};
+export const getRunningSubagents = (): IterableIterator<RunningSubagent> =>
+	runningSubagents.values();
+export const getRecentSubagents = (): readonly RunningSubagent[] => recentSubagents;
 
 interface UsageStats {
 	input: number;
@@ -262,10 +269,25 @@ function getFinalOutput(messages: Message[]): string {
 	return "";
 }
 
-type DisplayItem = { type: "text"; text: string } | { type: "toolCall"; name: string; args: Record<string, any> };
+type DisplayItem =
+	| { type: "text"; text: string }
+	| { type: "toolCall"; name: string; args: Record<string, any> }
+	| { type: "toolResult"; toolName: string; text: string; isError: boolean };
 
-// Assistant text and tool calls, in stream order; backs the /subagents
-// activity view.
+const TOOL_RESULT_PREVIEW_LINES = 10;
+
+// Indented tool-result preview for the /subagents detail transcript, capped
+// at a fixed number of lines per result.
+function indentPreview(text: string): string {
+	return text
+		.split("\n")
+		.slice(0, TOOL_RESULT_PREVIEW_LINES)
+		.map((line) => `  ${line}`)
+		.join("\n");
+}
+
+// Assistant text, tool calls, and tool results, in stream order; backs the
+// /subagents activity view.
 function getDisplayItems(messages: Message[]): DisplayItem[] {
 	const items: DisplayItem[] = [];
 	for (const msg of messages) {
@@ -275,6 +297,13 @@ function getDisplayItems(messages: Message[]): DisplayItem[] {
 				else if (part.type === "toolCall")
 					items.push({ type: "toolCall", name: part.name, args: part.arguments as Record<string, any> });
 			}
+		} else if (msg.role === "toolResult") {
+			const text = msg.content
+				.filter((c) => c.type === "text")
+				.map((c) => c.text)
+				.join("\n");
+			if (text.trim())
+				items.push({ type: "toolResult", toolName: msg.toolName, text, isError: msg.isError });
 		}
 	}
 	return items;
@@ -432,16 +461,17 @@ async function runSingleAgent(
 	// Registry entry and listener notification. The entry carries the live
 	// result object, so a /subagents-style consumer sees stream updates.
 	let entry: RunningSubagent | null = null;
-	// Close/error path: move the entry out of `running` into the finished
-	// list, stamp completion time, and wake any listeners watching the live
-	// result.
+	// Close/error path: move the entry out of `running` into the recent ring,
+	// stamp completion time, strip the child-process handle, and wake any
+	// listeners watching the live result.
 	const finishEntry = () => {
 		if (!entry) return;
 		runningSubagents.delete(entry.id);
 		entry.completedAt = new Date();
-		finishedSubagents.push(entry);
-		if (finishedSubagents.length > MAX_FINISHED_SUBAGENTS)
-			finishedSubagents.splice(0, finishedSubagents.length - MAX_FINISHED_SUBAGENTS);
+		entry.proc = undefined;
+		recentSubagents.push(entry);
+		if (recentSubagents.length > MAX_RECENT_SUBAGENTS)
+			recentSubagents.splice(0, recentSubagents.length - MAX_RECENT_SUBAGENTS);
 		for (const listener of entry.listeners) {
 			try {
 				listener();
@@ -498,12 +528,13 @@ async function runSingleAgent(
 			// Register before spawn so /subagents can show the child from the
 			// very first moment of its run.
 			entry = {
-				id: `${agentName}#${nextSubagentId++}`,
+				id: nextSubagentId++,
 				agent: agentName,
 				tier,
 				task,
 				mode,
-				startedAt: new Date(),
+				startedAt: Date.now(),
+				partialText: "",
 				result: currentResult,
 				turnLimit: agent.maxTurns,
 				listeners: new Set(),
@@ -534,6 +565,16 @@ async function runSingleAgent(
 					return;
 				}
 
+				if (event.type === "message_update") {
+					// Stream liveness: accumulate the partial assistant text for
+					// the /subagents detail view.
+					if (event.assistantMessageEvent?.type === "text_delta" && entry) {
+						entry.partialText += event.assistantMessageEvent.delta ?? "";
+						notifyListeners();
+					}
+					return;
+				}
+
 				if (event.type === "message_end" && event.message) {
 					const msg = event.message as Message;
 					// Both assistant turns and tool results (message.role ===
@@ -543,6 +584,8 @@ async function runSingleAgent(
 
 					if (msg.role === "assistant") {
 						currentResult.usage.turns++;
+						// The completed message supersedes the streamed partial.
+						if (entry) entry.partialText = "";
 						// Hard turn budget: stop the child without touching the
 						// tool-level abort signal, so the close handler resolves
 						// normally and no sibling work is rejected.
@@ -997,9 +1040,11 @@ export default function (pi: ExtensionAPI) {
 					if (item.type === "text") {
 						const preview = expanded ? item.text : item.text.split("\n").slice(0, 3).join("\n");
 						text += `${theme.fg("toolOutput", preview)}\n`;
-					} else {
+					} else if (item.type === "toolCall") {
 						text += `${theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme))}\n`;
 					}
+					// toolResult items are only rendered in the /subagents detail
+					// transcript; the finished-result views stay as upstream.
 				}
 				return text.trimEnd();
 			};
@@ -1292,7 +1337,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("subagents", {
 		description: "List subagents spawned this session; open one to watch its activity",
 		handler: async (_args, cmdCtx) => {
-			if (!cmdCtx?.hasUI) return;
+			if (cmdCtx.mode !== "tui") return;
 			const ui = cmdCtx.ui;
 
 			const formatElapsed = (ms: number): string => {
@@ -1304,13 +1349,17 @@ export default function (pi: ExtensionAPI) {
 			};
 
 			const statusOf = (entry: RunningSubagent): string => {
-				if (!entry.completedAt) return "running";
-				if (entry.result.turnBudgetExhausted) return "exhausted";
-				return `exit ${entry.result.exitCode}`;
+				const turns = entry.result?.usage?.turns ?? 0;
+				if (!entry.completedAt) return `running (${turns} turns)`;
+				if (isFailedResult(entry.result)) return "failed";
+				if (entry.result.turnBudgetExhausted)
+					return `exhausted (${turns}/${entry.turnLimit ?? entry.result.turnLimit ?? "?"})`;
+				const cost = entry.result.usage?.cost ? `, $${entry.result.usage.cost.toFixed(4)}` : "";
+				return `finished (${turns} turns${cost})`;
 			};
 
 			const elapsedOf = (entry: RunningSubagent): string =>
-				formatElapsed((entry.completedAt ?? new Date()).getTime() - entry.startedAt.getTime());
+				formatElapsed((entry.completedAt?.getTime() ?? Date.now()) - entry.startedAt);
 
 			// Every exit path unsubscribes exactly once: Escape unsubscribes
 			// inline, and the .finally below covers disposal without Escape
@@ -1329,18 +1378,21 @@ export default function (pi: ExtensionAPI) {
 							const statusColor = !entry.completedAt ? "warning" : isFailedResult(r) ? "error" : "success";
 							container.addChild(
 								new Text(
-									theme.fg("toolTitle", theme.bold(`${entry.agent} (${entry.tier ?? "?"})`)) +
-										theme.fg(statusColor, ` ${statusOf(entry)}`) +
-										theme.fg("muted", ` · ${entry.mode} · ${elapsedOf(entry)}`),
+									theme.fg("toolTitle", theme.bold(`#${entry.id} ${entry.agent} (${entry.tier ?? "?"})`)) +
+												theme.fg("muted", ` — ${entry.mode}`) +
+												theme.fg(statusColor, ` ${statusOf(entry)}`) +
+												theme.fg("muted", ` · ${elapsedOf(entry)}`),
 									0,
 									0,
 								),
 							);
 							const turns = r.usage.turns;
-							const turnInfo = r.turnLimit ? `${turns}/${r.turnLimit} turns` : `${turns} turns`;
-							container.addChild(
-								new Text(theme.fg("muted", turnInfo + (r.model ? ` · ${r.model}` : "")), 0, 0),
-							);
+							if (entry.turnLimit ?? r.turnLimit) {
+								const turnInfo = `${turns}/${entry.turnLimit ?? r.turnLimit} turns`;
+								container.addChild(
+									new Text(theme.fg("muted", turnInfo + (r.model ? ` · ${r.model}` : "")), 0, 0),
+								);
+							}
 							container.addChild(new Spacer(1));
 							container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
 							container.addChild(new Text(theme.fg("dim", entry.task), 0, 0));
@@ -1358,22 +1410,34 @@ export default function (pi: ExtensionAPI) {
 							} else {
 								for (const item of items) {
 									if (item.type === "toolCall") {
-										container.addChild(
-											new Text(
-												theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
-												0,
-												0,
-											),
-										);
-									} else {
-										container.addChild(new Text(theme.fg("toolOutput", item.text), 0, 0));
-									}
+									container.addChild(
+										new Text(
+											theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
+											0,
+											0,
+										),
+									);
+								} else if (item.type === "toolResult") {
+									container.addChild(
+										new Text(
+											theme.fg(item.isError ? "error" : "toolOutput", indentPreview(item.text)),
+											0,
+											0,
+										),
+									);
+								} else {
+									container.addChild(new Text(theme.fg("toolOutput", item.text), 0, 0));
+								}
 								}
 							}
 							const finalOutput = getFinalOutput(r.messages);
 							if (finalOutput) {
 								container.addChild(new Spacer(1));
 								container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
+							}
+							if (entry.partialText) {
+								container.addChild(new Spacer(1));
+								container.addChild(new Text(theme.fg("dim", entry.partialText), 0, 0));
 							}
 							if (r.turnBudgetExhausted) {
 								container.addChild(new Spacer(1));
@@ -1408,7 +1472,7 @@ export default function (pi: ExtensionAPI) {
 							render: (width: number) => view.render(width),
 							invalidate: () => view.invalidate(),
 							handleInput: (data: string) => {
-								if (matchesKey(data, "escape")) {
+								if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
 									unsubscribe?.();
 									unsubscribe = undefined;
 									done(null);
@@ -1427,8 +1491,8 @@ export default function (pi: ExtensionAPI) {
 				ui.custom<RunningSubagent | null>(
 					(tui, theme, _kb, done) => {
 						const entries: RunningSubagent[] = [
-							...subagentRegistry.running.values(),
-							...subagentRegistry.finished,
+							...getRunningSubagents(),
+							...getRecentSubagents(),
 						];
 						if (entries.length === 0) {
 							const empty = new Text(
@@ -1445,11 +1509,14 @@ export default function (pi: ExtensionAPI) {
 							};
 						}
 
-						const items: SelectItem[] = entries.map((entry) => ({
-							value: entry.id,
-							label: `${entry.agent} (${entry.tier ?? "?"}) ${statusOf(entry)} ${elapsedOf(entry)}`,
-							description: entry.task.length > 80 ? `${entry.task.slice(0, 80)}...` : entry.task,
-						}));
+						const items: SelectItem[] = entries.map((entry) => {
+							const taskFlat = entry.task.replace(/\s+/g, " ").trim();
+							return {
+								value: String(entry.id),
+								label: `#${entry.id} ${entry.agent}${entry.tier ? ` (${entry.tier})` : ""} ${statusOf(entry)}`,
+								description: taskFlat.length > 50 ? `${taskFlat.slice(0, 50)}...` : taskFlat,
+							};
+						});
 						const container = new Container();
 						container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
 						container.addChild(new Text(theme.fg("accent", theme.bold("Subagents")), 0, 0));
@@ -1461,7 +1528,7 @@ export default function (pi: ExtensionAPI) {
 							noMatch: (t) => theme.fg("warning", t),
 						});
 						selectList.onSelect = (item) => {
-							const entry = entries.find((e) => e.id === item.value);
+							const entry = entries.find((e) => String(e.id) === item.value);
 							if (entry) done(entry);
 						};
 						selectList.onCancel = () => done(null);
