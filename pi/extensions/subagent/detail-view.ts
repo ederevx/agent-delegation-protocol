@@ -8,11 +8,21 @@
  * previous screen back. In regular (inline) mode it dock-integrates like
  * the selector.
  *
- * The view owns its content cache and scroll window. It rebuilds from the
- * live SingleResult on every stream event so the view tracks the running
- * child; sticky followTail keeps rebuilds pinned to the bottom until the
- * user scrolls up. No truncation: task, status, and JSON args reach the
- * renderer fully, which word-wraps Text/Markdown at the real width.
+ * Rendering follows the session history viewer's architecture (the pattern
+ * proven against lots-of-logs breakdowns): each display item is rendered
+ * ONCE per width into a cached flat line array (invalidated on width change
+ * or listener events, rebuilt lazily on the next render), and every frame
+ * emits ONLY a window slice — the viewport height minus the chrome — so the
+ * per-frame cost stays bounded no matter how many log lines a worker
+ * produced. Listener events just mark the cache dirty; they never render.
+ *
+ * Frame layout (shared chrome in viewer-chrome.ts): accent title line with
+ * dim status/elapsed and the scroll position, then the log window, a dim
+ * border rule, and the word-wrapped instruction lines LAST, pinned to the
+ * bottom — the window absorbs all slack and the frame emits EXACTLY
+ * tui.terminal.rows lines. Sticky followTail keeps the window pinned to the
+ * bottom until the user scrolls up; wheel scrolling keeps the pi-tui
+ * semantics (wheel-up unpins the tail, wheel-down re-pins at the bottom).
  * Mouse+keyboard throughout.
  */
 
@@ -21,20 +31,19 @@ import {
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
-	Container,
 	isViewportTUI,
 	Markdown,
 	matchesKey,
 	Spacer,
 	Text,
-	type TuiMouseEventResult,
+	truncateToWidth,
+	type Component,
 	type TUI,
 	type TuiMouseEvent,
 	type ViewportTUI,
 } from "@earendil-works/pi-tui";
 import type { RunningSubagent } from "./registry.ts";
 import {
-	elapsedOf,
 	formatToolCall,
 	formatUsageStats,
 	getDisplayItems,
@@ -42,7 +51,13 @@ import {
 	indentPreview,
 	isFailedResult,
 	statusOf,
+	elapsedOf,
 } from "./format.ts";
+import { ViewerChrome } from "./viewer-chrome.ts";
+
+/** Dim viewer instructions, word-wrapped under the border rule. */
+const INSTRUCTION_TEXT =
+	"↑↓/PgUp/PgDn/Home/End scroll · wheel scroll · esc back";
 
 export class SubagentDetailView {
 	private readonly entry: RunningSubagent;
@@ -50,20 +65,26 @@ export class SubagentDetailView {
 	private readonly theme: Theme;
 	private readonly done: (result: null) => void;
 	private readonly mdTheme = getMarkdownTheme();
+	private readonly chrome: ViewerChrome;
 
-	private content: Container;
+	// Cached flat line array: built once per width, rebuilt lazily after a
+	// listener event or width change; render() only slices it.
+	private cachedWidth: number | null = null;
+	private cachedLines: string[] = [];
+	private dirty = true;
 	private scrollOffset = 0;
 	private followTail = true;
-	private renderedLines = 0;
 	private tookLayoutRoot = false;
 	private unsubscribe: (() => void) | undefined;
 	// Present only when the TUI is the fullscreen viewport variant; then
 	// this view can replace the whole screen via setLayoutRoot.
 	private readonly viewportTui: ViewportTUI | undefined;
 
-	// Live stream wake-up: rebuild the content and request a render.
+	// Live stream wake-up: mark the cache dirty and request a render; the
+	// rebuild happens lazily in the next render() and stays per-change, not
+	// per-frame.
 	private readonly onStream = () => {
-		this.content = this.buildContent();
+		this.dirty = true;
 		this.tui.requestRender();
 	};
 
@@ -73,7 +94,7 @@ export class SubagentDetailView {
 		this.theme = theme;
 		this.done = done;
 		this.viewportTui = isViewportTUI(tui) ? tui : undefined;
-		this.content = this.buildContent();
+		this.chrome = new ViewerChrome(theme, INSTRUCTION_TEXT);
 	}
 
 	// ------------------------------------------------------------------
@@ -109,25 +130,24 @@ export class SubagentDetailView {
 	// ------------------------------------------------------------------
 
 	render(width: number): string[] {
-		const lines = this.content.render(width);
-		const vp = this.viewport();
-		const maxOffset = Math.max(0, lines.length - vp);
-		if (this.followTail) this.scrollOffset = maxOffset;
-		this.scrollOffset = Math.min(Math.max(0, this.scrollOffset), maxOffset);
-		this.renderedLines = lines.length;
-		const window = lines.slice(this.scrollOffset, this.scrollOffset + vp);
-		const scrolling = maxOffset > 0;
-		const footer =
-			"↑↓/PgUp/PgDn scroll · wheel scroll · esc back" +
-			(scrolling
-				? ` · lines ${this.scrollOffset + 1}–${Math.min(this.scrollOffset + vp, lines.length)}/${lines.length}`
-				: "");
-		// Settings hint style: dim, two-space indent, no box.
-		return [...window, ...new Text(this.theme.fg("dim", `  ${footer}`), 0, 0).render(width)];
+		if (this.cachedWidth !== width || this.dirty) this.rebuild(width);
+		const rows = this.tui.terminal.rows;
+		const instructions = this.chrome.keptInstructions(rows);
+		const windowHeight = this.chrome.contentWindowHeight(rows, instructions.length);
+		this.clampScroll(windowHeight);
+
+		const out: string[] = [];
+		out.push(truncateToWidth(this.titleLine(width, windowHeight), width));
+		this.appendContentWindow(out, windowHeight);
+		this.chrome.appendBottom(out, width, rows);
+		return this.chrome.clipFrame(out, rows);
 	}
 
 	invalidate(): void {
-		this.content.invalidate();
+		this.cachedWidth = null;
+		this.cachedLines = [];
+		this.dirty = true;
+		this.chrome.invalidate();
 	}
 
 	handleInput(data: string): void {
@@ -135,7 +155,7 @@ export class SubagentDetailView {
 			this.done(null);
 			return;
 		}
-		const vp = this.viewport();
+		const windowHeight = this.windowHeight();
 		if (matchesKey(data, "up")) {
 			this.followTail = false;
 			this.scrollOffset = Math.max(0, this.scrollOffset - 1);
@@ -144,10 +164,10 @@ export class SubagentDetailView {
 			this.scrollOffset += 1;
 		} else if (matchesKey(data, "pageUp")) {
 			this.followTail = false;
-			this.scrollOffset = Math.max(0, this.scrollOffset - (vp - 1));
+			this.scrollOffset = Math.max(0, this.scrollOffset - (windowHeight - 1));
 		} else if (matchesKey(data, "pageDown")) {
 			this.followTail = true;
-			this.scrollOffset += vp - 1;
+			this.scrollOffset += windowHeight - 1;
 		} else if (matchesKey(data, "home")) {
 			this.followTail = false;
 			this.scrollOffset = 0;
@@ -162,79 +182,116 @@ export class SubagentDetailView {
 
 	handleMouse(event: TuiMouseEvent) {
 		if (event.type !== "wheel") return undefined;
+		if (this.cachedWidth === null) return undefined;
 		// pi-tui emits a negative wheelDelta on wheel-up ("Negative values
 		// scroll up"), so adding it moves the window toward earlier lines;
 		// wheel-up unpins the tail, wheel-down re-pins at the bottom.
-		this.scrollOffset += event.wheelDelta ?? 0;
-		const vp = this.viewport();
-		const maxOffset = Math.max(0, this.renderedLines - vp);
-		this.scrollOffset = Math.min(Math.max(0, this.scrollOffset), maxOffset);
+		const windowHeight = this.windowHeight();
+		const maxOffset = Math.max(0, this.cachedLines.length - windowHeight);
+		this.scrollOffset = Math.min(
+			Math.max(0, this.scrollOffset + (event.wheelDelta ?? 0)),
+			maxOffset,
+		);
 		this.followTail = this.scrollOffset >= maxOffset;
 		this.tui.requestRender();
 		return { handled: true };
 	}
 
 	// ------------------------------------------------------------------
-	// Content building (one section per method)
+	// Frame assembly (title → window → border → instructions)
 	// ------------------------------------------------------------------
 
-	private viewport(): number {
-		return Math.max(4, this.tui.terminal.rows - 2);
+	/** Content-window height; one shared source of truth for render(),
+	 * handleInput() page math, and handleMouse() clamping. */
+	private windowHeight(): number {
+		return this.chrome.contentWindowHeight(this.tui.terminal.rows);
 	}
 
-	private buildContent(): Container {
-		const container = new Container();
-		this.addHeader(container);
-		this.addTurnMeta(container);
-		container.addChild(new Spacer(1));
-		this.addTask(container);
-		container.addChild(new Spacer(1));
-		this.addActivity(container);
-		this.addFinalOutput(container);
-		this.addStreamedPartial(container);
-		this.addBudgetWarning(container);
-		this.addError(container);
-		this.addUsage(container);
-		return container;
+	/** Sticky bottom until the user scrolls up; clamp inside [0, maxOffset]. */
+	private clampScroll(windowHeight: number): void {
+		const maxOffset = Math.max(0, this.cachedLines.length - windowHeight);
+		if (this.followTail) this.scrollOffset = maxOffset;
+		this.scrollOffset = Math.min(Math.max(0, this.scrollOffset), maxOffset);
 	}
 
-	private addHeader(container: Container): void {
+	/** Accent title: `#<id> <agent> (<tier>) — <mode>`, dim status/elapsed,
+	 * and the dim scroll position (same window arithmetic as render()). */
+	private titleLine(width: number, windowHeight: number): string {
 		const entry = this.entry;
-		const statusColor = !entry.completedAt ? "warning" : isFailedResult(entry.result) ? "error" : "success";
-		container.addChild(
-			new Text(
-				this.theme.fg("toolTitle", this.theme.bold(`#${entry.id} ${entry.agent} (${entry.tier ?? "?"})`)) +
-					this.theme.fg("muted", ` — ${entry.mode}`) +
-					this.theme.fg(statusColor, ` ${statusOf(entry)}`) +
-					this.theme.fg("muted", ` · ${elapsedOf(entry)}`),
-				0,
-				0,
-			),
-		);
+		const parts = [
+			this.theme.fg("accent", `#${entry.id} ${entry.agent} (${entry.tier ?? "?"}) — ${entry.mode}`),
+			this.theme.fg("dim", ` ${statusOf(entry)} · ${elapsedOf(entry)}`),
+		];
+		if (this.cachedLines.length > 0) {
+			const position =
+				`lines ${this.scrollOffset + 1}–${Math.min(this.cachedLines.length, this.scrollOffset + windowHeight)} of ${this.cachedLines.length}`;
+			parts.push(this.theme.fg("dim", ` · ${position}`));
+		}
+		return truncateToWidth(parts.join(""), width);
 	}
 
-	private addTurnMeta(container: Container): void {
+	/** Push the visible slice, padded to exactly windowHeight rows. */
+	private appendContentWindow(out: string[], windowHeight: number): void {
+		const slice = this.cachedLines.slice(this.scrollOffset, this.scrollOffset + windowHeight);
+		for (let i = 0; i < windowHeight; i++) out.push(slice[i] ?? "");
+	}
+
+	// ------------------------------------------------------------------
+	// Content building (one section per method; flattened once per width)
+	// ------------------------------------------------------------------
+
+	/** Rebuild the flat line cache at `width`: render each display item
+	 * once, then flatten. Runs only after a width change or a listener
+	 * event (dirty flag) — never twice for the same frame. */
+	private rebuild(width: number): void {
+		this.chrome.layout(width);
+		const lines: string[] = [];
+		for (const item of this.buildItems()) {
+			for (const line of item.render(width)) lines.push(line);
+		}
+		this.cachedLines = lines;
+		this.cachedWidth = width;
+		this.dirty = false;
+	}
+
+	/** Fresh renderable components for the current entry state (the title
+	 * chrome lives in titleLine(); everything below it lands in the log
+	 * window). */
+	private buildItems(): Component[] {
+		const items: Component[] = [];
+		this.addTurnMeta(items);
+		this.addTask(items);
+		this.addActivity(items);
+		this.addFinalOutput(items);
+		this.addStreamedPartial(items);
+		this.addBudgetWarning(items);
+		this.addError(items);
+		this.addUsage(items);
+		return items;
+	}
+
+	private addTurnMeta(items: Component[]): void {
 		const entry = this.entry;
 		const turns = entry.result.usage.turns;
 		const turnLimit = entry.turnLimit ?? entry.result.turnLimit;
 		if (!turnLimit) return;
 		const turnInfo = `${turns}/${turnLimit} turns`;
-		container.addChild(
+		items.push(
 			new Text(this.theme.fg("muted", turnInfo + (entry.result.model ? ` · ${entry.result.model}` : "")), 0, 0),
 		);
 	}
 
-	private addTask(container: Container): void {
-		container.addChild(new Text(this.theme.fg("muted", "─── Task ───"), 0, 0));
-		container.addChild(new Text(this.theme.fg("dim", this.entry.task), 0, 0));
+	private addTask(items: Component[]): void {
+		items.push(new Text(this.theme.fg("muted", "─── Task ───"), 0, 0));
+		items.push(new Text(this.theme.fg("dim", this.entry.task), 0, 0));
 	}
 
-	private addActivity(container: Container): void {
+	private addActivity(items: Component[]): void {
 		const r = this.entry.result;
-		container.addChild(new Text(this.theme.fg("muted", "─── Activity ───"), 0, 0));
-		const items = getDisplayItems(r.messages);
-		if (items.length === 0) {
-			container.addChild(
+		items.push(new Text(this.theme.fg("muted", "─── Activity ───"), 0, 0));
+		const displayItems = getDisplayItems(r.messages);
+		if (displayItems.length === 0) {
+			items.push(
 				new Text(
 					this.theme.fg("muted", this.entry.completedAt ? "(no activity)" : "(waiting for first turn)"),
 					0,
@@ -243,9 +300,9 @@ export class SubagentDetailView {
 			);
 			return;
 		}
-		for (const item of items) {
+		for (const item of displayItems) {
 			if (item.type === "toolCall") {
-				container.addChild(
+				items.push(
 					new Text(
 						this.theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, this.theme.fg.bind(this.theme), true),
 						0,
@@ -253,7 +310,7 @@ export class SubagentDetailView {
 					),
 				);
 			} else if (item.type === "toolResult") {
-				container.addChild(
+				items.push(
 					new Text(
 						this.theme.fg(item.isError ? "error" : "toolOutput", indentPreview(item.text)),
 						0,
@@ -261,29 +318,29 @@ export class SubagentDetailView {
 					),
 				);
 			} else {
-				container.addChild(new Text(this.theme.fg("toolOutput", item.text), 0, 0));
+				items.push(new Text(this.theme.fg("toolOutput", item.text), 0, 0));
 			}
 		}
 	}
 
-	private addFinalOutput(container: Container): void {
+	private addFinalOutput(items: Component[]): void {
 		const finalOutput = getFinalOutput(this.entry.result.messages);
 		if (!finalOutput) return;
-		container.addChild(new Spacer(1));
-		container.addChild(new Markdown(finalOutput.trim(), 0, 0, this.mdTheme));
+		items.push(new Spacer(1));
+		items.push(new Markdown(finalOutput.trim(), 0, 0, this.mdTheme));
 	}
 
-	private addStreamedPartial(container: Container): void {
+	private addStreamedPartial(items: Component[]): void {
 		if (!this.entry.partialText) return;
-		container.addChild(new Spacer(1));
-		container.addChild(new Text(this.theme.fg("dim", this.entry.partialText), 0, 0));
+		items.push(new Spacer(1));
+		items.push(new Text(this.theme.fg("dim", this.entry.partialText), 0, 0));
 	}
 
-	private addBudgetWarning(container: Container): void {
+	private addBudgetWarning(items: Component[]): void {
 		const r = this.entry.result;
 		if (!r.turnBudgetExhausted) return;
-		container.addChild(new Spacer(1));
-		container.addChild(
+		items.push(new Spacer(1));
+		items.push(
 			new Text(
 				this.theme.fg("warning", `⚠ turn budget exhausted (${r.usage.turns}/${r.turnLimit} turns)`),
 				0,
@@ -292,15 +349,15 @@ export class SubagentDetailView {
 		);
 	}
 
-	private addError(container: Container): void {
+	private addError(items: Component[]): void {
 		const r = this.entry.result;
 		if (!isFailedResult(r) || !r.errorMessage) return;
-		container.addChild(new Text(this.theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
+		items.push(new Text(this.theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
 	}
 
-	private addUsage(container: Container): void {
+	private addUsage(items: Component[]): void {
 		const usageStr = formatUsageStats(this.entry.result.usage);
 		if (!usageStr) return;
-		container.addChild(new Text(this.theme.fg("dim", usageStr), 0, 0));
+		items.push(new Text(this.theme.fg("dim", usageStr), 0, 0));
 	}
 }
