@@ -233,6 +233,24 @@ export const getRunningSubagents = (): IterableIterator<RunningSubagent> =>
 	runningSubagents.values();
 export const getRecentSubagents = (): readonly RunningSubagent[] => recentSubagents;
 
+// Registry facade over the module state above; the runtime layout carries
+// these as SubagentRegistry methods. The repo registry is module state
+// rather than a class instance, so `runningSubagents` stands in for the
+// private `running` map and the method bodies are otherwise verbatim.
+const registry = {
+	/** Running entries that still have a live child-process handle. */
+	activeWithProc(): RunningSubagent[] {
+		return [...runningSubagents.values()].filter((entry) => entry.proc);
+	},
+
+	/** Steering interrupt: SIGTERM every active child (escalating later). */
+	interruptActive(): void {
+		for (const entry of registry.activeWithProc()) {
+			if (entry.proc) killWithEscalation(entry.proc);
+		}
+	},
+};
+
 interface UsageStats {
 	input: number;
 	output: number;
@@ -744,12 +762,11 @@ export default function (pi: ExtensionAPI) {
 	pi.on("input", async (event) => {
 		if (event.source === "extension") return { action: "continue" };
 		if (event.streamingBehavior !== "steer") return { action: "continue" };
-		const active = [...runningSubagents.values()].filter((e) => e.proc);
-		if (active.length === 0) return { action: "continue" };
-		for (const entry of active) {
-			if (entry.proc) killWithEscalation(entry.proc);
-		}
-		pi.sendUserMessage(event.text, { deliverAs: "steer" });
+		if (registry.activeWithProc().length === 0) return { action: "continue" };
+		registry.interruptActive();
+		// sendUserMessage is typed void but the runtime returns a promise;
+		// Promise.resolve absorbs either so a rejection cannot surface.
+		void Promise.resolve(pi.sendUserMessage(event.text, { deliverAs: "steer" })).catch(() => {});
 		return { action: "handled" };
 	});
 
