@@ -180,6 +180,11 @@ def main() -> None:
     test_windows_lock_contention_retries_eacces()
     test_legacy_locks_fail_closed_with_actionable_feedback()
     test_exhausted_budget_denies_with_wind_down_order()
+    test_pi_budget_check_denies_at_limit_without_charging()
+    test_pi_budget_check_below_limit_passes_without_charging()
+    test_pi_budget_charges_on_post_tool_use_and_dedupes()
+    test_pi_budget_charges_to_limit_then_check_denies()
+    test_codex_pre_mutation_still_charges_each_attempt()
     print("Host lock tests: PASS")
 
 
@@ -209,6 +214,162 @@ def test_exhausted_budget_denies_with_wind_down_order() -> None:
             assert "exhausted (64/64; 0 remaining)" in reason
             assert "Do not call any further tools" in reason
             assert "final evidence report" in reason
+        finally:
+            if previous_home is None:
+                os.environ.pop("CODEX_HOME", None)
+            else:
+                os.environ["CODEX_HOME"] = previous_home
+
+
+def test_pi_budget_check_denies_at_limit_without_charging() -> None:
+    """Pi's pre-mutation check denies a spent ledger and never increments."""
+    import json as _json
+
+    with tempfile.TemporaryDirectory(prefix="protocol-budget-") as raw:
+        home = Path(raw)
+        previous_home = os.environ.get("PI_CODING_AGENT_DIR")
+        os.environ["PI_CODING_AGENT_DIR"] = str(home)
+        try:
+            ledger_path, _ = _paths(home, "worker-tool-budget:pi-check-spent")
+            ledger_path.parent.mkdir(parents=True)
+            ledger_path.write_text(_json.dumps(
+                {"tier": "bulk-worker", "limit": 2, "used": 2,
+                 "seen": ["call-0"]}))
+            denial = run("pi", "pre-mutation", {
+                "agent_id": "pi-check-spent", "agent_type": "bulk-worker",
+                "tool_name": "bash", "tool_input": {"command": "echo hi"},
+                "tool_use_id": "call-1",
+            })
+            output = denial["hookSpecificOutput"]
+            assert output["permissionDecision"] == "deny", denial
+            assert output["terminal"] is True
+            reason = output["permissionDecisionReason"]
+            assert "exhausted (2/2; 0 remaining)" in reason
+            assert "Do not call any further tools" in reason
+            assert "final evidence report" in reason
+            ledger = _json.loads(ledger_path.read_text())
+            assert ledger == {"tier": "bulk-worker", "limit": 2, "used": 2,
+                              "seen": ["call-0"]}, ledger
+        finally:
+            if previous_home is None:
+                os.environ.pop("PI_CODING_AGENT_DIR", None)
+            else:
+                os.environ["PI_CODING_AGENT_DIR"] = previous_home
+
+
+def test_pi_budget_check_below_limit_passes_without_charging() -> None:
+    """Pi's pre-mutation check below the limit neither denies nor charges."""
+    import json as _json
+
+    with tempfile.TemporaryDirectory(prefix="protocol-budget-") as raw:
+        home = Path(raw)
+        previous_home = os.environ.get("PI_CODING_AGENT_DIR")
+        os.environ["PI_CODING_AGENT_DIR"] = str(home)
+        try:
+            ledger_path, _ = _paths(home, "worker-tool-budget:pi-check-open")
+            ledger_path.parent.mkdir(parents=True)
+            ledger_path.write_text(_json.dumps(
+                {"tier": "bulk-worker", "limit": 2, "used": 1, "seen": []}))
+            assert run("pi", "pre-mutation", {
+                "agent_id": "pi-check-open", "agent_type": "bulk-worker",
+                "tool_name": "bash", "tool_input": {"command": "echo hi"},
+                "tool_use_id": "call-1",
+            }) is None
+            ledger = _json.loads(ledger_path.read_text())
+            assert ledger["used"] == 1 and ledger["seen"] == [], ledger
+        finally:
+            if previous_home is None:
+                os.environ.pop("PI_CODING_AGENT_DIR", None)
+            else:
+                os.environ["PI_CODING_AGENT_DIR"] = previous_home
+
+
+def test_pi_budget_charges_on_post_tool_use_and_dedupes() -> None:
+    """Pi charges an executed call once per tool-use id at post-tool-use."""
+    import json as _json
+
+    with tempfile.TemporaryDirectory(prefix="protocol-budget-") as raw:
+        home = Path(raw)
+        previous_home = os.environ.get("PI_CODING_AGENT_DIR")
+        os.environ["PI_CODING_AGENT_DIR"] = str(home)
+        try:
+            worker = {
+                "agent_id": "pi-charge-once", "agent_type": "bulk-worker",
+                "tool_name": "bash", "tool_input": {"command": "echo hi"},
+            }
+            assert run("pi", "post-tool-use", dict(worker, tool_use_id="call-1")) is None
+            assert run("pi", "post-tool-use", dict(worker, tool_use_id="call-1")) is None
+            assert run("pi", "post-tool-use", dict(worker, tool_use_id="call-2")) is None
+            ledger_path, _ = _paths(home, "worker-tool-budget:pi-charge-once")
+            ledger = _json.loads(ledger_path.read_text())
+            assert ledger["used"] == 2, ledger
+            assert ledger["seen"] == ["call-1", "call-2"], ledger
+            assert ledger["limit"] == 64 and ledger["tier"] == "bulk-worker", ledger
+        finally:
+            if previous_home is None:
+                os.environ.pop("PI_CODING_AGENT_DIR", None)
+            else:
+                os.environ["PI_CODING_AGENT_DIR"] = previous_home
+
+
+def test_pi_budget_charges_to_limit_then_check_denies() -> None:
+    """Charges alone can reach the limit; the next check then denies."""
+    import json as _json
+
+    with tempfile.TemporaryDirectory(prefix="protocol-budget-") as raw:
+        home = Path(raw)
+        previous_home = os.environ.get("PI_CODING_AGENT_DIR")
+        os.environ["PI_CODING_AGENT_DIR"] = str(home)
+        try:
+            ledger_path, _ = _paths(home, "worker-tool-budget:pi-spend-up")
+            ledger_path.parent.mkdir(parents=True)
+            ledger_path.write_text(_json.dumps(
+                {"tier": "bulk-worker", "limit": 2, "used": 0, "seen": []}))
+            worker = {
+                "agent_id": "pi-spend-up", "agent_type": "bulk-worker",
+                "tool_name": "bash", "tool_input": {"command": "echo hi"},
+            }
+            assert run("pi", "post-tool-use", dict(worker, tool_use_id="call-1")) is None
+            assert run("pi", "post-tool-use", dict(worker, tool_use_id="call-2")) is None
+            denial = run("pi", "pre-mutation", dict(worker, tool_use_id="call-3"))
+            output = denial["hookSpecificOutput"]
+            assert output["permissionDecision"] == "deny", denial
+            assert output["terminal"] is True
+            assert "exhausted (2/2; 0 remaining)" in output[
+                "permissionDecisionReason"]
+            ledger = _json.loads(ledger_path.read_text())
+            assert ledger["used"] == 2 and ledger["seen"] == [
+                "call-1", "call-2"], ledger
+        finally:
+            if previous_home is None:
+                os.environ.pop("PI_CODING_AGENT_DIR", None)
+            else:
+                os.environ["PI_CODING_AGENT_DIR"] = previous_home
+
+
+def test_codex_pre_mutation_still_charges_each_attempt() -> None:
+    """Codex keeps its documented behavior: every attempt charges on entry."""
+    import json as _json
+
+    with tempfile.TemporaryDirectory(prefix="protocol-budget-") as raw:
+        home = Path(raw)
+        previous_home = os.environ.get("CODEX_HOME")
+        os.environ["CODEX_HOME"] = str(home)
+        try:
+            worker = {
+                "agent_id": "codex-attempt", "agent_type": "bulk-worker",
+                "tool_name": "shell", "tool_input": {"command": ["echo", "hi"]},
+            }
+            assert run("codex", "pre-mutation", dict(worker, tool_use_id="call-1")) is None
+            assert run("codex", "pre-mutation", dict(worker, tool_use_id="call-2")) is None
+            ledger_path, _ = _paths(home, "worker-tool-budget:codex-attempt")
+            ledger = _json.loads(ledger_path.read_text())
+            assert ledger["used"] == 2, ledger
+            assert ledger["seen"] == ["call-1", "call-2"], ledger
+            denial = run("codex", "pre-mutation", dict(worker, tool_use_id="call-3"))
+            output = denial["hookSpecificOutput"]
+            assert output["permissionDecision"] == "deny", denial
+            assert output["terminal"] is True
         finally:
             if previous_home is None:
                 os.environ.pop("CODEX_HOME", None)

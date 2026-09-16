@@ -662,7 +662,8 @@ class TurnEventHandler:
             if self.host == "codex":
                 # A native start pins the initial limit before any tool call.
                 # Corrupt ledgers remain untouched and deny at PreToolUse.
-                _worker_tool_budget(_home(self.host), payload, self.classifier, charge=False)
+                _worker_tool_check(_home(self.host), payload, self.classifier,
+                                   deny_at_limit=False)
             # The fan-out this start covers was fixed when its call was
             # admitted: take the reservation first so its record sizes the
             # worker's own entry (1 when nothing is held, e.g. a start that
@@ -752,59 +753,99 @@ def _spawn_budget_violation(payload: dict[str, Any], classifier: Any) -> str | N
 
 
 def _worker_tool_budget(home: Path, payload: dict[str, Any],
-                        classifier: Any, *, charge: bool = True) -> dict[str, Any] | None:
+                        classifier: Any) -> dict[str, Any] | None:
+    """Codex's combined path: check the budget, then charge the attempt.
+
+    Codex has no post-execution hook, so every intercepted attempt is
+    charged at admission, including attempts another hook later denies.
+    """
+    denial = _worker_tool_check(home, payload, classifier)
+    if denial:
+        return denial
+    return _worker_tool_charge(home, payload, classifier)
+
+
+def _worker_tool_error(error: Exception) -> dict[str, Any]:
+    # Hook exceptions can be treated as non-blocking by the host. Return
+    # an explicit decision when persistence or lock acquisition fails.
+    return _deny(
+        "Worker tool-call budget could not be verified or saved; "
+        f"{error}. Report the ledger/lock error to the parent without "
+        "further tool calls.",
+        terminal=True,
+    )
+
+
+def _worker_ledger(path: Path, payload: dict[str, Any],
+                   classifier: Any) -> tuple[dict[str, Any] | None,
+                                             dict[str, Any] | None]:
+    """Load the worker's lifetime ledger, pinning it on first use.
+
+    Returns (ledger, denial): exactly one is set. Callers own every further
+    update and save; this only persists the newly created ledger itself.
+    Unknown tiers receive the smallest budget; missing native identity
+    cannot establish a ledger (no ledger, no denial, no charge).
+    """
     try:
-        return _worker_tool_budget_locked(home, payload, classifier, charge=charge)
+        ledger = json.loads(path.read_text())
+    except FileNotFoundError:
+        tier = classifier.canonical_worker_name(_agent_type(payload))
+        ledger = {"tier": tier, "limit": classifier.WORKER_TURN_LIMITS.get(
+            tier, min(classifier.WORKER_TURN_LIMITS.values())), "used": 0, "seen": []}
+        _save(path, ledger)
+    except (OSError, json.JSONDecodeError):
+        return None, _deny("Worker tool-call budget ledger is unreadable or corrupt; report this to the parent without continuing tool calls.", terminal=True)
+    # `used` has no upper bound: Pi charges at post-tool-use, so a final
+    # parallel tool batch that all passed the pre-mutation check can push
+    # the count past the limit by at most that batch's size.
+    if (not isinstance(ledger, dict) or type(ledger.get("limit")) is not int or
+            ledger["limit"] <= 0 or type(ledger.get("used")) is not int or
+            ledger["used"] < 0 or
+            not isinstance(ledger.get("seen"), list) or
+            not all(isinstance(item, str) for item in ledger["seen"])):
+        return None, _deny("Worker tool-call budget ledger is invalid; report this to the parent without resetting the budget.", terminal=True)
+    return ledger, None
+
+
+def _worker_tool_check(home: Path, payload: dict[str, Any],
+                       classifier: Any, *, deny_at_limit: bool = True
+                       ) -> dict[str, Any] | None:
+    """Check the budget for one hook-covered call without charging it."""
+    try:
+        return _worker_tool_check_locked(home, payload, classifier,
+                                         deny_at_limit=deny_at_limit)
     except (OSError, ValueError, TypeError) as error:
-        # Hook exceptions can be treated as non-blocking by the host. Return
-        # an explicit decision when persistence or lock acquisition fails.
-        return _deny(
-            "Worker tool-call budget could not be verified or saved; "
-            f"{error}. Report the ledger/lock error to the parent without "
-            "further tool calls.",
-            terminal=True,
-        )
+        return _worker_tool_error(error)
 
 
-def _worker_tool_budget_locked(home: Path, payload: dict[str, Any],
-                               classifier: Any, *, charge: bool = True) -> dict[str, Any] | None:
-    """Count distinct hook-covered Codex tool-call attempts per native worker.
+def _worker_tool_check_locked(home: Path, payload: dict[str, Any],
+                              classifier: Any, *, deny_at_limit: bool = True
+                              ) -> dict[str, Any] | None:
+    """Validate (or pin) the lifetime ledger for one covered call.
 
-    This is not a model-turn counter or a count of successful tool executions.
-    Missing call ids count each hook invocation conservatively. The lifetime
-    ledger survives parent prompt resets and resumes. Unknown tiers receive
-    the smallest budget; missing native identity cannot establish a ledger.
+    This is not a model-turn counter or a count of successful tool
+    executions; charging happens separately in `_worker_tool_charge`. The
+    lifetime ledger survives parent prompt resets and resumes. Pi checks at
+    pre-mutation only; Codex checks (via `_worker_tool_budget`) and charges
+    at admission. `deny_at_limit=False` pins a ledger without denying, for
+    starts that must permit an already-spent worker to wind down.
     """
     worker = payload.get("agent_id") or payload.get("agentId")
     if not isinstance(worker, str) or not worker.strip():
         return None
     path, lock = _paths(home, "worker-tool-budget:" + worker.strip())
     with _locked(lock):
-        try:
-            ledger = json.loads(path.read_text())
-        except FileNotFoundError:
-            tier = classifier.canonical_worker_name(_agent_type(payload))
-            ledger = {"tier": tier, "limit": classifier.WORKER_TURN_LIMITS.get(
-                tier, min(classifier.WORKER_TURN_LIMITS.values())), "used": 0, "seen": []}
-        except (OSError, json.JSONDecodeError):
-            return _deny("Worker tool-call budget ledger is unreadable or corrupt; report this to the parent without continuing tool calls.", terminal=True)
-        if (not isinstance(ledger, dict) or type(ledger.get("limit")) is not int or
-                ledger["limit"] <= 0 or type(ledger.get("used")) is not int or
-                not 0 <= ledger["used"] <= ledger["limit"] or
-                not isinstance(ledger.get("seen"), list) or
-                not all(isinstance(item, str) for item in ledger["seen"])):
-            return _deny("Worker tool-call budget ledger is invalid; report this to the parent without resetting the budget.", terminal=True)
-        limit = ledger["limit"]
-        if not charge:
-            _save(path, ledger)
-            return None
-        seen = set(ledger["seen"])
-        used = ledger["used"]
+        ledger, denial = _worker_ledger(path, payload, classifier)
+        if denial:
+            return denial
         call_id = payload.get("tool_use_id") or payload.get("toolUseId")
         call_id = call_id.strip() if isinstance(call_id, str) else ""
-        if call_id and call_id in seen:
+        if call_id and call_id in ledger["seen"]:
+            # A duplicate of an already-counted call stays idempotent, even
+            # at the boundary, matching the charge path's dedupe.
             return None
-        if used >= limit:
+        used, limit = ledger["used"], ledger["limit"]
+        if deny_at_limit and used >= limit:
             return _deny(
                 f"Worker tool-call budget exhausted ({used}/{limit}; 0 "
                 "remaining). Do not call any further tools. Output your final "
@@ -814,9 +855,43 @@ def _worker_tool_budget_locked(home: Path, payload: dict[str, Any],
                 "is permitted.",
                 terminal=True,
             )
+        _save(path, ledger)
+    return None
+
+
+def _worker_tool_charge(home: Path, payload: dict[str, Any],
+                        classifier: Any) -> dict[str, Any] | None:
+    """Charge one hook-covered tool call against the lifetime ledger."""
+    try:
+        return _worker_tool_charge_locked(home, payload, classifier)
+    except (OSError, ValueError, TypeError) as error:
+        return _worker_tool_error(error)
+
+
+def _worker_tool_charge_locked(home: Path, payload: dict[str, Any],
+                               classifier: Any) -> dict[str, Any] | None:
+    """Count one covered call; repeated call ids count once.
+
+    Missing call ids count each invocation conservatively. This is the only
+    function that increments the ledger; Pi calls it at post-tool-use, so a
+    call another extension blocked before execution never charges.
+    """
+    worker = payload.get("agent_id") or payload.get("agentId")
+    if not isinstance(worker, str) or not worker.strip():
+        return None
+    path, lock = _paths(home, "worker-tool-budget:" + worker.strip())
+    with _locked(lock):
+        ledger, denial = _worker_ledger(path, payload, classifier)
+        if denial:
+            return denial
+        call_id = payload.get("tool_use_id") or payload.get("toolUseId")
+        call_id = call_id.strip() if isinstance(call_id, str) else ""
+        seen = set(ledger["seen"])
+        if call_id and call_id in seen:
+            return None
         if call_id:
             seen.add(call_id)
-        ledger.update(used=used + 1, seen=sorted(seen))
+        ledger.update(used=ledger["used"] + 1, seen=sorted(seen))
         _save(path, ledger)
     return None
 
@@ -840,18 +915,32 @@ def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None
     session = _session(payload)
     home = _home(host)
     classifier = _classifier(home)
-    if event in {"prompt", "pre-mutation", "turn-stop"} and _is_worker_session(host, payload):
+    if event in {"prompt", "pre-mutation", "turn-stop",
+                 "post-tool-use"} and _is_worker_session(host, payload):
         # Worker activity does not rewrite parent obligations. Tool budgets
         # have their own persistent ledger and never block final completion.
         if event == "prompt":
             return _routing_context("UserPromptSubmit", classifier)
+        if event == "post-tool-use":
+            # Pi only: the call reached its tool_result, so it executed;
+            # charge it here. No feedback -- the call already ran.
+            if host == "pi":
+                _worker_tool_charge(home, payload, classifier)
+            return None
         if event == "pre-mutation":
-            # Codex and Pi have no native per-worker turn limit, so both
-            # enforce the hard hook-covered tool-call budget here.
-            if host in {"codex", "pi"}:
+            # Both enforce the hard hook-covered tool-call budget here, but
+            # Codex charges each attempt at admission (it has no
+            # post-execution hook), while Pi only checks: Pi fires
+            # pre-mutation before other extensions may block the call, and
+            # blocked calls never reach tool_result, so Pi charges there.
+            if host == "codex":
                 denial = _worker_tool_budget(home, payload, classifier)
-                if denial:
-                    return denial
+            elif host == "pi":
+                denial = _worker_tool_check(home, payload, classifier)
+            else:
+                denial = None
+            if denial:
+                return denial
             reason = _spawn_budget_violation(payload, classifier)
             if reason is None and _delegating(payload, classifier):
                 reason = _tier_violation(payload, classifier)
