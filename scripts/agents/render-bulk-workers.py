@@ -130,8 +130,12 @@ def render_pi(body: str, description: str, output: dict[str, Any]) -> str:
         marker,
         "\n## Thinking level\n\n"
         "Pi worker profiles pin no model: this tier inherits the parent's session "
-        "model. Implement the tier's thinking level by applying reasoning effort "
-        f"`{thinking}` throughout the task.\n\n## Host lifecycle\n",
+        "model. Reasoning effort `{thinking}` is this tier's MINIMUM: apply at "
+        "least this level, and if your model's effort ladder differs, choose the "
+        "closest supported level at or above the minimum (see the ADP rules' "
+        "effort-ladder guideline). Never apply less.\n\n## Host lifecycle\n".replace(
+            "{thinking}", thinking
+        ),
     )
     title = output["name"].replace("-", " ").title()
     return (
