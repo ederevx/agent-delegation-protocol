@@ -23,7 +23,8 @@
  *   settings-styled selector that groups entries under Active/Inactive
  *   headers (active first) with no window chrome, plus a borderless
  *   full-screen mouse+keyboard detail viewer; throttled parent updates
- *   (≤4/s)
+ *   (≤4/s); steering Enter while workers are active interrupts the
+ *   workers and delivers the message non-queued before the next LLM call
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -732,6 +733,26 @@ const SubagentParams = Type.Object({
 });
 
 export default function (pi: ExtensionAPI) {
+	// A steering message (typed Enter) while the parent is only waiting on
+	// subagent workers must not sit queued until a long worker finishes:
+	// interrupt the workers (they are resumable; their partial results stay
+	// in the tool result) and re-inject the text as steering, so it is
+	// delivered before the parent's very next LLM call — a non-queued
+	// message even though the session shows "Working". Alt+Enter
+	// (streamingBehavior "followUp") keeps its explicit queue-until-done
+	// meaning, and extension-injected messages pass through untouched.
+	pi.on("input", async (event) => {
+		if (event.source === "extension") return { action: "continue" };
+		if (event.streamingBehavior !== "steer") return { action: "continue" };
+		const active = [...runningSubagents.values()].filter((e) => e.proc);
+		if (active.length === 0) return { action: "continue" };
+		for (const entry of active) {
+			if (entry.proc) killWithEscalation(entry.proc);
+		}
+		pi.sendUserMessage(event.text, { deliverAs: "steer" });
+		return { action: "handled" };
+	});
+
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
