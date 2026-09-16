@@ -46,6 +46,15 @@ $PI_CODING_AGENT_DIR/.delegation-protocol/delegation-enforcer.py
 $PI_CODING_AGENT_DIR/extensions/adp-enforcer.ts
 $PI_CODING_AGENT_DIR/extensions/subagent/index.ts
 $PI_CODING_AGENT_DIR/extensions/subagent/agents.ts
+$PI_CODING_AGENT_DIR/extensions/subagent/constants.ts
+$PI_CODING_AGENT_DIR/extensions/subagent/detail-view.ts
+$PI_CODING_AGENT_DIR/extensions/subagent/dispatch.ts
+$PI_CODING_AGENT_DIR/extensions/subagent/format.ts
+$PI_CODING_AGENT_DIR/extensions/subagent/registry.ts
+$PI_CODING_AGENT_DIR/extensions/subagent/result-views.ts
+$PI_CODING_AGENT_DIR/extensions/subagent/run.ts
+$PI_CODING_AGENT_DIR/extensions/subagent/selector-view.ts
+$PI_CODING_AGENT_DIR/extensions/subagent/types.ts
 $PI_CODING_AGENT_DIR/.delegation-protocol/delegation-classifier.py
 $PI_CODING_AGENT_DIR/.delegation-protocol/hook_adapter.py
 ```
