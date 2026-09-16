@@ -38,7 +38,7 @@ This profile carries a native budget of 32 agentic turns enforced by the ADP sub
 
 ## Thinking level
 
-Pi worker profiles pin no model: this tier inherits the parent's session model. Implement the tier's thinking level by applying reasoning effort `high` throughout the task.
+Pi worker profiles pin no model: this tier inherits the parent's session model. Reasoning effort `high` is this tier's MINIMUM: apply at least this level, and if your model's effort ladder differs, choose the closest supported level at or above the minimum (see the ADP rules' effort-ladder guideline). Never apply less.
 
 ## Host lifecycle
 

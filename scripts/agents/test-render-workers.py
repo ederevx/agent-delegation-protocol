@@ -130,9 +130,12 @@ class WorkerRenderingTests(unittest.TestCase):
                         self.assertNotIn("\nmodel:", frontmatter)
                         self.assertIn(
                             "Pi worker profiles pin no model: this tier inherits "
-                            "the parent's session model. Implement the tier's "
-                            f"thinking level by applying reasoning effort `{thinking}` "
-                            "throughout the task.",
+                            "the parent's session model. Reasoning effort "
+                            f"`{thinking}` is this tier's MINIMUM: apply at least "
+                            "this level, and if your model's effort ladder differs, "
+                            "choose the closest supported level at or above the "
+                            "minimum (see the ADP rules' effort-ladder guideline). "
+                            "Never apply less.",
                             text,
                         )
                     else:

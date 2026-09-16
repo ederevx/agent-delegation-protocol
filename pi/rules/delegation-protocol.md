@@ -46,10 +46,35 @@ as blocked instead of being carried out in the parent.
 
 Pi worker profiles pin no model: every tier inherits the parent's session
 model. The tier ladder is implemented by the worker itself through its
-profile's thinking-level directive — `quick-worker` applies low reasoning
-effort, `bulk-worker` medium, `balanced-worker` high, and `frontier-worker`
-xhigh. Pi has no separate per-agent effort field, so the profile directive is
-the tier effort; the parent uses ordinary session effort.
+profile's thinking-level minimum — `quick-worker` at least low reasoning
+effort, `bulk-worker` at least medium, `balanced-worker` at least high, and
+`frontier-worker` at least xhigh. Pi has no separate per-agent effort field,
+so the profile directive is the tier minimum; the parent uses ordinary
+session effort.
+
+### Effort ladders and tier minimums
+
+Reasoning effort is a tier minimum, not a fixed string: hosts expose
+different effort ladders, and a worker maps its tier minimum onto the ladder
+its model actually supports.
+
+| Host | Effort ladder |
+| --- | --- |
+| Claude (`effort` field, `--effort`) | low, medium, high, xhigh, max |
+| Codex (`model_reasoning_effort`) | minimal, low, medium, high, xhigh, max |
+| OpenRouter (`reasoning.effort`) | per-model option sets, below |
+
+Common OpenRouter option sets: low | medium | high; minimal | low | medium |
+high; low | medium | high | xhigh; low | medium | high | xhigh | none;
+max | xhigh | high | medium | low | none; max | high | low; plus coarser
+single-model variants (high-only, high | none).
+
+Tier minimums: `quick-worker` >= low, `bulk-worker` >= medium,
+`balanced-worker` >= high, `frontier-worker` >= xhigh. Workers pick the
+closest supported level at or above their tier minimum, never below it.
+Levels above xhigh (e.g. max) belong to frontier work; a coarser ladder maps
+the minimum to the nearest supported level at or above it (a low/high/max
+model applies high for bulk).
 
 ## Recursive delegation
 
