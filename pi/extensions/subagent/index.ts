@@ -19,11 +19,11 @@
  *   /subagents command; spawn notifications; tool_result_end dead-branch
  *   removal; expanded renderer restored with turn-budget markers; parallel
  *   fan-out (MAX_PARALLEL_TASKS) and child concurrency (MAX_CONCURRENCY)
- *   raised to 10 to match the ADP active-worker cap; /subagents UI polish
- *   (window borders + titles for both overlays, scrollable detail view,
- *   full word-wrapped text in the detail view instead of slice() previews);
- *   settings-styled /subagents selector, full-screen mouse+keyboard detail
- *   viewer, throttled parent updates (≤4/s)
+ *   raised to 10 to match the ADP active-worker cap; /subagents UI: a
+ *   settings-styled selector that groups entries under Active/Inactive
+ *   headers (active first) with no window chrome, plus a borderless
+ *   full-screen mouse+keyboard detail viewer; throttled parent updates
+ *   (≤4/s)
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -39,17 +39,19 @@ import {
 	DynamicBorder,
 	getAgentDir,
 	getMarkdownTheme,
+	getSettingsListTheme,
 	withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
 import {
 	Container,
 	Markdown,
 	matchesKey,
-	type SelectItem,
-	SelectList,
 	Spacer,
 	Text,
 	type TuiMouseEvent,
+	truncateToWidth,
+	visibleWidth,
+	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
@@ -1498,7 +1500,7 @@ export default function (pi: ExtensionAPI) {
 						let followTail = true;
 						let renderedLines = 0;
 
-						const viewport = () => Math.max(4, tui.terminal.rows - 4);
+						const viewport = () => Math.max(4, tui.terminal.rows - 2);
 
 						const listener = () => {
 							content = buildContent();
@@ -1506,8 +1508,6 @@ export default function (pi: ExtensionAPI) {
 						};
 						entry.listeners.add(listener);
 						unsubscribe = () => entry.listeners.delete(listener);
-
-						const border = new DynamicBorder((s: string) => theme.fg("accent", s));
 
 						return {
 							render: (width: number) => {
@@ -1524,15 +1524,10 @@ export default function (pi: ExtensionAPI) {
 									(scrolling
 										? ` · lines ${scrollOffset + 1}–${Math.min(scrollOffset + vp, lines.length)}/${lines.length}`
 										: "");
-								const title =
-									theme.fg("accent", theme.bold(`#${entry.id} ${entry.agent}`)) +
-									theme.fg("muted", " — activity");
+								// Settings hint style: dim, two-space indent, no box.
 								return [
-									...border.render(width),
-									...new Text(title, 1, 0).render(width),
 									...window,
-									...new Text(theme.fg("dim", footer), 1, 0).render(width),
-									...border.render(width),
+									...new Text(theme.fg("dim", `  ${footer}`), 0, 0).render(width),
 								];
 							},
 							invalidate: () => content.invalidate(),
@@ -1593,66 +1588,142 @@ export default function (pi: ExtensionAPI) {
 				});
 			};
 
+			// Settings-styled list: border / body / border with the settings row
+			// layout (→ cursor, aligned label column, muted value column, dim
+			// description of the selected row, dim hint footer). Entries group
+			// under Active/Inactive headers, active first; windowing over the
+			// flat entry list mirrors SettingsList.getVisibleRange.
 			const openList = (): Promise<RunningSubagent | null> =>
 				ui.custom<RunningSubagent | null>(
 					(tui, theme, _kb, done) => {
-						const entries: RunningSubagent[] = [
-							...getRunningSubagents(),
-							...getRecentSubagents(),
-						];
-						if (entries.length === 0) {
-							const container = new Container();
-							container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
-							container.addChild(new Text(theme.fg("accent", theme.bold("Subagents")), 1, 0));
-							container.addChild(new Text(theme.fg("muted", "No subagents spawned this session."), 1, 1));
-							container.addChild(new Text(theme.fg("dim", "esc exit"), 1, 0));
-							container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+						const st = getSettingsListTheme();
+						const border = new DynamicBorder((s: string) => theme.fg("border", s));
+						const groups = [
+							{ title: "Active", entries: [...getRunningSubagents()] },
+							{ title: "Inactive", entries: [...getRecentSubagents()] },
+						].filter((g) => g.entries.length > 0);
+						const rows = groups.flatMap((g) =>
+							g.entries.map((entry) => ({
+								entry,
+								groupTitle: g.title,
+								groupCount: g.entries.length,
+							})),
+						);
+
+						const empty = new Container();
+						empty.addChild(new DynamicBorder((s: string) => theme.fg("border", s)));
+						empty.addChild(new Text(st.hint("  No subagents spawned this session."), 0, 0));
+						empty.addChild(new DynamicBorder((s: string) => theme.fg("border", s)));
+						if (rows.length === 0) {
 							return {
-								render: (width: number) => container.render(width),
-								invalidate: () => container.invalidate(),
+								render: (width: number) => empty.render(width),
+								invalidate: () => empty.invalidate(),
 								handleInput: (data: string) => {
 									if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) done(null);
 								},
 							};
 						}
 
-						const items: SelectItem[] = entries.map((entry) => {
-							const taskFlat = entry.task.replace(/\s+/g, " ").trim();
-							return {
-								value: String(entry.id),
-								label: `#${entry.id} ${entry.agent}${entry.tier ? ` (${entry.tier})` : ""} ${statusOf(entry)}`,
-								description: taskFlat.length > 50 ? `${taskFlat.slice(0, 50)}...` : taskFlat,
-							};
-						});
-						const container = new Container();
-						container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
-						container.addChild(new Text(theme.fg("accent", theme.bold("Subagents")), 0, 0));
-						const selectList = new SelectList(items, Math.min(items.length, 10), {
-							// Settings palette: literal two-char arrow prefix, accent
-							// selected row, dim descriptions/scroll info. In this
-							// pi-tui version the component already hardcodes the
-							// "→ " prefix; selectedPrefix stays for the interface.
-							selectedPrefix: (t) => theme.fg("accent", "→ "),
-							selectedText: (t) => theme.fg("accent", t),
-							description: (t) => theme.fg("dim", t),
-							scrollInfo: (t) => theme.fg("dim", t),
-							noMatch: (t) => theme.fg("warning", t),
-						});
-						selectList.onSelect = (item) => {
-							const entry = entries.find((e) => String(e.id) === item.value);
-							if (entry) done(entry);
+						const labelOf = (entry: RunningSubagent): string =>
+							`#${entry.id} ${entry.agent}${entry.tier ? ` (${entry.tier})` : ""}`;
+						const maxLabelWidth = Math.min(
+							36,
+							Math.max(...rows.map((r) => visibleWidth(labelOf(r.entry)))),
+						);
+
+						const maxVisible = Math.min(rows.length, 10);
+						let selected = 0;
+						// y offsets of the entry rows from the last render, for mouse;
+						// +1 because the component's top border shifts event.y down.
+						let rowMap: { y: number; index: number }[] = [];
+
+						const renderBody = (width: number): string[] => {
+							const startIndex = Math.max(
+								0,
+								Math.min(selected - Math.floor(maxVisible / 2), rows.length - maxVisible),
+							);
+							const endIndex = Math.min(startIndex + maxVisible, rows.length);
+							const lines: string[] = [];
+							rowMap = [];
+							let prevGroup = "";
+							for (let i = startIndex; i < endIndex; i++) {
+								const row = rows[i];
+								if (row.groupTitle !== prevGroup) {
+									if (prevGroup !== "") lines.push("");
+									lines.push(
+										truncateToWidth(
+											theme.fg("accent", theme.bold(`${row.groupTitle} (${row.groupCount})`)),
+											width,
+										),
+									);
+									prevGroup = row.groupTitle;
+								}
+								const isSelected = i === selected;
+								const prefix = isSelected ? st.cursor : "  ";
+								const label = labelOf(row.entry);
+								const labelPadded = label + " ".repeat(Math.max(0, maxLabelWidth - visibleWidth(label)));
+								const separator = "  ";
+								const usedWidth = visibleWidth(prefix) + maxLabelWidth + visibleWidth(separator);
+								const valueMaxWidth = Math.max(0, width - usedWidth - 2);
+								const valueText = st.value(truncateToWidth(statusOf(row.entry), valueMaxWidth, ""), isSelected);
+								lines.push(
+									truncateToWidth(prefix + st.label(labelPadded, isSelected) + separator + valueText, width),
+								);
+								rowMap.push({ y: lines.length, index: i });
+							}
+							if (startIndex > 0 || endIndex < rows.length) {
+								lines.push(st.hint(truncateToWidth(`  (${selected + 1}/${rows.length})`, width - 2, "")));
+							}
+							const taskFlat = rows[selected].entry.task.replace(/\s+/g, " ").trim();
+							if (taskFlat) {
+								lines.push("");
+								for (const line of wrapTextWithAnsi(taskFlat, Math.max(8, width - 4))) {
+									lines.push(st.description(`  ${line}`));
+								}
+							}
+							lines.push("");
+							lines.push(
+								st.hint(truncateToWidth("  ↑↓ navigate · Enter/Space to open · Esc to cancel", width, "")),
+							);
+							return lines;
 						};
-						selectList.onCancel = () => done(null);
-						container.addChild(selectList);
-						container.addChild(new Text(theme.fg("dim", "↑↓ navigate · enter open · esc exit"), 1, 0));
-						container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
 
 						return {
-							render: (width: number) => container.render(width),
-							invalidate: () => container.invalidate(),
+							render: (width: number) => [
+								...border.render(width),
+								...renderBody(width),
+								...border.render(width),
+							],
+							invalidate: () => {},
 							handleInput: (data: string) => {
-								selectList.handleInput(data);
+								if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+									done(null);
+									return;
+								}
+								if (matchesKey(data, "up")) selected = (selected - 1 + rows.length) % rows.length;
+								else if (matchesKey(data, "down")) selected = (selected + 1) % rows.length;
+								else if (matchesKey(data, "enter") || data === " ") {
+									done(rows[selected].entry);
+									return;
+								} else return;
 								tui.requestRender();
+							},
+							handleMouse: (event: TuiMouseEvent) => {
+								if (event.type === "wheel") {
+									// pi-tui emits a negative wheelDelta on wheel-up.
+									selected =
+										(selected + (event.wheelDelta && event.wheelDelta < 0 ? -1 : 1) + rows.length) % rows.length;
+								} else if (event.type === "press" || event.type === "click") {
+									const row = rowMap.find((r) => r.y === event.y);
+									if (!row) return { handled: false };
+									selected = row.index;
+									if (event.type === "click") {
+										done(rows[selected].entry);
+										return { handled: true };
+									}
+								} else return { handled: false };
+								tui.requestRender();
+								return { handled: true };
 							},
 						};
 					},
