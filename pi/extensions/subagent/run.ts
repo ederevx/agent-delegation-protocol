@@ -281,12 +281,14 @@ export class SubagentRun {
 			this.entry.proc = this.proc;
 			const proc = this.proc;
 
-			// Agent, tier, and a short task-head preview only; mode and turn
-			// budget ride along when known at spawn time. Never the full body.
+			// Full informative set the tool row used to show: agent, tier,
+			// mode, turn budget, and a task-head preview (the single-agent
+			// call slot now renders empty, so this notification is the sole
+			// preview carrier). Never the full body.
 			this.notifySpawn?.(
 				`Subagent spawned: ${agent.name}${this.result.tier ? ` (${this.result.tier})` : ""} · ${this.mode}` +
 					(agent.maxTurns ? ` · turns≤${agent.maxTurns}` : "") +
-					` — ${this.task.length > 60 ? `${this.task.slice(0, 60)}...` : this.task}`,
+					` — ${this.task.length > 80 ? `${this.task.slice(0, 80)}...` : this.task}`,
 			);
 
 			proc.stdout?.on("data", (data) => {

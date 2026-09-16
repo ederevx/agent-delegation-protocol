@@ -5,7 +5,7 @@
  * `ctx.ui.custom()` component, so it integrates with the TUI (editor dock)
  * instead of opening a floating window. Border / body / border with the
  * settings row layout (→ cursor, aligned label column, muted value column,
- * dim description of the selected row, dim hint footer). Entries group
+ * dim hint footer). Entries group
  * under Active/Inactive headers, active first; windowing over the flat
  * entry list mirrors SettingsList.getVisibleRange. Mouse+keyboard.
  *
@@ -26,7 +26,6 @@ import {
 	truncateToWidth,
 	type TuiMouseEventResult,
 	visibleWidth,
-	wrapTextWithAnsi,
 	type Component,
 	type TUI,
 	type TuiMouseEvent,
@@ -175,13 +174,6 @@ export class SubagentSelectorView {
 		}
 		if (startIndex > 0 || endIndex < this.rows.length) {
 			lines.push(this.st.hint(truncateToWidth(`  (${this.selected + 1}/${this.rows.length})`, width - 2, "")));
-		}
-		const taskFlat = this.rows[this.selected].entry.task.replace(/\s+/g, " ").trim();
-		if (taskFlat) {
-			lines.push("");
-			for (const line of wrapTextWithAnsi(taskFlat, Math.max(8, width - 4))) {
-				lines.push(this.st.description(`  ${line}`));
-			}
 		}
 		lines.push("");
 		lines.push(

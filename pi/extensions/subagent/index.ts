@@ -27,7 +27,16 @@
  *   headers (active first); the detail viewer replaces the entire TUI in
  *   fullscreen mode via the viewport TUI's setLayoutRoot (own full-screen
  *   root, previous root restored on close) and dock-integrates in regular
- *   mode; mouse+keyboard throughout
+ *   mode; mouse+keyboard throughout; the detail viewer renders history-viewer
+ *   style: each item flattened once per width into a cached line array
+ *   (listener events just mark it dirty; frames emit only a bounded window
+ *   slice) under a title line carrying the scroll position, with a dim
+ *   border rule and word-wrapped instructions pinned to the bottom of an
+ *   exactly-rows-line frame (shared chrome in viewer-chrome.ts); the
+ *   selector drops the selected-entry task preview (it garbled with long
+ *   logs); the spawn notification carries the full informative set (agent,
+ *   tier, mode, turn budget, task preview) and the single-agent call slot
+ *   renders empty so it no longer duplicates the notification
  *
  * This file is only the wiring: schema, tool, command, and steering. The
  * logic is split by responsibility — see types.ts, registry.ts, run.ts,
@@ -145,8 +154,8 @@ class SubagentToolHandler {
 		return dispatch.execute(params, signal, onUpdate);
 	}
 
-	renderCall(args: Record<string, any>, theme: any) {
-		return this.views.call(args, theme);
+	renderCall(args: Record<string, any>, theme: any, context: any) {
+		return this.views.call(args, theme, context);
 	}
 
 	renderResult(
@@ -253,8 +262,8 @@ class SubagentExtension {
 		return this.tool.execute(toolCallId, params, signal, onUpdate, ctx);
 	}
 
-	renderCall(args: Record<string, any>, theme: any) {
-		return this.tool.renderCall(args, theme);
+	renderCall(args: Record<string, any>, theme: any, context: any) {
+		return this.tool.renderCall(args, theme, context);
 	}
 
 	renderResult(result: AgentToolResult<SubagentDetails>, expanded: boolean, theme: any) {
@@ -296,8 +305,8 @@ export default function (pi: ExtensionAPI) {
 			);
 		},
 
-		renderCall(args, theme, _context) {
-			return app.renderCall(args, theme);
+		renderCall(args, theme, context) {
+			return app.renderCall(args, theme, context);
 		},
 
 		renderResult(result, { expanded }, theme, _context) {
