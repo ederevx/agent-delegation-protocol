@@ -21,7 +21,9 @@
  *   fan-out (MAX_PARALLEL_TASKS) and child concurrency (MAX_CONCURRENCY)
  *   raised to 10 to match the ADP active-worker cap; /subagents UI polish
  *   (window borders + titles for both overlays, scrollable detail view,
- *   full word-wrapped text in the detail view instead of slice() previews)
+ *   full word-wrapped text in the detail view instead of slice() previews);
+ *   settings-styled /subagents selector, full-screen mouse+keyboard detail
+ *   viewer, throttled parent updates (≤4/s)
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -47,6 +49,7 @@ import {
 	SelectList,
 	Spacer,
 	Text,
+	type TuiMouseEvent,
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
@@ -466,6 +469,22 @@ async function runSingleAgent(
 	// Registry entry and listener notification. The entry carries the live
 	// result object, so a /subagents-style consumer sees stream updates.
 	let entry: RunningSubagent | null = null;
+	// Parent-facing onUpdate is throttled to at most one send per interval so
+	// a fast stream cannot flood the parent with partial results. One
+	// timestamp, no timers: emits inside the window are skipped and the next
+	// message_end after it elapses carries the latest state (trailing edge).
+	// The /subagents live listeners (notifyListeners) stay unthrottled — they
+	// only re-render an overlay. finishEntry flushes unconditionally so the
+	// final state is never delayed.
+	const PARENT_UPDATE_INTERVAL_MS = 250;
+	let lastParentEmitAt = 0;
+	const emitParentUpdate = () => {
+		if (!onUpdate) return;
+		onUpdate({
+			content: [{ type: "text", text: getFinalOutput(currentResult.messages) || "(running...)" }],
+			details: makeDetails([currentResult]),
+		});
+	};
 	// Close/error path: move the entry out of `running` into the recent ring,
 	// stamp completion time, strip the child-process handle, and wake any
 	// listeners watching the live result.
@@ -485,6 +504,9 @@ async function runSingleAgent(
 			}
 		}
 		entry = null;
+		// Immediate final flush, bypassing the throttle window.
+		lastParentEmitAt = 0;
+		emitParentUpdate();
 	};
 	const notifyListeners = () => {
 		if (!entry) return;
@@ -498,13 +520,11 @@ async function runSingleAgent(
 	};
 
 	const emitUpdate = () => {
-		if (onUpdate) {
-			onUpdate({
-				content: [{ type: "text", text: getFinalOutput(currentResult.messages) || "(running...)" }],
-				details: makeDetails([currentResult]),
-			});
-		}
 		notifyListeners();
+		const now = Date.now();
+		if (now - lastParentEmitAt < PARENT_UPDATE_INTERVAL_MS) return;
+		lastParentEmitAt = now;
+		emitParentUpdate();
 	};
 
 	try {
@@ -1476,8 +1496,9 @@ export default function (pi: ExtensionAPI) {
 						let content = buildContent();
 						let scrollOffset = 0;
 						let followTail = true;
+						let renderedLines = 0;
 
-						const viewport = () => Math.max(4, tui.terminal.rows - 6);
+						const viewport = () => Math.max(4, tui.terminal.rows - 4);
 
 						const listener = () => {
 							content = buildContent();
@@ -1495,10 +1516,11 @@ export default function (pi: ExtensionAPI) {
 								const maxOffset = Math.max(0, lines.length - vp);
 								if (followTail) scrollOffset = maxOffset;
 								scrollOffset = Math.min(Math.max(0, scrollOffset), maxOffset);
+								renderedLines = lines.length;
 								const window = lines.slice(scrollOffset, scrollOffset + vp);
 								const scrolling = maxOffset > 0;
 								const footer =
-									"↑↓/PgUp/PgDn scroll · esc back" +
+									"↑↓/PgUp/PgDn scroll · wheel scroll · esc back" +
 									(scrolling
 										? ` · lines ${scrollOffset + 1}–${Math.min(scrollOffset + vp, lines.length)}/${lines.length}`
 										: "");
@@ -1545,9 +1567,26 @@ export default function (pi: ExtensionAPI) {
 								}
 								tui.requestRender();
 							},
+							handleMouse: (event: TuiMouseEvent) => {
+								if (event.type !== "wheel") return;
+								// pi-tui emits a negative wheelDelta on wheel-up
+								// ("Negative values scroll up"), so adding it moves
+								// the window toward earlier lines; wheel-up unpins
+								// the tail, wheel-down re-pins at the bottom.
+								scrollOffset += event.wheelDelta ?? 0;
+								const vp = viewport();
+								const maxOffset = Math.max(0, renderedLines - vp);
+								scrollOffset = Math.min(Math.max(0, scrollOffset), maxOffset);
+								followTail = scrollOffset >= maxOffset;
+								tui.requestRender();
+								return { handled: true };
+							},
 						};
 					},
-					{ overlay: true },
+					{
+						overlay: true,
+						overlayOptions: { anchor: "center", width: "100%", maxHeight: "100%", margin: 0 },
+					},
 				).finally(() => {
 					unsubscribe?.();
 					unsubscribe = undefined;
@@ -1589,9 +1628,13 @@ export default function (pi: ExtensionAPI) {
 						container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
 						container.addChild(new Text(theme.fg("accent", theme.bold("Subagents")), 0, 0));
 						const selectList = new SelectList(items, Math.min(items.length, 10), {
-							selectedPrefix: (t) => theme.fg("accent", t),
+							// Settings palette: literal two-char arrow prefix, accent
+							// selected row, dim descriptions/scroll info. In this
+							// pi-tui version the component already hardcodes the
+							// "→ " prefix; selectedPrefix stays for the interface.
+							selectedPrefix: (t) => theme.fg("accent", "→ "),
 							selectedText: (t) => theme.fg("accent", t),
-							description: (t) => theme.fg("muted", t),
+							description: (t) => theme.fg("dim", t),
 							scrollInfo: (t) => theme.fg("dim", t),
 							noMatch: (t) => theme.fg("warning", t),
 						});
