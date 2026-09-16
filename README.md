@@ -71,11 +71,15 @@ start until its native stop, plus spawns admitted but not yet started. Idle
 workers do not count, including one that has finished and is held or
 resumable; it counts again only while a resume is running.
 
-Pi has no native per-worker turn limit either: the same numbers serve as an
-advisory agentic-turn budget and a separate hard budget of tool-call
-attempts per identified worker lifetime, enforced by the Pi enforcer
-extension through the shared adapter. One `subagent` tool call holds one
-active slot, whatever it fans out to internally.
+Pi enforces the tier budget natively: each Pi worker profile's frontmatter
+carries a `maxTurns` agentic-turn budget that the ADP subagent extension
+applies at spawn, counting model rounds in the child's JSON stream. At the
+limit the extension appends a wind-down section telling the worker to
+deliver its final report and stop, hard-stops the child with SIGTERM, and
+escalates to SIGKILL after 5 s. The Pi enforcer extension separately keeps
+a hook-covered tool-call ledger per identified worker lifetime as defense
+in depth. One `subagent` tool call holds one active slot, whatever it fans
+out to internally.
 
 An agentic turn is a model round within a worker's task, not the entire task,
 a parent prompt, or an individual tool call. One turn can produce several
@@ -117,6 +121,19 @@ Codex, Claude, and Pi installations are independent. All use the same core
 classifier and hook adapter. Manifest release metadata is retained for legacy
 compatibility but is ignored by the runtime; native host lifecycle behavior
 continues to determine worker completion and closure.
+
+## Vendored components
+
+The Pi subagent extension (`pi/extensions/subagent/`) and the four hand-written
+agent profiles (`pi/agents/planner.md`, `reviewer.md`, `scout.md`, `worker.md`)
+are vendored from @earendil-works/pi-coding-agent `examples/extensions/subagent`
+(v0.85.1, MIT) and maintained by this repository. Every adaptation (model
+frontmatter removed for host-neutral deployment, native `maxTurns` turn
+budgets, one-line TUI output) is recorded in each file's provenance header;
+generated worker profiles stay generated and are not hand-edited. The
+extension's `/subagents` command opens a live view in the Pi TUI: it lists
+running and recently finished workers with status and turn usage, and
+opening an entry streams its task, transcript, and final report.
 
 ## Delegation evidence
 

@@ -243,8 +243,10 @@ export default function (pi: ExtensionAPI) {
 		}
 		// Parent side: an admitted spawn consumes its reservation at once,
 		// because Pi has no native SubagentStart event -- the subagent tool
-		// call itself is the start. One active slot per subagent tool call;
-		// parallel tasks inside one call share that call's slot.
+		// call itself is the start. Accounting is per task: a parallel
+		// `tasks` call takes one active slot per task against the session
+		// cap, so an N-task fan-out holds N slots, while a sequential
+		// `chain` holds a single slot no matter how many steps it runs.
 		if (!worker && event.toolName === "subagent") {
 			await invoke(ctx, "worker-start", {
 				session_id: sessionId(ctx),
@@ -255,7 +257,11 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_result", async (event, ctx) => {
-		if (worker || event.toolName !== "subagent") return;
+		// Nested worker spawns must also complete: a worker that fans out
+		// reserves per-task slots, and without the completion event those
+		// slots leak until the stale sweep. Slot bookkeeping is not a parent
+		// obligation, so workers deliver it too.
+		if (event.toolName !== "subagent") return;
 		await invoke(ctx, "worker-complete", {
 			session_id: sessionId(ctx),
 			agent_id: event.toolCallId,

@@ -1,8 +1,11 @@
 /**
  * Agent discovery and configuration
  *
- * Vendored from @earendil-works/pi-coding-agent examples/extensions/subagent
- * (version 0.85.1, MIT); maintained by the Agent Delegation Protocol.
+ * Vendored from: @earendil-works/pi-coding-agent v0.85.1 (examples/extensions/subagent, MIT)
+ * Upstream: https://www.npmjs.com/package/@earendil-works/pi-coding-agent
+ * Maintained by: Agent Delegation Protocol
+ * Local modifications: maxTurns turn budgets; child registry + /subagents command;
+ *   spawn notifications; tool_result_end dead-branch removal
  */
 
 import * as fs from "node:fs";
@@ -16,6 +19,7 @@ export interface AgentConfig {
 	description: string;
 	tools?: string[];
 	model?: string;
+	maxTurns?: number;
 	systemPrompt: string;
 	source: "user" | "project";
 	filePath: string;
@@ -39,6 +43,7 @@ type AgentFrontmatter = {
 	description?: unknown;
 	tools?: unknown;
 	model?: unknown;
+	maxTurns?: unknown;
 };
 
 /**
@@ -60,6 +65,15 @@ function parseToolList(value: unknown): string[] | undefined {
 		.map((t) => t.trim())
 		.filter(Boolean);
 	return tools.length > 0 ? tools : undefined;
+}
+
+/**
+ * Normalize a frontmatter `maxTurns` value to a positive integer turn budget.
+ * Anything else (a float, zero, a negative number, a string) is omitted rather
+ * than throwing, for the same reason as `parseToolList` above.
+ */
+function parseMaxTurns(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
 function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig[] {
@@ -99,6 +113,7 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
 			description: frontmatter.description,
 			tools: parseToolList(frontmatter.tools),
 			model: typeof frontmatter.model === "string" ? frontmatter.model : undefined,
+			maxTurns: parseMaxTurns(frontmatter.maxTurns),
 			systemPrompt: body,
 			source,
 			filePath,
@@ -149,12 +164,3 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 	return { agents: Array.from(agentMap.values()), projectAgentsDir };
 }
 
-export function formatAgentList(agents: AgentConfig[], maxItems: number): { text: string; remaining: number } {
-	if (agents.length === 0) return { text: "none", remaining: 0 };
-	const listed = agents.slice(0, maxItems);
-	const remaining = agents.length - listed.length;
-	return {
-		text: listed.map((a) => `${a.name} (${a.source}): ${a.description}`).join("; "),
-		remaining,
-	};
-}

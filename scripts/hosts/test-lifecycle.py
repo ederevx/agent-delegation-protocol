@@ -6,6 +6,7 @@ import tempfile
 import types
 from pathlib import Path
 
+import hook_adapter
 from hook_adapter import (
     LegacyLockLayoutError,
     _classifier,
@@ -180,10 +181,6 @@ def main() -> None:
     test_legacy_locks_fail_closed_with_actionable_feedback()
     test_exhausted_budget_denies_with_wind_down_order()
     print("Host lock tests: PASS")
-
-
-if __name__ == "__main__":
-    main()
 
 
 def test_exhausted_budget_denies_with_wind_down_order() -> None:
@@ -367,7 +364,8 @@ def test_fresh_workers_still_count_against_the_cap() -> None:
             })
             body = denied["hookSpecificOutput"]
             assert body["permissionDecision"] == "deny", body
-            assert "Active worker cap reached" in body["permissionDecisionReason"]
+            assert ("Active worker cap would be exceeded"
+                    in body["permissionDecisionReason"])
             state = _json.loads(path.read_text())
             assert len(state["concurrent"]) == cap
             assert "spawn-2" not in state["pending_spawns"]
@@ -402,7 +400,10 @@ def test_schema2_state_migrates_and_stale_entries_expire() -> None:
             })
             state = _json.loads(path.read_text())
             assert state["schema_version"] == 3
-            assert state["concurrent"] == [{"id": "crashed-worker", "started_at": 0.0}]
+            # A non-delegating event normalizes the migrated entry with the
+            # default fan-out of one slot.
+            assert state["concurrent"] == [
+                {"id": "crashed-worker", "started_at": 0.0, "fan_out": 1}]
             # The migrated entry is older than the ceiling, so a spawn attempt
             # sweeps it instead of counting it against the cap.
             denied = run("codex", "pre-mutation", {
@@ -420,6 +421,246 @@ def test_schema2_state_migrates_and_stale_entries_expire() -> None:
                 os.environ["CODEX_HOME"] = previous_home
 
 
+def test_parallel_fanout_reserves_and_releases_per_task_slots() -> None:
+    """A 3-task fan-out holds 3 slots; over a cap of 3 a 4th spawn is denied."""
+    import json as _json
+
+    with tempfile.TemporaryDirectory(prefix="protocol-fanout-") as raw:
+        home = Path(raw)
+        previous_home = os.environ.get("PI_CODING_AGENT_DIR")
+        os.environ["PI_CODING_AGENT_DIR"] = str(home)
+        real_classifier_loader = hook_adapter._classifier
+        # A cap of 3 keeps the fan-out arithmetic small; run() re-loads the
+        # classifier for every event, so the loader itself is patched.
+        classifier = _classifier(home)
+        classifier.MAX_ACTIVE_WORKERS = 3
+        hook_adapter._classifier = lambda _home: classifier
+        try:
+            path, _ = _paths(home, "fanout-session")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fan_input = {
+                "agent": "bulk-worker", "subagent_type": "bulk-worker",
+                "tasks": [{"agent": "bulk-worker", "task": f"t{n}"}
+                          for n in range(3)],
+            }
+            admitted = run("pi", "pre-mutation", {
+                "session_id": "fanout-session", "tool_name": "subagent",
+                "tool_use_id": "fan-1", "tool_input": fan_input,
+            })
+            assert admitted is None, admitted
+            state = _json.loads(path.read_text())
+            # The admit-time reservation carries the whole fan-out footprint.
+            assert state["pending_spawns"] == [{"id": "fan-1", "fan_out": 3}]
+            # The start consumes the reservation and takes all three slots.
+            run("pi", "worker-start", {
+                "session_id": "fanout-session",
+                "agent_id": "fan-1", "tool_use_id": "fan-1",
+            })
+            state = _json.loads(path.read_text())
+            assert state["pending_spawns"] == []
+            assert state["concurrent"] == [{
+                "id": "fan-1",
+                "started_at": state["concurrent"][0]["started_at"],
+                "fan_out": 3,
+            }]
+            assert state["peak_active"] == 3
+            # A further single spawn would exceed the cap of 3.
+            denied = run("pi", "pre-mutation", {
+                "session_id": "fanout-session", "tool_name": "subagent",
+                "tool_use_id": "fan-2",
+                "tool_input": {"agent": "bulk-worker",
+                               "subagent_type": "bulk-worker"},
+            })
+            body = denied["hookSpecificOutput"]
+            assert body["permissionDecision"] == "deny", body
+            # The cap is not yet reached -- admitting this call would exceed
+            # it -- and the denial names both the slots in use and the
+            # requested footprint.
+            assert body["permissionDecisionReason"] == (
+                "Active worker cap would be exceeded (3/3 slots in use, 1 "
+                "more requested); wait for running workers to finish or use "
+                "a smaller fan-out.")
+            # Completion releases the whole fan-out record at once.
+            run("pi", "worker-complete", {
+                "session_id": "fanout-session",
+                "agent_id": "fan-1", "tool_use_id": "fan-1",
+            })
+            state = _json.loads(path.read_text())
+            assert state["concurrent"] == []
+            retried = run("pi", "pre-mutation", {
+                "session_id": "fanout-session", "tool_name": "subagent",
+                "tool_use_id": "fan-2",
+                "tool_input": {"agent": "bulk-worker",
+                               "subagent_type": "bulk-worker"},
+            })
+            assert retried is None, retried
+        finally:
+            hook_adapter._classifier = real_classifier_loader
+            if previous_home is None:
+                os.environ.pop("PI_CODING_AGENT_DIR", None)
+            else:
+                os.environ["PI_CODING_AGENT_DIR"] = previous_home
+
+
+def test_fanout_replay_reuses_its_reservation() -> None:
+    """A repeated 3-task fan-out delivery is the same spawn, not a new one."""
+    import json as _json
+
+    with tempfile.TemporaryDirectory(prefix="protocol-fanout-replay-") as raw:
+        home = Path(raw)
+        previous_home = os.environ.get("PI_CODING_AGENT_DIR")
+        os.environ["PI_CODING_AGENT_DIR"] = str(home)
+        real_classifier_loader = hook_adapter._classifier
+        # A cap of exactly the fan-out size means a replay that fails to
+        # match its existing reservation would be falsely denied for cap,
+        # so any duplicate reservation or false denial fails the test.
+        classifier = _classifier(home)
+        classifier.MAX_ACTIVE_WORKERS = 3
+        hook_adapter._classifier = lambda _home: classifier
+        try:
+            path, _ = _paths(home, "replay-session")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "session_id": "replay-session", "tool_name": "subagent",
+                "tool_use_id": "fan-replay-1",
+                "tool_input": {
+                    "agent": "bulk-worker", "subagent_type": "bulk-worker",
+                    "tasks": [{"agent": "bulk-worker", "task": f"t{n}"}
+                              for n in range(3)],
+                },
+            }
+            assert run("pi", "pre-mutation", payload) is None
+            # The replayed delivery is recognized as the reservation it
+            # already holds: admitted again, one 3-slot record, not two.
+            assert run("pi", "pre-mutation", payload) is None
+            state = _json.loads(path.read_text())
+            assert state["pending_spawns"] == [
+                {"id": "fan-replay-1", "fan_out": 3}]
+            assert hook_adapter._ledger_slots(
+                state["pending_spawns"]) == 3
+            # The start consumes the reservation once, taking all 3 slots.
+            run("pi", "worker-start", {
+                "session_id": "replay-session",
+                "agent_id": "fan-replay-1", "tool_use_id": "fan-replay-1",
+            })
+            state = _json.loads(path.read_text())
+            assert state["pending_spawns"] == []
+            assert state["concurrent"] == [{
+                "id": "fan-replay-1",
+                "started_at": state["concurrent"][0]["started_at"],
+                "fan_out": 3,
+            }]
+        finally:
+            hook_adapter._classifier = real_classifier_loader
+            if previous_home is None:
+                os.environ.pop("PI_CODING_AGENT_DIR", None)
+            else:
+                os.environ["PI_CODING_AGENT_DIR"] = previous_home
+
+
+def test_chain_call_reserves_a_single_slot() -> None:
+    """A chain runs its steps sequentially, so it reserves exactly 1 slot."""
+    import json as _json
+
+    with tempfile.TemporaryDirectory(prefix="protocol-chain-") as raw:
+        home = Path(raw)
+        previous_home = os.environ.get("PI_CODING_AGENT_DIR")
+        os.environ["PI_CODING_AGENT_DIR"] = str(home)
+        real_classifier_loader = hook_adapter._classifier
+        classifier = _classifier(home)
+        classifier.MAX_ACTIVE_WORKERS = 3
+        hook_adapter._classifier = lambda _home: classifier
+        try:
+            path, _ = _paths(home, "chain-session")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            chain_input = {
+                "agent": "bulk-worker", "subagent_type": "bulk-worker",
+                "chain": [{"agent": "bulk-worker", "task": f"step{n}"}
+                          for n in range(5)],
+            }
+            admitted = run("pi", "pre-mutation", {
+                "session_id": "chain-session", "tool_name": "subagent",
+                "tool_use_id": "chain-1", "tool_input": chain_input,
+            })
+            # Five sequential steps fit under a cap of 3: a chain charges
+            # one slot, not one per step.
+            assert admitted is None, admitted
+            state = _json.loads(path.read_text())
+            assert state["pending_spawns"] == ["chain-1"]
+            run("pi", "worker-start", {
+                "session_id": "chain-session",
+                "agent_id": "chain-1", "tool_use_id": "chain-1",
+            })
+            state = _json.loads(path.read_text())
+            assert state["pending_spawns"] == []
+            assert state["concurrent"] == [{
+                "id": "chain-1",
+                "started_at": state["concurrent"][0]["started_at"],
+                "fan_out": 1,
+            }]
+            run("pi", "worker-complete", {
+                "session_id": "chain-session",
+                "agent_id": "chain-1", "tool_use_id": "chain-1",
+            })
+            state = _json.loads(path.read_text())
+            assert state["concurrent"] == []
+        finally:
+            hook_adapter._classifier = real_classifier_loader
+            if previous_home is None:
+                os.environ.pop("PI_CODING_AGENT_DIR", None)
+            else:
+                os.environ["PI_CODING_AGENT_DIR"] = previous_home
+
+
+def test_worker_session_nested_spawn_releases_its_slot() -> None:
+    """A nested spawn from a worker session frees its slot on completion."""
+    import json as _json
+
+    with tempfile.TemporaryDirectory(prefix="protocol-nested-") as raw:
+        home = Path(raw)
+        previous_home = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = str(home)
+        try:
+            path, _ = _paths(home, "nested-parent")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            run("claude", "worker-start", {
+                "session_id": "nested-parent", "agent_id": "outer-worker",
+                "agent_type": "bulk-worker",
+            })
+            # A nested spawn arrives with the worker-session payload shape:
+            # agent_id names the calling worker and the session_id names the
+            # parent ledger both share.
+            admitted = run("claude", "pre-mutation", {
+                "session_id": "nested-parent", "agent_id": "outer-worker",
+                "agent_type": "bulk-worker", "tool_name": "Agent",
+                "tool_use_id": "nested-call",
+                "tool_input": {"subagent_type": "quick-worker"},
+            })
+            assert admitted is None, admitted
+            state = _json.loads(path.read_text())
+            assert state["pending_spawns"] == ["nested-call"]
+            run("claude", "worker-start", {
+                "session_id": "nested-parent", "agent_id": "nested-worker",
+                "agent_type": "quick-worker", "tool_use_id": "nested-call",
+            })
+            state = _json.loads(path.read_text())
+            assert [entry["id"] for entry in state["concurrent"]] == [
+                "nested-worker", "outer-worker"]
+            # The completion of a nested worker must free its slot exactly
+            # like a parent's own worker would.
+            run("claude", "worker-complete", {
+                "session_id": "nested-parent", "agent_id": "nested-worker",
+            })
+            state = _json.loads(path.read_text())
+            assert [entry["id"] for entry in state["concurrent"]] == [
+                "outer-worker"]
+        finally:
+            if previous_home is None:
+                os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            else:
+                os.environ["CLAUDE_CONFIG_DIR"] = previous_home
+
+
 def main() -> None:
     test_advisory_lock_recovery()
     test_advisory_lock_exclusion_and_legacy_refusal()
@@ -429,6 +670,10 @@ def main() -> None:
     test_stale_concurrent_entries_are_swept_at_cap_check()
     test_fresh_workers_still_count_against_the_cap()
     test_schema2_state_migrates_and_stale_entries_expire()
+    test_parallel_fanout_reserves_and_releases_per_task_slots()
+    test_fanout_replay_reuses_its_reservation()
+    test_chain_call_reserves_a_single_slot()
+    test_worker_session_nested_spawn_releases_its_slot()
     print("Host lock tests: PASS")
 
 

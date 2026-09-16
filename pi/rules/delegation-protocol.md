@@ -86,15 +86,22 @@ Collect and integrate the report normally; do not attempt any stop operation
 for a completed worker. Workers are one-shot processes: a new task on a
 different topic from the original deployment gets a fresh worker rather than a
 reuse. The `subagent` tool's parallel and chain modes are ordinary native
-spawning — parallel tasks inside one call share that call's active slot.
+spawning — every task inside one call counts as its own active slot against
+the cap, so concurrent spawns are admitted up to the full cap.
 
 ## Worker budgets and routing
 
-Pi has no native per-worker turn limit, so per-worker agentic-turn budgets
-are advisory: quick 128, bulk 64, balanced 32, and frontier 16. An agentic
-turn is one model round within a task, not the whole task, a parent prompt,
-or a tool call; a round can request multiple tools. ADP separately enforces a
-hard budget of tool-call attempts per identified worker lifetime through the
+Pi enforces the per-tier agentic-turn budget natively through the ADP-owned
+subagent extension: profiles carry `maxTurns`, the extension counts model
+rounds in the child's JSON stream, appends the wind-down order to the child
+prompt, and hard-stops the child at the limit; exhaustion is reported as a
+normal result marked turn-budget-exhausted, never a crash. Limits are quick
+128, bulk 64, balanced 32, and frontier 16. An agentic turn is one model
+round within a task, not the whole task, a parent prompt, or a tool call; a
+round can request multiple tools.
+
+ADP separately enforces a hard budget of tool-call attempts per identified
+worker lifetime through the
 delegation enforcer extension, using the same numbers: attempts count even if
 another hook or the host later denies them, a repeated tool-call id counts
 once, and the ledger survives resumes and new parent prompts. An identified
@@ -108,12 +115,13 @@ never terminate the process; the enforcer decommissions a worker only if a
 sessions are not capped.
 
 Both this host and the other ADP hosts share a hard cap of 10 concurrently
-active workers per parent session, counting nested workers; the enforcer
-denies a spawn while the session's active set is full, and the parent waits
+active workers per parent session, counting nested workers; the enforcer denies a spawn only when its reserved
+footprint would exceed the cap, and the parent waits
 for a worker to finish or fans out in smaller waves. Active means actively
 working: a worker counts from its spawn until its result returns, plus spawns
-admitted but not yet started; one `subagent` tool call holds one active slot
-regardless of how many tasks it fans out to internally.
+admitted but not yet started; each task a `subagent` tool call fans out to
+(parallel or chain) holds its own active slot, and a single-task call holds
+one.
 
 The common `ROUTING_POLICY` supplies generated worker instructions and
 context the enforcer appends at each turn start. All tiers retain their

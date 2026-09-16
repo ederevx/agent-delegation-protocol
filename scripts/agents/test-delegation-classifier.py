@@ -84,6 +84,26 @@ def test_legacy_state_ignores_retired_fields_without_losing_enforcement_state() 
     }
 
 
+def test_routing_policy_covers_native_turn_budgets() -> None:
+    policy = classifier.ROUTING_POLICY
+    assert "Claude enforces native maxTurns turn budgets" in policy
+    assert "the Pi subagent extension enforces maxTurns turn budgets" in policy
+    assert "Codex has advisory agentic-turn budgets" in policy
+    assert "Before reaching your turn limit" in policy
+
+
+def test_routing_policy_encourages_concurrent_spawning() -> None:
+    """Concurrent spawning up to the cap replaces the old serialize rule."""
+    policy = classifier.ROUTING_POLICY
+    assert "Spawn independent workers concurrently up to that cap" in policy
+    assert ("the enforcer admits independent calls while their combined "
+            "reserved footprint fits within the cap") in policy
+    assert "parallel tasks inside one call each count against the cap" in policy
+    assert "Wait for a running worker to finish before spawning more" not in policy
+
+
 if __name__ == "__main__":
     test_retired_diagnostics_do_not_affect_classification()
     test_legacy_state_ignores_retired_fields_without_losing_enforcement_state()
+    test_routing_policy_covers_native_turn_budgets()
+    test_routing_policy_encourages_concurrent_spawning()
