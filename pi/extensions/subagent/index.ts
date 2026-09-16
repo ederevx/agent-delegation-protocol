@@ -19,7 +19,9 @@
  *   /subagents command; spawn notifications; tool_result_end dead-branch
  *   removal; expanded renderer restored with turn-budget markers; parallel
  *   fan-out (MAX_PARALLEL_TASKS) and child concurrency (MAX_CONCURRENCY)
- *   raised to 10 to match the ADP active-worker cap
+ *   raised to 10 to match the ADP active-worker cap; /subagents UI polish
+ *   (window borders + titles for both overlays, scrollable detail view,
+ *   full word-wrapped text in the detail view instead of slice() previews)
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -101,6 +103,9 @@ function formatToolCall(
 	toolName: string,
 	args: Record<string, unknown>,
 	themeFg: (color: any, text: string) => string,
+	// `full` drops the width-based preview truncation for the /subagents
+	// detail view; the caller word-wraps the result at the real width.
+	full = false,
 ): string {
 	const shortenPath = (p: string) => {
 		const home = os.homedir();
@@ -110,7 +115,7 @@ function formatToolCall(
 	switch (toolName) {
 		case "bash": {
 			const command = (args.command as string) || "...";
-			const preview = command.length > 60 ? `${command.slice(0, 60)}...` : command;
+			const preview = !full && command.length > 60 ? `${command.slice(0, 60)}...` : command;
 			return themeFg("muted", "$ ") + themeFg("toolOutput", preview);
 		}
 		case "read": {
@@ -159,7 +164,7 @@ function formatToolCall(
 		}
 		default: {
 			const argsStr = JSON.stringify(args);
-			const preview = argsStr.length > 50 ? `${argsStr.slice(0, 50)}...` : argsStr;
+			const preview = !full && argsStr.length > 50 ? `${argsStr.slice(0, 50)}...` : argsStr;
 			return themeFg("accent", toolName) + themeFg("dim", ` ${preview}`);
 		}
 	}
@@ -548,10 +553,12 @@ async function runSingleAgent(
 			});
 			entry.proc = proc;
 
+			// Agent, tier, and a short task-head preview only; mode and turn
+			// budget ride along when known at spawn time. Never the full body.
 			notifySpawn?.(
-				`Subagent spawned: ${agent.name}${tier ? ` (${tier})` : ""} — ${
-					task.length > 60 ? `${task.slice(0, 60)}...` : task
-				}`,
+				`Subagent spawned: ${agent.name}${tier ? ` (${tier})` : ""} · ${mode}` +
+					(agent.maxTurns ? ` · turns≤${agent.maxTurns}` : "") +
+					` — ${task.length > 60 ? `${task.slice(0, 60)}...` : task}`,
 			);
 
 			let buffer = "";
@@ -1371,17 +1378,19 @@ export default function (pi: ExtensionAPI) {
 						const mdTheme = getMarkdownTheme();
 
 						// Rebuild from the live SingleResult on every render so the
-						// view tracks the running child.
-						const buildContainer = () => {
+						// view tracks the running child. No truncation here: task,
+						// status, and JSON args reach the renderer fully, which
+						// word-wraps Text/Markdown at the real width.
+						const buildContent = () => {
 							const r = entry.result;
 							const container = new Container();
 							const statusColor = !entry.completedAt ? "warning" : isFailedResult(r) ? "error" : "success";
 							container.addChild(
 								new Text(
 									theme.fg("toolTitle", theme.bold(`#${entry.id} ${entry.agent} (${entry.tier ?? "?"})`)) +
-												theme.fg("muted", ` — ${entry.mode}`) +
-												theme.fg(statusColor, ` ${statusOf(entry)}`) +
-												theme.fg("muted", ` · ${elapsedOf(entry)}`),
+										theme.fg("muted", ` — ${entry.mode}`) +
+										theme.fg(statusColor, ` ${statusOf(entry)}`) +
+										theme.fg("muted", ` · ${elapsedOf(entry)}`),
 									0,
 									0,
 								),
@@ -1410,24 +1419,25 @@ export default function (pi: ExtensionAPI) {
 							} else {
 								for (const item of items) {
 									if (item.type === "toolCall") {
-									container.addChild(
-										new Text(
-											theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
-											0,
-											0,
-										),
-									);
-								} else if (item.type === "toolResult") {
-									container.addChild(
-										new Text(
-											theme.fg(item.isError ? "error" : "toolOutput", indentPreview(item.text)),
-											0,
-											0,
-										),
-									);
-								} else {
-									container.addChild(new Text(theme.fg("toolOutput", item.text), 0, 0));
-								}
+										container.addChild(
+											new Text(
+												theme.fg("muted", "→ ") +
+													formatToolCall(item.name, item.args, theme.fg.bind(theme), true),
+												0,
+												0,
+											),
+										);
+									} else if (item.type === "toolResult") {
+										container.addChild(
+											new Text(
+												theme.fg(item.isError ? "error" : "toolOutput", indentPreview(item.text)),
+												0,
+												0,
+											),
+										);
+									} else {
+										container.addChild(new Text(theme.fg("toolOutput", item.text), 0, 0));
+									}
 								}
 							}
 							const finalOutput = getFinalOutput(r.messages);
@@ -1456,27 +1466,84 @@ export default function (pi: ExtensionAPI) {
 							if (usageStr) {
 								container.addChild(new Text(theme.fg("dim", usageStr), 0, 0));
 							}
-							container.addChild(new Text(theme.fg("dim", "Esc: back to list"), 0, 0));
 							return container;
 						};
 
-						let view = buildContainer();
+						// Scroll state: overlays do not self-clamp, so the view
+						// slices a window of the fully rendered lines itself.
+						// Sticky followTail keeps live rebuilds pinned to the
+						// bottom until the user scrolls up.
+						let content = buildContent();
+						let scrollOffset = 0;
+						let followTail = true;
+
+						const viewport = () => Math.max(4, tui.terminal.rows - 6);
+
 						const listener = () => {
-							view = buildContainer();
+							content = buildContent();
 							tui.requestRender();
 						};
 						entry.listeners.add(listener);
 						unsubscribe = () => entry.listeners.delete(listener);
 
+						const border = new DynamicBorder((s: string) => theme.fg("accent", s));
+
 						return {
-							render: (width: number) => view.render(width),
-							invalidate: () => view.invalidate(),
+							render: (width: number) => {
+								const lines = content.render(width);
+								const vp = viewport();
+								const maxOffset = Math.max(0, lines.length - vp);
+								if (followTail) scrollOffset = maxOffset;
+								scrollOffset = Math.min(Math.max(0, scrollOffset), maxOffset);
+								const window = lines.slice(scrollOffset, scrollOffset + vp);
+								const scrolling = maxOffset > 0;
+								const footer =
+									"↑↓/PgUp/PgDn scroll · esc back" +
+									(scrolling
+										? ` · lines ${scrollOffset + 1}–${Math.min(scrollOffset + vp, lines.length)}/${lines.length}`
+										: "");
+								const title =
+									theme.fg("accent", theme.bold(`#${entry.id} ${entry.agent}`)) +
+									theme.fg("muted", " — activity");
+								return [
+									...border.render(width),
+									...new Text(title, 1, 0).render(width),
+									...window,
+									...new Text(theme.fg("dim", footer), 1, 0).render(width),
+									...border.render(width),
+								];
+							},
+							invalidate: () => content.invalidate(),
 							handleInput: (data: string) => {
 								if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
 									unsubscribe?.();
 									unsubscribe = undefined;
 									done(null);
+									return;
 								}
+								const vp = viewport();
+								if (matchesKey(data, "up")) {
+									followTail = false;
+									scrollOffset = Math.max(0, scrollOffset - 1);
+								} else if (matchesKey(data, "down")) {
+									followTail = true;
+									scrollOffset += 1;
+								} else if (matchesKey(data, "pageup")) {
+									followTail = false;
+									scrollOffset = Math.max(0, scrollOffset - (vp - 1));
+								} else if (matchesKey(data, "pagedown")) {
+									followTail = true;
+									scrollOffset += vp - 1;
+								} else if (matchesKey(data, "home")) {
+									followTail = false;
+									scrollOffset = 0;
+								} else if (matchesKey(data, "end")) {
+									followTail = true;
+									scrollOffset = Number.MAX_SAFE_INTEGER;
+								} else {
+									return;
+								}
+								tui.requestRender();
 							},
 						};
 					},
@@ -1495,14 +1562,15 @@ export default function (pi: ExtensionAPI) {
 							...getRecentSubagents(),
 						];
 						if (entries.length === 0) {
-							const empty = new Text(
-								theme.fg("muted", "No subagents spawned this session.\n\nEsc: close"),
-								1,
-								1,
-							);
+							const container = new Container();
+							container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+							container.addChild(new Text(theme.fg("accent", theme.bold("Subagents")), 1, 0));
+							container.addChild(new Text(theme.fg("muted", "No subagents spawned this session."), 1, 1));
+							container.addChild(new Text(theme.fg("dim", "esc exit"), 1, 0));
+							container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
 							return {
-								render: (width: number) => empty.render(width),
-								invalidate: () => empty.invalidate(),
+								render: (width: number) => container.render(width),
+								invalidate: () => container.invalidate(),
 								handleInput: (data: string) => {
 									if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) done(null);
 								},
@@ -1533,7 +1601,7 @@ export default function (pi: ExtensionAPI) {
 						};
 						selectList.onCancel = () => done(null);
 						container.addChild(selectList);
-						container.addChild(new Text(theme.fg("dim", "↑↓ navigate · enter watch · esc close"), 1, 0));
+						container.addChild(new Text(theme.fg("dim", "↑↓ navigate · enter open · esc exit"), 1, 0));
 						container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
 
 						return {
