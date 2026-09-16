@@ -115,8 +115,8 @@ never terminate the process; the enforcer decommissions a worker only if a
 sessions are not capped.
 
 Both this host and the other ADP hosts share a hard cap of 10 concurrently
-active workers per parent session, counting nested workers; the enforcer
-denies a spawn while the session's active set is full, and the parent waits
+active workers per parent session, counting nested workers; the enforcer denies a spawn only when its reserved
+footprint would exceed the cap, and the parent waits
 for a worker to finish or fans out in smaller waves. Active means actively
 working: a worker counts from its spawn until its result returns, plus spawns
 admitted but not yet started; each task a `subagent` tool call fans out to

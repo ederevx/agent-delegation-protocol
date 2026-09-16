@@ -109,8 +109,9 @@ Workers should report their result before reaching the cap and stop. Parent
 sessions are not capped. The hook rejects explicit `max_turns` above the tier
 cap and accepts lower values. Both hosts also share a hard cap of 10
 concurrently active workers per parent session, counting nested workers; the
-hook denies a spawn while the session's active set is full, and the parent
-waits for a worker to finish or fans out in smaller waves. Active means
+hook denies a spawn whose reserved footprint would exceed the cap (each task
+of a parallel fan-out counts against it), and the parent waits for running
+workers to finish or fans out in smaller waves. Active means
 actively working: a worker counts from its native start until its native
 stop, plus spawns admitted but not yet started. Idle workers do not count,
 including one that has finished and is held or resumable; it counts again
