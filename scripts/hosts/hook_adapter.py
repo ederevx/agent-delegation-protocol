@@ -758,11 +758,86 @@ def _worker_tool_budget(home: Path, payload: dict[str, Any],
 
     Codex has no post-execution hook, so every intercepted attempt is
     charged at admission, including attempts another hook later denies.
+    Check and charge are one atomic step under a single lock acquisition
+    (see `_worker_tool_check_and_charge_locked`): two sequential
+    acquisitions would release the per-id lock in between, letting
+    parallel attempts at used == limit - 1 both charge.
     """
-    denial = _worker_tool_check(home, payload, classifier)
+    try:
+        return _worker_tool_check_and_charge_locked(home, payload, classifier)
+    except (OSError, ValueError, TypeError) as error:
+        return _worker_tool_error(error)
+
+
+def _worker_tool_call_id(payload: dict[str, Any]) -> str:
+    """Extract and normalize one covered call id; empty when absent."""
+    call_id = payload.get("tool_use_id") or payload.get("toolUseId")
+    return call_id.strip() if isinstance(call_id, str) else ""
+
+
+def _worker_tool_check_state(path: Path, payload: dict[str, Any],
+                             classifier: Any, *, deny_at_limit: bool = True
+                             ) -> dict[str, Any] | None:
+    """Check the budget without charging; the caller holds the lock."""
+    ledger, denial = _worker_ledger(path, payload, classifier)
     if denial:
         return denial
-    return _worker_tool_charge(home, payload, classifier)
+    call_id = _worker_tool_call_id(payload)
+    if call_id and call_id in ledger["seen"]:
+        # A duplicate of an already-counted call stays idempotent, even
+        # at the boundary, matching the charge path's dedupe.
+        return None
+    used, limit = ledger["used"], ledger["limit"]
+    if deny_at_limit and used >= limit:
+        return _deny(
+            f"Worker tool-call budget exhausted ({used}/{limit}; 0 "
+            "remaining). Do not call any further tools. Output your final "
+            "evidence report as plain text now — work done, files touched, "
+            "validation results, failures, assumptions, blockers, "
+            "remaining work — then end your turn. Completing your turn "
+            "is permitted.",
+            terminal=True,
+        )
+    _save(path, ledger)
+    return None
+
+
+def _worker_tool_charge_state(path: Path, payload: dict[str, Any],
+                              classifier: Any) -> dict[str, Any] | None:
+    """Charge one covered call; the caller holds the lock."""
+    ledger, denial = _worker_ledger(path, payload, classifier)
+    if denial:
+        return denial
+    call_id = _worker_tool_call_id(payload)
+    seen = set(ledger["seen"])
+    if call_id and call_id in seen:
+        return None
+    if call_id:
+        seen.add(call_id)
+    ledger.update(used=ledger["used"] + 1, seen=sorted(seen))
+    _save(path, ledger)
+    return None
+
+
+def _worker_tool_check_and_charge_locked(home: Path, payload: dict[str, Any],
+                                         classifier: Any
+                                         ) -> dict[str, Any] | None:
+    """Codex's combined step: check, then charge, under one held lock.
+
+    The check and charge share a single `_locked` acquisition so parallel
+    attempts at used == limit - 1 cannot both pass the check and both
+    charge; releasing the lock between the two steps would race. This is
+    the only caller that holds the per-id lock across both steps.
+    """
+    worker = payload.get("agent_id") or payload.get("agentId")
+    if not isinstance(worker, str) or not worker.strip():
+        return None
+    path, lock = _paths(home, "worker-tool-budget:" + worker.strip())
+    with _locked(lock):
+        denial = _worker_tool_check_state(path, payload, classifier)
+        if denial:
+            return denial
+        return _worker_tool_charge_state(path, payload, classifier)
 
 
 def _worker_tool_error(error: Exception) -> dict[str, Any]:
@@ -826,37 +901,18 @@ def _worker_tool_check_locked(home: Path, payload: dict[str, Any],
     This is not a model-turn counter or a count of successful tool
     executions; charging happens separately in `_worker_tool_charge`. The
     lifetime ledger survives parent prompt resets and resumes. Pi checks at
-    pre-mutation only; Codex checks (via `_worker_tool_budget`) and charges
-    at admission. `deny_at_limit=False` pins a ledger without denying, for
-    starts that must permit an already-spent worker to wind down.
+    pre-mutation only; Codex checks and charges atomically at admission
+    via `_worker_tool_budget`. `deny_at_limit=False` pins a ledger without
+    denying, for starts that must permit an already-spent worker to wind
+    down.
     """
     worker = payload.get("agent_id") or payload.get("agentId")
     if not isinstance(worker, str) or not worker.strip():
         return None
     path, lock = _paths(home, "worker-tool-budget:" + worker.strip())
     with _locked(lock):
-        ledger, denial = _worker_ledger(path, payload, classifier)
-        if denial:
-            return denial
-        call_id = payload.get("tool_use_id") or payload.get("toolUseId")
-        call_id = call_id.strip() if isinstance(call_id, str) else ""
-        if call_id and call_id in ledger["seen"]:
-            # A duplicate of an already-counted call stays idempotent, even
-            # at the boundary, matching the charge path's dedupe.
-            return None
-        used, limit = ledger["used"], ledger["limit"]
-        if deny_at_limit and used >= limit:
-            return _deny(
-                f"Worker tool-call budget exhausted ({used}/{limit}; 0 "
-                "remaining). Do not call any further tools. Output your final "
-                "evidence report as plain text now — work done, files touched, "
-                "validation results, failures, assumptions, blockers, "
-                "remaining work — then end your turn. Completing your turn "
-                "is permitted.",
-                terminal=True,
-            )
-        _save(path, ledger)
-    return None
+        return _worker_tool_check_state(path, payload, classifier,
+                                        deny_at_limit=deny_at_limit)
 
 
 def _worker_tool_charge(home: Path, payload: dict[str, Any],
@@ -872,28 +928,17 @@ def _worker_tool_charge_locked(home: Path, payload: dict[str, Any],
                                classifier: Any) -> dict[str, Any] | None:
     """Count one covered call; repeated call ids count once.
 
-    Missing call ids count each invocation conservatively. This is the only
-    function that increments the ledger; Pi calls it at post-tool-use, so a
-    call another extension blocked before execution never charges.
+    Missing call ids count each invocation conservatively. Alongside the
+    check state it is the only logic that increments the ledger; Pi calls
+    it at post-tool-use, so a call another extension blocked before
+    execution never charges.
     """
     worker = payload.get("agent_id") or payload.get("agentId")
     if not isinstance(worker, str) or not worker.strip():
         return None
     path, lock = _paths(home, "worker-tool-budget:" + worker.strip())
     with _locked(lock):
-        ledger, denial = _worker_ledger(path, payload, classifier)
-        if denial:
-            return denial
-        call_id = payload.get("tool_use_id") or payload.get("toolUseId")
-        call_id = call_id.strip() if isinstance(call_id, str) else ""
-        seen = set(ledger["seen"])
-        if call_id and call_id in seen:
-            return None
-        if call_id:
-            seen.add(call_id)
-        ledger.update(used=ledger["used"] + 1, seen=sorted(seen))
-        _save(path, ledger)
-    return None
+        return _worker_tool_charge_state(path, payload, classifier)
 
 
 def _state_error(event: str, error: Exception) -> dict[str, Any]:
