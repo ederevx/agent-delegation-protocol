@@ -253,6 +253,8 @@ def resources(repo: Path, home: Path, host: str) -> list[tuple[Path, Path, str]]
              home / "extensions/subagent/selector-view.ts", "copy"),
             (repo / "pi/extensions/subagent/types.ts",
              home / "extensions/subagent/types.ts", "copy"),
+            (repo / "pi/extensions/subagent/viewer-chrome.ts",
+             home / "extensions/subagent/viewer-chrome.ts", "copy"),
             *common,
         ]
     return [
