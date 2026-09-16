@@ -29,9 +29,33 @@ import {
 } from "./format.ts";
 import type { DisplayItem, SingleResult, SubagentDetails } from "./types.ts";
 
+/**
+ * Subset of the tool renderer's ToolRenderContext that the call renderer
+ * needs: the tool row's phase flags. isPartial stays true from construction
+ * through every partial update and only becomes false when the FINAL result
+ * lands (tool-execution.ts defaults isPartial = true; updateResult() sets it
+ * false); executionStarted flips on markExecutionStarted(). Pending is
+ * executionStarted === false; running is executionStarted && isPartial.
+ */
+export interface ToolCallPhase {
+	executionStarted: boolean;
+	isPartial: boolean;
+}
+
 export class SubagentResultViews {
-	/** One-line preview of the tool call arguments. */
-	call(args: Record<string, any>, theme: Theme): Component {
+	/**
+	 * Call-slot preview of the tool call arguments. Chain and parallel keep
+	 * their summary lines (nothing else shows that overview). Single-agent
+	 * calls render an EMPTY component in every phase: while the task runs
+	 * the spawn notification already carries agent, tier, mode, turn budget,
+	 * and the task preview — repeating them in the call slot duplicated the
+	 * notification directly above it — and once the final result lands
+	 * (isPartial false) the agent identity is in the result header anyway,
+	 * so restoring the preview would reintroduce the duplication. The flags
+	 * used to reason about the phases are ToolRenderContext.executionStarted
+	 * and .isPartial (see ToolCallPhase).
+	 */
+	call(args: Record<string, any>, theme: Theme, context?: ToolCallPhase): Component {
 		const scope = args.agentScope as AgentScope | undefined;
 		const scopeSuffix = scope && scope !== "user" ? theme.fg("muted", ` [${scope}]`) : "";
 		if (args.chain && args.chain.length > 0) {
@@ -52,16 +76,11 @@ export class SubagentResultViews {
 				0,
 			);
 		}
-		const agentName = args.agent || "...";
-		const preview = args.task ? (args.task.length > 60 ? `${args.task.slice(0, 60)}...` : args.task) : "...";
-		return new Text(
-			theme.fg("toolTitle", theme.bold("subagent ")) +
-				theme.fg("accent", agentName) +
-				scopeSuffix +
-				theme.fg("dim", ` — ${preview}`),
-			0,
-			0,
-		);
+		// Single-agent call slot: empty in EVERY phase. Pending/running
+		// (executionStarted false, or isPartial true) would duplicate the
+		// persistent spawn notification directly above it; finished (isPartial
+		// false) would duplicate both that notification and the result header.
+		return new Text("", 0, 0);
 	}
 
 	/** Render a (possibly still-running) tool result by mode. */
