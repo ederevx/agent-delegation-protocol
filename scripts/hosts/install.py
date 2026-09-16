@@ -239,6 +239,24 @@ def resources(repo: Path, home: Path, host: str) -> list[tuple[Path, Path, str]]
              home / "extensions/subagent/index.ts", "copy"),
             (repo / "pi/extensions/subagent/agents.ts",
              home / "extensions/subagent/agents.ts", "copy"),
+                        (repo / "pi/extensions/subagent/constants.ts",
+             home / "extensions/subagent/constants.ts", "copy"),
+            (repo / "pi/extensions/subagent/detail-view.ts",
+             home / "extensions/subagent/detail-view.ts", "copy"),
+            (repo / "pi/extensions/subagent/dispatch.ts",
+             home / "extensions/subagent/dispatch.ts", "copy"),
+            (repo / "pi/extensions/subagent/format.ts",
+             home / "extensions/subagent/format.ts", "copy"),
+            (repo / "pi/extensions/subagent/registry.ts",
+             home / "extensions/subagent/registry.ts", "copy"),
+            (repo / "pi/extensions/subagent/result-views.ts",
+             home / "extensions/subagent/result-views.ts", "copy"),
+            (repo / "pi/extensions/subagent/run.ts",
+             home / "extensions/subagent/run.ts", "copy"),
+            (repo / "pi/extensions/subagent/selector-view.ts",
+             home / "extensions/subagent/selector-view.ts", "copy"),
+            (repo / "pi/extensions/subagent/types.ts",
+             home / "extensions/subagent/types.ts", "copy"),
             *common,
         ]
     return [
@@ -841,6 +859,30 @@ def validate_destination(source: Path, destination: Path, kind: str, owned: bool
     raise SystemExit(f"refusing to overwrite unowned destination: {destination}")
 
 
+SOURCE_MARKER_NAME = ".source-repo"
+
+
+def write_source_markers(repo: Path, home: Path, host: str) -> list[Path]:
+    """Record the absolute source-repository path next to every managed
+    directory, so an agent inspecting an installed extension or hook can
+    discover where its source lives without guessing. Idempotent: existing
+    identical markers are left alone; newly written paths are returned so
+    the manifest and rollback can manage them."""
+    markers: list[Path] = []
+    repo_line = str(repo) + "\n"
+    for directory in _managed_directories(home, host):
+        marker = directory / SOURCE_MARKER_NAME
+        if not (marker.is_file() and marker.read_text(encoding="utf-8") == repo_line):
+            marker.write_text(repo_line, encoding="utf-8")
+            markers.append(marker)
+    state = home / ".delegation-protocol"
+    marker = state / SOURCE_MARKER_NAME
+    if not (marker.is_file() and marker.read_text(encoding="utf-8") == repo_line):
+        marker.write_text(repo_line, encoding="utf-8")
+        markers.append(marker)
+    return markers
+
+
 def _managed_directories(home: Path, host: str) -> tuple[Path, ...]:
     try:
         parts = HOST_DIRECTORIES[host]
@@ -917,6 +959,8 @@ def install(repo: Path, home: Path, host: str) -> None:
             atomic_copy(source, destination)
         retire_owned_lifecycle(state, previous, changed)
         retire_orphaned_owned(home, previous, items, changed)
+        for marker in write_source_markers(repo, home, host):
+            changed.append((marker, capture_path(marker)))
         policy = None
         codex_config = None
         if host == "codex":
@@ -933,7 +977,9 @@ def install(repo: Path, home: Path, host: str) -> None:
                 home / "hooks/delegation-enforcer.py",
                 sys.executable,
             )
+        source_markers = write_source_markers(repo, home, host)
         manifest = {"version": VERSION, "host": host, "repo": str(repo),
+                    "source_markers": [str(m) for m in source_markers],
                     "owned": [str(destination) for _, destination, _ in items],
                     "resources": [{"source": str(source), "destination": str(destination), "kind": kind}
                                   for source, destination, kind in items],
@@ -1005,6 +1051,11 @@ def uninstall(home: Path, host: str) -> None:
             legacy_link = (resource.get("kind") == "link" and same_link(path, source))
             if legacy_link or owned_copy:
                 path.unlink(missing_ok=True)
+        for name in manifest.get("source_markers", []):
+            Path(name).unlink(missing_ok=True)
+        for directory in _managed_directories(home, host):
+            (directory / SOURCE_MARKER_NAME).unlink(missing_ok=True)
+        (state / SOURCE_MARKER_NAME).unlink(missing_ok=True)
         manifest_path.unlink(missing_ok=True)
         for backup in state.glob("*.before-first-install"):
             backup.unlink(missing_ok=True)

@@ -15,9 +15,8 @@
  *
  * Event mapping:
  *   before_agent_start          -> prompt         (classify; append routing policy)
- *   tool_call (any)             -> pre-mutation   (delegation gate / worker budget check)
+ *   tool_call (any)             -> pre-mutation   (delegation gate / worker budget)
  *   tool_call (subagent, admit) -> worker-start   (Pi has no native start event)
- *   tool_result (worker, any)   -> post-tool-use  (charge the executed call)
  *   tool_result (subagent)      -> worker-complete
  *   turn_end                    -> turn-stop
  *
@@ -25,6 +24,12 @@
  * extension uses (`--mode json -p --no-session`); the tier is read from the
  * spawned profile's --append-system-prompt file. An identified worker whose
  * tier cannot be read gets the adapter's conservative limit of 16.
+ *
+ * Decomposed per the single-responsibility convention: BridgeClient owns
+ * the transport, Reporter owns degradation/notification surfaces,
+ * TerminalDenyGuard owns the grace-window policy, and AdpEnforcer maps Pi
+ * events onto bridge calls. Response decoding and worker detection are
+ * pure helpers; state is mutated only by its owning object.
  */
 
 import { execFile } from "node:child_process";
@@ -34,23 +39,27 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-interface WorkerIdentity {
+export interface WorkerIdentity {
 	id: string;
 	tier?: string;
 }
 
 type Payload = Record<string, unknown>;
 
-function agentHome(): string {
-	return process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
+// -- pure helpers (no state; env/argv/fs arrive as parameters) ------------
+
+function agentHome(env: NodeJS.ProcessEnv = process.env): string {
+	return env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
 }
 
-function bridgePath(): string {
-	return path.join(agentHome(), ".delegation-protocol", "delegation-enforcer.py");
+function bridgePath(env: NodeJS.ProcessEnv = process.env): string {
+	return path.join(agentHome(env), ".delegation-protocol", "delegation-enforcer.py");
 }
 
-function detectWorker(): WorkerIdentity | null {
-	const argv = process.argv;
+function detectWorker(
+	argv: string[],
+	readFile: (path: string) => string = (p) => fs.readFileSync(p, "utf8"),
+): WorkerIdentity | null {
 	// The ADP-owned subagent extension (vendored from the official example)
 	// spawns workers as one-shot processes with --no-session; a parent
 	// session never carries that flag.
@@ -61,7 +70,7 @@ function detectWorker(): WorkerIdentity | null {
 	const profilePath = index >= 0 ? argv[index + 1] : undefined;
 	if (typeof profilePath === "string" && profilePath.length > 0) {
 		try {
-			const profile = fs.readFileSync(profilePath, "utf8");
+			const profile = readFile(profilePath);
 			const match = profile.match(/^#\s+(quick|bulk|balanced|frontier)\s+worker\b/im);
 			if (match) tier = `${match[1].toLowerCase()}-worker`;
 		} catch {
@@ -80,29 +89,175 @@ function denialReason(response: unknown): string | null {
 	return null;
 }
 
-export default function (pi: ExtensionAPI) {
-	const worker = detectWorker();
-	const bridge = bridgePath();
-	if (!fs.existsSync(bridge)) return; // not installed: stay inert
+function isTerminalDeny(response: unknown): boolean {
+	return (response as any)?.hookSpecificOutput?.terminal === true;
+}
 
-	let warnedBridgeFailure = false;
-	let pythonExecutable = process.env.ADP_PYTHON || "python3";
+function additionalContext(response: unknown): string | undefined {
+	return (response as any)?.hookSpecificOutput?.additionalContext;
+}
 
-	// A worker that keeps calling tools after a terminal deny (budget
-	// exhausted, unreadable protocol state) spins forever: pi has no
-	// native per-worker timeout, and the deny text alone does not
-	// reliably stop a spinning model. The adapter marks such denys with
-	// hookSpecificOutput.terminal. The first terminal deny starts a
-	// grace window and orders the worker to produce its final evidence
-	// report; later terminal denies within the window only re-deliver
-	// the deny text as tool feedback and never terminate the process.
-	// The grace kill exists only to stop a worker that never finishes,
-	// not to punish a second deny, so a winding-down worker keeps its
-	// final report instead of being killed mid-summary.
-	let denyGraceTimer: NodeJS.Timeout | null = null;
-	let terminated = false;
+function turnStopBlock(response: unknown): string | null {
+	const decision = (response as any)?.decision;
+	if (decision === "block") {
+		return (response as any)?.reason || "turn-stop blocked";
+	}
+	return null;
+}
 
-	function terminateWorker(reason: string) {
+function sessionId(ctx: any): string | undefined {
+	try {
+		return ctx.sessionManager?.getSessionId?.() || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function buildToolPayload(
+	event: { toolName: string; toolCallId: string; input?: unknown },
+	sid: string | undefined,
+	worker: WorkerIdentity | null,
+): Payload {
+	const input =
+		event.input && typeof event.input === "object"
+			? { ...(event.input as Record<string, unknown>) }
+			: {};
+	// The adapter reads the requested tier from `subagent_type`; Pi's
+	// subagent tool names the parameter `agent`.
+	if (event.toolName === "subagent" && typeof input.agent === "string") {
+		input.subagent_type = input.agent;
+	}
+	return {
+		session_id: sid,
+		tool_name: event.toolName,
+		tool_input: input,
+		tool_use_id: event.toolCallId,
+		...(worker ? { agent_id: worker.id, agent_type: worker.tier } : {}),
+	};
+}
+
+// -- collaborators ---------------------------------------------------------
+
+/** Transport to the adapter bridge: one JSON-over-execFile round trip,
+ *  resolved to null on any failure. Owns nothing but its configuration. */
+class BridgeClient {
+	constructor(
+		private readonly bridge: string,
+		private readonly pythonExecutable: string,
+	) {}
+
+	call(
+		mode: string,
+		payload: Payload,
+		options: { isWorker: boolean; contextTokens?: number },
+	): Promise<any | undefined> {
+		return new Promise((resolve) => {
+			const env: NodeJS.ProcessEnv = { ...process.env };
+			if (!options.isWorker && typeof options.contextTokens === "number" && options.contextTokens > 0) {
+				env.PI_CONTEXT_TOKENS = String(Math.floor(options.contextTokens));
+			}
+			execFile(
+				this.pythonExecutable,
+				[this.bridge, mode],
+				{ env, timeout: 4000, maxBuffer: 1024 * 1024 },
+				(error, stdout) => {
+					if (error) {
+						resolve(undefined);
+						return;
+					}
+					try {
+						resolve(JSON.parse(stdout || "{}"));
+					} catch {
+						resolve(undefined);
+					}
+				},
+			).stdin?.end(JSON.stringify(payload));
+		});
+	}
+}
+
+/** The surfaces ADP messages reach, plus the once-only bridge-degradation
+ *  warning. Owns the warned flag; nothing else mutates it. */
+class Reporter {
+	private warnedBridgeFailure = false;
+
+	warnBridgeFailureOnce(ctx: any, isWorker: boolean): void {
+		if (this.warnedBridgeFailure) return;
+		this.warnedBridgeFailure = true;
+		try {
+			if (isWorker) {
+				// Workers have no UI; make the degraded state visible in
+				// the parent's captured stderr instead of silently
+				// bypassing enforcement.
+				process.stderr.write(
+					"ADP: delegation enforcer bridge failed; enforcement is degraded\n",
+				);
+			} else if (ctx?.hasUI) {
+				ctx.ui.notify(
+					"ADP: delegation enforcer bridge failed; enforcement is degraded",
+					"warning",
+				);
+			}
+		} catch {
+			/* no sink available */
+		}
+	}
+
+	notify(ctx: any, text: string): void {
+		try {
+			if (ctx?.hasUI) ctx.ui.notify(`ADP: ${text}`, "warning");
+		} catch {
+			/* no UI available */
+		}
+	}
+
+	surface(ctx: any, text: string): void {
+		let surfaced = false;
+		try {
+			if (ctx?.hasUI) {
+				ctx.ui.notify(`ADP: ${text}`, "warning");
+				surfaced = true;
+			}
+		} catch {
+			/* no UI available */
+		}
+		if (!surfaced) {
+			try {
+				process.stderr.write(`ADP: ${text}\n`);
+			} catch {
+				/* no sink available */
+			}
+		}
+	}
+}
+
+/** Grace-window policy for terminal denys in workers: the first terminal
+ *  deny starts the window and orders the worker to produce its final
+ *  evidence report; later terminal denies within the window only
+ *  re-deliver the deny text as tool feedback and never terminate the
+ *  process. The grace kill exists only to stop a worker that never
+ *  finishes, not to punish a second deny, so a winding-down worker keeps
+ *  its final report instead of being killed mid-summary. */
+class TerminalDenyGuard {
+	private denyGraceTimer: NodeJS.Timeout | null = null;
+	private terminated = false;
+
+	constructor(private readonly reporter: Reporter) {}
+
+	note(): void {
+		if (this.terminated || this.denyGraceTimer) return;
+		this.denyGraceTimer = setTimeout(() => {
+			this.denyGraceTimer = null;
+			this.terminated = true;
+			this.terminate("terminal deny grace elapsed");
+		}, 120_000);
+		if (this.denyGraceTimer.unref) this.denyGraceTimer.unref();
+		process.stderr.write(
+			"ADP: budget exhausted; produce your final evidence report now — the process is decommissioned when the grace window closes.\n",
+		);
+	}
+
+	private terminate(reason: string): void {
 		try {
 			process.stderr.write(
 				`ADP: worker terminated after a terminal deny: ${reason}\n`,
@@ -112,133 +267,47 @@ export default function (pi: ExtensionAPI) {
 			/* already gone */
 		}
 	}
+}
 
-	function noteTerminalDeny() {
-		if (terminated || denyGraceTimer) return;
-		denyGraceTimer = setTimeout(() => {
-			denyGraceTimer = null;
-			terminated = true;
-			terminateWorker("terminal deny grace elapsed");
-		}, 120_000);
-		if (denyGraceTimer.unref) denyGraceTimer.unref();
-		process.stderr.write(
-			"ADP: budget exhausted; produce your final evidence report now — the process is decommissioned when the grace window closes.\n",
-		);
-	}
+/** Maps Pi lifecycle events onto the adapter bridge. Owns the worker
+ *  identity and its collaborators; the handlers each do one mapping. */
+class AdpEnforcer {
+	constructor(
+		private readonly worker: WorkerIdentity | null,
+		private readonly bridge: BridgeClient,
+		private readonly reporter: Reporter,
+		private readonly denyGuard: TerminalDenyGuard,
+	) {}
 
-	function sessionId(ctx: any): string | undefined {
-		try {
-			return ctx.sessionManager?.getSessionId?.() || undefined;
-		} catch {
-			return undefined;
-		}
-	}
-
-	function callBridge(
-		mode: string,
-		payload: Payload,
-		contextTokens?: number,
-	): Promise<any | undefined> {
-		return new Promise((resolve) => {
-			const env: NodeJS.ProcessEnv = { ...process.env };
-			if (!worker && typeof contextTokens === "number" && contextTokens > 0) {
-				env.PI_CONTEXT_TOKENS = String(Math.floor(contextTokens));
-			}
-			execFile(
-				pythonExecutable,
-				[bridge, mode],
-				{ env, timeout: 4000, maxBuffer: 1024 * 1024 },
-				(error, stdout) => {
-					if (error) {
-						resolve(null);
-						return;
-					}
-					try {
-						resolve(JSON.parse(stdout || "{}"));
-					} catch {
-						resolve(null);
-					}
-				},
-			).stdin?.end(JSON.stringify(payload));
-		});
-	}
-
-	async function invoke(
+	async handleAgentStart(
+		event: { prompt: string; systemPrompt: string },
 		ctx: any,
-		mode: string,
-		payload: Payload,
-	): Promise<any | null> {
-		const response = await callBridge(mode, payload, ctx?.model?.contextWindow);
-		if (response === null) {
-			if (!warnedBridgeFailure) {
-				warnedBridgeFailure = true;
-				try {
-					if (worker) {
-						// Workers have no UI; make the degraded state visible
-						// in the parent's captured stderr instead of silently
-						// bypassing enforcement.
-						process.stderr.write(
-							"ADP: delegation enforcer bridge failed; enforcement is degraded\n",
-						);
-					} else if (ctx?.hasUI) {
-						ctx.ui.notify(
-							"ADP: delegation enforcer bridge failed; enforcement is degraded",
-							"warning",
-						);
-					}
-				} catch {
-					/* no sink available */
-				}
-			}
-		}
-		return response;
-	}
-
-	pi.on("before_agent_start", async (event, ctx) => {
-		if (worker) return; // generated profiles already carry the routing policy
-		const response = await invoke(ctx, "prompt", {
+	): Promise<{ systemPrompt: string } | undefined> {
+		if (this.worker) return; // generated profiles already carry the routing policy
+		const response = await this.invoke(ctx, "prompt", {
 			session_id: sessionId(ctx),
 			prompt: event.prompt,
 		});
-		const additional = (response as any)?.hookSpecificOutput?.additionalContext;
+		const additional = additionalContext(response);
 		if (additional) {
 			return {
 				systemPrompt: `${event.systemPrompt}\n\n# Delegation protocol (ADP)\n\n${additional}`,
 			};
 		}
-	});
+		return undefined;
+	}
 
-	pi.on("tool_call", async (event, ctx) => {
-		const input =
-			event.input && typeof event.input === "object"
-				? { ...(event.input as Record<string, unknown>) }
-				: {};
-		// The adapter reads the requested tier from `subagent_type`; Pi's
-		// subagent tool names the parameter `agent`.
-		if (event.toolName === "subagent" && typeof input.agent === "string") {
-			input.subagent_type = input.agent;
-		}
-		const payload: Payload = {
-			session_id: sessionId(ctx),
-			tool_name: event.toolName,
-			tool_input: input,
-			tool_use_id: event.toolCallId,
-			...(worker ? { agent_id: worker.id, agent_type: worker.tier } : {}),
-		};
-		const response = await invoke(ctx, "pre-mutation", payload);
-		const denied =
-			(response as any)?.hookSpecificOutput?.permissionDecision === "deny"
-				? (response as any).hookSpecificOutput.permissionDecisionReason ||
-					"denied by the delegation protocol"
-				: null;
+	async handleToolCall(
+		event: { toolName: string; toolCallId: string; input?: unknown },
+		ctx: any,
+	): Promise<{ block: boolean; reason: string } | undefined> {
+		const payload = buildToolPayload(event, sessionId(ctx), this.worker);
+		const response = await this.invoke(ctx, "pre-mutation", payload);
+		const denied = denialReason(response);
 		if (denied) {
-			try {
-				if (ctx?.hasUI) ctx.ui.notify(`ADP: ${denied}`, "warning");
-			} catch {
-				/* no UI available */
-			}
-			if (worker && (response as any)?.hookSpecificOutput?.terminal === true) {
-				noteTerminalDeny();
+			this.reporter.notify(ctx, denied);
+			if (this.worker && isTerminalDeny(response)) {
+				this.denyGuard.note();
 			}
 			return { block: true, reason: denied };
 		}
@@ -248,71 +317,103 @@ export default function (pi: ExtensionAPI) {
 		// `tasks` call takes one active slot per task against the session
 		// cap, so an N-task fan-out holds N slots, while a sequential
 		// `chain` holds a single slot no matter how many steps it runs.
-		if (!worker && event.toolName === "subagent") {
-			await invoke(ctx, "worker-start", {
+		if (!this.worker && event.toolName === "subagent") {
+			await this.invoke(ctx, "worker-start", {
 				session_id: sessionId(ctx),
 				agent_id: event.toolCallId,
 				tool_use_id: event.toolCallId,
 			});
 		}
-	});
+		return undefined;
+	}
 
-	pi.on("tool_result", async (event, ctx) => {
-		// Pi skips afterToolCall for blocked calls, so a tool_result means the
-		// call actually executed. Charge the worker's hook-covered budget here;
-		// pre-mutation only checks, because Pi fires it before other extensions
-		// may block the call, and charging there would spend the ledger on
-		// denied retries.
-		if (worker) {
+	async handleToolResult(
+		event: { toolName: string; toolCallId: string; input?: unknown },
+		ctx: any,
+	): Promise<void> {
+		// Pi skips afterToolCall for blocked calls, so a tool_result means
+		// the call actually executed. Charge the worker's hook-covered
+		// budget here; pre-mutation only checks, because Pi fires it
+		// before other extensions may block the call, and charging there
+		// would spend the ledger on denied retries.
+		if (this.worker) {
 			const input =
 				event.input && typeof event.input === "object"
 					? { ...(event.input as Record<string, unknown>) }
 					: {};
-			await invoke(ctx, "post-tool-use", {
+			await this.invoke(ctx, "post-tool-use", {
 				session_id: sessionId(ctx),
 				tool_name: event.toolName,
 				tool_input: input,
 				tool_use_id: event.toolCallId,
-				agent_id: worker.id,
-				agent_type: worker.tier,
+				agent_id: this.worker.id,
+				agent_type: this.worker.tier,
 			});
 		}
 		// Nested worker spawns must also complete: a worker that fans out
 		// reserves per-task slots, and without the completion event those
-		// slots leak until the stale sweep. Slot bookkeeping is not a parent
-		// obligation, so workers deliver it too.
+		// slots leak until the stale sweep. Slot bookkeeping is not a
+		// parent obligation, so workers deliver it too.
 		if (event.toolName !== "subagent") return;
-		await invoke(ctx, "worker-complete", {
+		await this.invoke(ctx, "worker-complete", {
 			session_id: sessionId(ctx),
 			agent_id: event.toolCallId,
 			tool_use_id: event.toolCallId,
 		});
-	});
+	}
 
-	pi.on("turn_end", async (_event, ctx) => {
-		if (worker) return;
-		const response = await invoke(ctx, "turn-stop", { session_id: sessionId(ctx) });
+	async handleTurnEnd(_event: unknown, ctx: any): Promise<void> {
+		if (this.worker) return;
+		const response = await this.invoke(ctx, "turn-stop", {
+			session_id: sessionId(ctx),
+		});
 		// pi has no veto point at turn end; a block decision here (protocol
 		// state errors) can only be surfaced, never enforced.
-		const decision = (response as any)?.decision;
-		if (decision === "block") {
-			const reason = (response as any)?.reason || "turn-stop blocked";
-			let surfaced = false;
-			try {
-				if (ctx?.hasUI) {
-					ctx.ui.notify(`ADP: ${reason}`, "warning");
-					surfaced = true;
-				}
-			} catch {
-				/* no UI available */
-			}
-			if (!surfaced) {
-				try {
-					process.stderr.write(`ADP: ${reason}\n`);
-				} catch {
-					/* no sink available */
-				}
-			}
+		const reason = turnStopBlock(response);
+		if (reason) {
+			this.reporter.surface(ctx, reason);
 		}
+	}
+
+	private async invoke(ctx: any, mode: string, payload: Payload): Promise<any | null> {
+		const response = await this.bridge.call(mode, payload, {
+			isWorker: this.worker !== null,
+			contextTokens: ctx?.model?.contextWindow,
+		});
+		if (response === undefined || response === null) {
+			this.reporter.warnBridgeFailureOnce(ctx, this.worker !== null);
+			return null;
+		}
+		return response;
+	}
+}
+
+export default function (pi: ExtensionAPI) {
+	const worker = detectWorker(process.argv);
+	const bridgeFile = bridgePath();
+	if (!fs.existsSync(bridgeFile)) return; // not installed: stay inert
+
+	const reporter = new Reporter();
+	const enforcer = new AdpEnforcer(
+		worker,
+		new BridgeClient(bridgeFile, process.env.ADP_PYTHON || "python3"),
+		reporter,
+		new TerminalDenyGuard(reporter),
+	);
+
+	pi.on("before_agent_start", async (event, ctx) => {
+		return enforcer.handleAgentStart(event, ctx);
+	});
+
+	pi.on("tool_call", async (event, ctx) => {
+		return enforcer.handleToolCall(event, ctx);
+	});
+
+	pi.on("tool_result", async (event, ctx) => {
+		await enforcer.handleToolResult(event, ctx);
+	});
+
+	pi.on("turn_end", async (event, ctx) => {
+		await enforcer.handleTurnEnd(event, ctx);
 	});
 }
