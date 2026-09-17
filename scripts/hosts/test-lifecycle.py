@@ -356,6 +356,12 @@ def test_codex_pre_mutation_still_charges_each_attempt() -> None:
         previous_home = os.environ.get("CODEX_HOME")
         os.environ["CODEX_HOME"] = str(home)
         try:
+            # Pin a small limit so the boundary is reachable: the real
+            # bulk-worker limit is 64, far past a three-call test.
+            ledger_path, _ = _paths(home, "worker-tool-budget:codex-attempt")
+            ledger_path.parent.mkdir(parents=True)
+            ledger_path.write_text(_json.dumps(
+                {"tier": "bulk-worker", "limit": 2, "used": 0, "seen": []}))
             worker = {
                 "agent_id": "codex-attempt", "agent_type": "bulk-worker",
                 "tool_name": "shell", "tool_input": {"command": ["echo", "hi"]},
@@ -370,6 +376,11 @@ def test_codex_pre_mutation_still_charges_each_attempt() -> None:
             output = denial["hookSpecificOutput"]
             assert output["permissionDecision"] == "deny", denial
             assert output["terminal"] is True
+            # The budget denial itself does not charge: the atomic check
+            # denies before the charge step runs.
+            ledger = _json.loads(ledger_path.read_text())
+            assert ledger["used"] == 2, ledger
+            assert ledger["seen"] == ["call-1", "call-2"], ledger
         finally:
             if previous_home is None:
                 os.environ.pop("CODEX_HOME", None)
