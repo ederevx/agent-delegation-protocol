@@ -6,15 +6,27 @@
  * `open()` installs this view itself as that root — the viewer replaces the
  * entire TUI with its own full-screen transcript — and `close()` hands the
  * previous screen back. In regular (inline) mode it dock-integrates like
- * the selector.
+ * the selector. Opening clears the screen first (a forced full repaint), so
+ * the frame never lands on a diff of the previous screen.
  *
- * Rendering follows the session history viewer's architecture (the pattern
- * proven against lots-of-logs breakdowns): each display item is rendered
- * ONCE per width into a cached flat line array (invalidated on width change
- * or listener events, rebuilt lazily on the next render), and every frame
- * emits ONLY a window slice — the viewport height minus the chrome — so the
- * per-frame cost stays bounded no matter how many log lines a worker
- * produced. Listener events just mark the cache dirty; they never render.
+ * Log formatting is identical to the main transcript: entries render through
+ * the same component classes pi uses in the chat (AssistantMessageComponent,
+ * ToolExecutionComponent fed by toolResult messages, Spacer rhythm) instead
+ * of a simplified text summary.
+ *
+ * Rendering follows the session history viewer's architecture, adapted for
+ * a live append-only log:
+ *   - Items are built incrementally — only messages that arrived since the
+ *     last build fold into new components (assistant text, tool executions).
+ *   - Flattened lines are cached per item; a toolResult updating an already
+ *     flattened tool component re-renders from that item onward (the
+ *     common case is a near-tail item). The frame emits only the visible
+ *     window slice, so per-frame and per-event costs stay bounded.
+ *   - The log is bottom-anchored lazily: only ~two windowfuls render at
+ *     open; scrolling toward the top renders older items chunk by chunk and
+ *     shifts the scroll offset by the added lines, so the current position
+ *     is tracked — never reset — as more of the log loads. Home renders the
+ *     full log explicitly.
  *
  * Frame layout (shared chrome in viewer-chrome.ts): accent title line with
  * dim status/elapsed and the scroll position, then the log window, a dim
@@ -27,51 +39,55 @@
  */
 
 import {
+	AssistantMessageComponent,
 	getMarkdownTheme,
+	ToolExecutionComponent,
 	type KeybindingsManager,
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
 	isViewportTUI,
-	Markdown,
 	matchesKey,
 	Spacer,
 	Text,
-	truncateToWidth,
 	type Component,
 	type TUI,
 	type TuiMouseEvent,
 	type ViewportTUI,
 } from "@earendil-works/pi-tui";
 import type { RunningSubagent } from "./registry.ts";
-import {
-	formatToolCall,
-	formatUsageStats,
-	getDisplayItems,
-	getFinalOutput,
-	indentPreview,
-	isFailedResult,
-	statusOf,
-	elapsedOf,
-} from "./format.ts";
+import { formatUsageStats, isFailedResult, statusOf, elapsedOf } from "./format.ts";
 import { ConservativeWidth } from "./conservative-width.ts";
 import { ViewerChrome } from "./viewer-chrome.ts";
-
 
 export class SubagentDetailView {
 	private readonly entry: RunningSubagent;
 	private readonly tui: TUI;
 	private readonly theme: Theme;
 	private readonly done: (result: null) => void;
+	private readonly cwd: string;
 	private readonly mdTheme = getMarkdownTheme();
 	private readonly chrome: ViewerChrome;
 
-	// Cached flat line array: built once per width, rebuilt lazily after a
-	// listener event or width change; render() only slices it.
+	// Append-only item list (main-view components) + per-item rendered lines.
+	// spanFrom is the first item flattened into spanLines (lazy top);
+	// renderedTo is one past the last flattened item. Scrolling up grows the
+	// span downward from spanFrom with the scroll offset compensated, so the
+	// current position is preserved while older items load. toolResult
+	// messages update existing ToolExecutionComponents in place, tracked via
+	// dirtyItem (the earliest item whose rendered lines need a refresh).
+	private readonly items: Component[] = [];
+	private itemLines: (string[] | undefined)[] = [];
+	private spanFrom = 0;
+	private renderedTo = 0;
+	private spanLines: string[] = [];
 	private cachedWidth: number | null = null;
-	private cachedLines: string[] = [];
-	private readonly widthSafe = new ConservativeWidth();
-	private dirty = true;
+	private builtMessages = 0;
+	private dirtyItem: number | null = null;
+	private appendedBudget = false;
+	private appendedError = false;
+	private readonly pendingTools = new Map<string, ToolExecutionComponent>();
+
 	private scrollOffset = 0;
 	private followTail = true;
 	private tookLayoutRoot = false;
@@ -80,12 +96,12 @@ export class SubagentDetailView {
 	// Present only when the TUI is the fullscreen viewport variant; then
 	// this view can replace the whole screen via setLayoutRoot.
 	private readonly viewportTui: ViewportTUI | undefined;
+	private readonly widthSafe = new ConservativeWidth();
 
-	// Live stream wake-up: mark the cache dirty and request a render; the
-	// rebuild happens lazily in the next render() and stays per-change, not
-	// per-frame.
+	// Live stream wake-up: the rebuild happens lazily in the next render()
+	// (the volatile tail — streamed partial, budget, error — recomputes
+	// there; new messages fold in too).
 	private readonly onStream = () => {
-		this.dirty = true;
 		this.tui.requestRender();
 	};
 
@@ -96,11 +112,13 @@ export class SubagentDetailView {
 		done: (result: null) => void,
 		private readonly keybindings: KeybindingsManager,
 		private readonly sessionStats: string | undefined,
+		cwd: string,
 	) {
 		this.entry = entry;
 		this.tui = tui;
 		this.theme = theme;
 		this.done = done;
+		this.cwd = cwd;
 		this.viewportTui = isViewportTUI(tui) ? tui : undefined;
 		this.chrome = new ViewerChrome(theme);
 	}
@@ -111,8 +129,9 @@ export class SubagentDetailView {
 
 	/**
 	 * Subscribe to live stream updates; in fullscreen TUI mode, replace the
-	 * entire TUI by installing this view as the layout root (the previous
-	 * root is restored on close).
+	 * entire TUI by installing this view as the layout root — after a forced
+	 * full repaint so the viewer opens on a cleared screen — and hand the
+	 * previous screen back on close.
 	 */
 	open(): void {
 		this.entry.listeners.add(this.onStream);
@@ -120,6 +139,7 @@ export class SubagentDetailView {
 		if (this.viewportTui) {
 			this.tookLayoutRoot = true;
 			this.viewportTui.setLayoutRoot(this);
+			this.tui.requestRender(true);
 		}
 		// While this view owns the screen, the alt-screen scroll bindings
 		// (plain PgUp/PgDn/Home/End) would be consumed by TuiAltScreen before
@@ -154,9 +174,13 @@ export class SubagentDetailView {
 	// ------------------------------------------------------------------
 
 	render(width: number): string[] {
-		if (this.cachedWidth !== width || this.dirty) this.rebuild(width);
 		const rows = this.tui.terminal.rows;
-		const windowHeight = this.chrome.contentWindowHeight(rows);
+		const windowHeight = this.windowHeight();
+		const widthChanged = this.cachedWidth !== width;
+		this.ensureItems();
+		if (widthChanged) this.resetLines(width, windowHeight);
+		this.syncLines();
+		this.growToWindow(windowHeight);
 		this.clampScroll(windowHeight);
 
 		const out: string[] = [];
@@ -173,8 +197,11 @@ export class SubagentDetailView {
 
 	invalidate(): void {
 		this.cachedWidth = null;
-		this.cachedLines = [];
-		this.dirty = true;
+		this.itemLines = [];
+		this.spanLines = [];
+		this.spanFrom = this.items.length;
+		this.renderedTo = this.items.length;
+		this.dirtyItem = null;
 		this.chrome.invalidate();
 	}
 
@@ -186,24 +213,20 @@ export class SubagentDetailView {
 		const windowHeight = this.windowHeight();
 		if (matchesKey(data, "up")) {
 			this.followTail = false;
-			this.scrollOffset = Math.max(0, this.scrollOffset - 1);
+			this.scrollTo(this.scrollOffset - 1, windowHeight);
 		} else if (matchesKey(data, "down")) {
-			const maxOffset = Math.max(0, this.cachedLines.length - windowHeight);
-			this.scrollOffset = Math.min(this.scrollOffset + 1, maxOffset);
-			this.followTail = this.scrollOffset >= maxOffset;
+			this.scrollTo(this.scrollOffset + 1, windowHeight);
 		} else if (matchesKey(data, "pageUp")) {
 			this.followTail = false;
-			this.scrollOffset = Math.max(0, this.scrollOffset - (windowHeight - 1));
+			this.scrollTo(this.scrollOffset - (windowHeight - 1), windowHeight);
 		} else if (matchesKey(data, "pageDown")) {
-			const maxOffset = Math.max(0, this.cachedLines.length - windowHeight);
-			this.scrollOffset = Math.min(this.scrollOffset + (windowHeight - 1), maxOffset);
-			this.followTail = this.scrollOffset >= maxOffset;
+			this.scrollTo(this.scrollOffset + (windowHeight - 1), windowHeight);
 		} else if (matchesKey(data, "home")) {
 			this.followTail = false;
-			this.scrollOffset = 0;
+			this.scrollToHome();
 		} else if (matchesKey(data, "end")) {
 			this.followTail = true;
-			this.scrollOffset = Number.MAX_SAFE_INTEGER;
+			this.scrollTo(this.maxOffset(windowHeight), windowHeight);
 		} else {
 			return;
 		}
@@ -223,15 +246,59 @@ export class SubagentDetailView {
 	applyWheelDelta(delta: number): boolean {
 		if (this.cachedWidth === null) return false;
 		const windowHeight = this.windowHeight();
-		const maxOffset = Math.max(0, this.cachedLines.length - windowHeight);
-		this.scrollOffset = Math.min(
-			Math.max(0, this.scrollOffset + delta),
-			maxOffset,
-		);
-		const changed = this.followTail || this.scrollOffset !== maxOffset || delta !== 0;
-		this.followTail = this.scrollOffset >= maxOffset;
+		const wasFollowing = this.followTail;
+		if (delta < 0) this.followTail = false;
+		this.scrollTo(this.scrollOffset + delta, windowHeight);
+		if (this.scrollOffset >= this.maxOffset(windowHeight)) this.followTail = true;
 		this.tui.requestRender();
-		return changed;
+		return wasFollowing || this.followTail || delta !== 0;
+	}
+
+	// ------------------------------------------------------------------
+	// Scrolling (span growth keeps the current position; nothing resets)
+	// ------------------------------------------------------------------
+
+	/** Max scroll offset for a given window height. */
+	private maxOffset(windowHeight: number): number {
+		return Math.max(0, this.spanLines.length - windowHeight);
+	}
+
+	/** Sticky bottom until the user scrolls up; clamp inside [0, maxOffset]. */
+	private clampScroll(windowHeight: number): void {
+		const maxOffset = this.maxOffset(windowHeight);
+		if (this.followTail) this.scrollOffset = maxOffset;
+		this.scrollOffset = Math.min(Math.max(0, this.scrollOffset), maxOffset);
+	}
+
+	/** Scroll to a span-relative target. Scrolling above the span's first
+	 * rendered item grows the span upward by a windowful and shifts the
+	 * offset by the added lines — the current position is preserved while
+	 * older items load. The span always extends to the newest item, so
+	 * downward targets just clamp. */
+	private scrollTo(target: number, windowHeight: number): void {
+		if (target < 0 && this.spanFrom > 0) {
+			const added = this.growUpLines(windowHeight);
+			this.scrollOffset += added;
+			target += added;
+		}
+		const maxOffset = this.maxOffset(windowHeight);
+		const clamped = Math.min(Math.max(0, target), maxOffset);
+		if (clamped !== this.scrollOffset) {
+			this.scrollOffset = clamped;
+			this.tui.requestRender();
+		}
+	}
+
+	/** Explicit Home jump: the full log renders and the view lands at line 0. */
+	private scrollToHome(): void {
+		while (this.spanFrom > 0) {
+			this.spanFrom--;
+			this.itemLines[this.spanFrom] = this.renderItem(this.spanFrom);
+		}
+		this.rebuildSpanLines();
+		this.followTail = false;
+		this.scrollOffset = 0;
+		this.tui.requestRender();
 	}
 
 	// ------------------------------------------------------------------
@@ -239,39 +306,37 @@ export class SubagentDetailView {
 	// ------------------------------------------------------------------
 
 	/** Content-window height; one shared source of truth for render(),
-	 * handleInput() page math, and handleMouse() clamping. One row below
-	 * the chrome's budget is reserved for the stats line at the bottom. */
+	 * handleInput() page math, and wheel clamping. One row below the
+	 * chrome's budget is reserved for the stats line at the bottom. */
 	private windowHeight(): number {
 		return Math.max(1, this.chrome.contentWindowHeight(this.tui.terminal.rows) - 1);
 	}
 
-	/** Sticky bottom until the user scrolls up; clamp inside [0, maxOffset]. */
-	private clampScroll(windowHeight: number): void {
-		const maxOffset = Math.max(0, this.cachedLines.length - windowHeight);
-		if (this.followTail) this.scrollOffset = maxOffset;
-		this.scrollOffset = Math.min(Math.max(0, this.scrollOffset), maxOffset);
-	}
-
 	/** Accent title: `#<id> <agent> (<tier>) — <mode>`, dim status/elapsed,
-	 * and the dim scroll position (same window arithmetic as render()). */
+	 * and the dim scroll position (same window arithmetic as render()). A
+	 * trailing `+` marks a partial span (older items not yet rendered). */
 	private titleLine(width: number, windowHeight: number): string {
 		const entry = this.entry;
 		const parts = [
 			this.theme.fg("accent", `#${entry.id} ${entry.agent} (${entry.tier ?? "?"}) — ${entry.mode}`),
 			this.theme.fg("dim", ` ${statusOf(entry)} · ${elapsedOf(entry)}`),
 		];
-		if (this.cachedLines.length > 0) {
+		if (this.spanLines.length > 0) {
 			const position =
-				`lines ${this.scrollOffset + 1}–${Math.min(this.cachedLines.length, this.scrollOffset + windowHeight)} of ${this.cachedLines.length}`;
+				`lines ${this.scrollOffset + 1}–${Math.min(this.spanLines.length, this.scrollOffset + windowHeight)} of ${this.spanLines.length}${this.spanFrom > 0 ? "+" : ""}`;
 			parts.push(this.theme.fg("dim", ` · ${position}`));
 		}
 		return this.widthSafe.truncate(parts.join(""), width);
 	}
 
-	/** Push the visible slice, padded to exactly windowHeight rows. */
+	/** Push the visible span slice, padded to exactly windowHeight rows,
+	 * width-truncating each line (no emitted line may exceed the render
+	 * width — a wider line would soft-wrap and shift the frame). */
 	private appendContentWindow(out: string[], windowHeight: number): void {
-		const slice = this.cachedLines.slice(this.scrollOffset, this.scrollOffset + windowHeight);
-		for (let i = 0; i < windowHeight; i++) out.push(slice[i] ?? "");
+		const slice = this.spanLines.slice(this.scrollOffset, this.scrollOffset + windowHeight);
+		for (let i = 0; i < windowHeight; i++) {
+			out.push(this.widthSafe.truncate(slice[i] ?? "", this.tui.terminal.columns));
+		}
 	}
 
 	/** Dim model-usage line pinned at the frame's bottom edge, below the
@@ -285,132 +350,144 @@ export class SubagentDetailView {
 	}
 
 	// ------------------------------------------------------------------
-	// Content building (one section per method; flattened once per width)
+	// Item building (main-view components; append-only, incremental)
 	// ------------------------------------------------------------------
 
-	/** Rebuild the flat line cache at `width`: render each display item
-	 * once, then flatten. Runs only after a width change or a listener
-	 * event (dirty flag) — never twice for the same frame. */
-	private rebuild(width: number): void {
-		this.chrome.layout(width);
-		const lines: string[] = [];
-		for (const item of this.buildItems()) {
-			for (const line of item.render(width)) {
-				// ANSI-aware truncation: a line wider than the terminal would
-				// soft-wrap, shifting every row below down and pushing the
-				// border + instruction block off-screen. No frame line may
-				// exceed the render width.
-				lines.push(this.widthSafe.truncate(line, width));
+	/** Fold every message that arrived since the last build into items, and
+	 * append the tail decorations (budget warning, error) when they first
+	 * apply. */
+	private ensureItems(): void {
+		const msgs = this.entry.result.messages;
+		for (; this.builtMessages < msgs.length; this.builtMessages++) {
+			const msg = msgs[this.builtMessages];
+			if (msg.role === "assistant") {
+				if (this.items.length > 0) this.items.push(new Spacer(1));
+				this.items.push(new AssistantMessageComponent(msg, false, this.mdTheme));
+				for (const block of msg.content ?? []) {
+					if (block.type !== "toolCall") continue;
+					const component = new ToolExecutionComponent(
+						block.name,
+						block.id,
+						block.arguments,
+						undefined,
+						undefined,
+						this.tui,
+						this.cwd,
+					);
+					this.items.push(component);
+					this.pendingTools.set(block.id, component);
+				}
+			} else if (msg.role === "toolResult") {
+				const pending = this.pendingTools.get(msg.toolCallId);
+				if (!pending) continue;
+				pending.updateResult(msg);
+				this.pendingTools.delete(msg.toolCallId);
+				const itemIndex = this.items.indexOf(pending);
+				if (itemIndex >= 0) {
+					this.dirtyItem = this.dirtyItem === null
+						? itemIndex
+						: Math.min(this.dirtyItem, itemIndex);
+				}
 			}
 		}
-		this.cachedLines = lines;
-		this.cachedWidth = width;
-		this.dirty = false;
-	}
-
-	/** Fresh renderable components for the current entry state (the title
-	 * chrome lives in titleLine(); everything below it lands in the log
-	 * window). */
-	private buildItems(): Component[] {
-		const items: Component[] = [];
-		this.addTurnMeta(items);
-		this.addTask(items);
-		this.addActivity(items);
-		this.addFinalOutput(items);
-		this.addStreamedPartial(items);
-		this.addBudgetWarning(items);
-		this.addError(items);
-		return items;
-	}
-
-	private addTurnMeta(items: Component[]): void {
-		const entry = this.entry;
-		const turns = entry.result.usage.turns;
-		const turnLimit = entry.turnLimit ?? entry.result.turnLimit;
-		if (!turnLimit) return;
-		const turnInfo = `${turns}/${turnLimit} turns`;
-		items.push(
-			new Text(this.theme.fg("muted", turnInfo + (entry.result.model ? ` · ${entry.result.model}` : "")), 0, 0),
-		);
-	}
-
-	private addTask(items: Component[]): void {
-		items.push(new Text(this.theme.fg("muted", "─── Task ───"), 0, 0));
-		items.push(new Text(this.theme.fg("dim", this.entry.task), 0, 0));
-	}
-
-	private addActivity(items: Component[]): void {
-		const r = this.entry.result;
-		items.push(new Text(this.theme.fg("muted", "─── Activity ───"), 0, 0));
-		const displayItems = getDisplayItems(r.messages);
-		if (displayItems.length === 0) {
-			items.push(
+		if (this.entry.result.turnBudgetExhausted && !this.appendedBudget) {
+			this.appendedBudget = true;
+			const r = this.entry.result;
+			this.items.push(new Spacer(1));
+			this.items.push(
 				new Text(
-					this.theme.fg("muted", this.entry.completedAt ? "(no activity)" : "(waiting for first turn)"),
+					this.theme.fg("warning", `⚠ turn budget exhausted (${r.usage.turns}/${r.turnLimit} turns)`),
 					0,
 					0,
 				),
 			);
-			return;
 		}
-		for (const item of displayItems) {
-			if (item.type === "toolCall") {
-				items.push(
-					new Text(
-						this.theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, this.theme.fg.bind(this.theme), true),
-						0,
-						0,
-					),
-				);
-			} else if (item.type === "toolResult") {
-				items.push(
-					new Text(
-						this.theme.fg(item.isError ? "error" : "toolOutput", indentPreview(item.text)),
-						0,
-						0,
-					),
-				);
-			} else {
-				items.push(new Text(this.theme.fg("toolOutput", item.text), 0, 0));
+		if (isFailedResult(this.entry.result) && this.entry.result.errorMessage && !this.appendedError) {
+			this.appendedError = true;
+			this.items.push(new Text(this.theme.fg("error", `Error: ${this.entry.result.errorMessage}`), 0, 0));
+		}
+	}
+
+	// ------------------------------------------------------------------
+	// Lazy line cache (bottom-anchored; grows upward in chunks)
+	// ------------------------------------------------------------------
+
+	/** Width change or first build: drop rendered lines, anchor at the
+	 * bottom, and fill ~two windowfuls of items backwards. The view re-opens
+	 * bottom-anchored on a width change (everything rewraps). */
+	private resetLines(width: number, windowHeight: number): void {
+		this.cachedWidth = width;
+		this.itemLines = new Array(this.items.length);
+		this.spanFrom = this.items.length;
+		this.spanLines = [];
+		this.followTail = true;
+		this.scrollOffset = Number.MAX_SAFE_INTEGER;
+		this.fillBottom(windowHeight * 2);
+		this.clampScroll(windowHeight);
+	}
+
+	/** Render earlier items until ~targetLines more exist; returns the
+	 * number of lines prepended. */
+	private growUpLines(targetLines: number): number {
+		let added = 0;
+		while (this.spanFrom > 0 && added < targetLines) {
+			this.spanFrom--;
+			this.itemLines[this.spanFrom] = this.renderItem(this.spanFrom);
+			added += (this.itemLines[this.spanFrom] as string[]).length;
+		}
+		this.rebuildSpanLines();
+		return added;
+	}
+
+	/** Anchor at the bottom: render backwards until ~fillTarget lines exist. */
+	private fillBottom(fillTarget: number): void {
+		let have = this.spanLines.length;
+		while (this.spanFrom > 0 && have < fillTarget) {
+			this.spanFrom--;
+			this.itemLines[this.spanFrom] = this.renderItem(this.spanFrom);
+			have += (this.itemLines[this.spanFrom] as string[]).length;
+		}
+		this.rebuildSpanLines();
+	}
+
+	/** Render item i at the synced width, width-truncated. */
+	private renderItem(i: number): string[] {
+		const raw = (this.items[i] as Component).render(this.cachedWidth as number);
+		return raw.map((line) => this.widthSafe.truncate(line, this.cachedWidth as number));
+	}
+
+	/** Flatten items [spanFrom, items.length) into spanLines (shared string
+	 * references; O(span) pointer copies per sync). */
+	private rebuildSpanLines(): void {
+		const lines: string[] = [];
+		for (let i = this.spanFrom; i < this.items.length; i++) {
+			lines.push(...(this.itemLines[i] ?? []));
+		}
+		this.spanLines = lines;
+	}
+
+	/** Keep the per-item line cache current: re-render from the earliest
+	 * in-place update (dirtyItem), flatten newly appended items, and leave
+	 * items above the span unrendered (lazy top). */
+	private syncLines(): void {
+		const start = this.dirtyItem ?? this.renderedTo;
+		for (let i = Math.min(start, this.spanFrom); i < this.items.length; i++) {
+			if (this.itemLines[i] === undefined || i >= start) {
+				this.itemLines[i] = this.renderItem(i);
 			}
 		}
+		this.renderedTo = this.items.length;
+		this.dirtyItem = null;
+		this.rebuildSpanLines();
 	}
 
-	private addFinalOutput(items: Component[]): void {
-		const finalOutput = getFinalOutput(this.entry.result.messages);
-		if (!finalOutput) return;
-		items.push(new Spacer(1));
-		items.push(new Markdown(finalOutput.trim(), 0, 0, this.mdTheme));
-	}
-
-	private addStreamedPartial(items: Component[]): void {
-		if (!this.entry.partialText) return;
-		items.push(new Spacer(1));
-		items.push(new Text(this.theme.fg("dim", this.entry.partialText), 0, 0));
-	}
-
-	private addBudgetWarning(items: Component[]): void {
-		const r = this.entry.result;
-		if (!r.turnBudgetExhausted) return;
-		items.push(new Spacer(1));
-		items.push(
-			new Text(
-				this.theme.fg("warning", `⚠ turn budget exhausted (${r.usage.turns}/${r.turnLimit} turns)`),
-				0,
-				0,
-			),
-		);
-	}
-
-	private addError(items: Component[]): void {
-		const r = this.entry.result;
-		if (!isFailedResult(r) || !r.errorMessage) return;
-		items.push(new Text(this.theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
-	}
-
-	private addUsage(items: Component[]): void {
-		const usageStr = formatUsageStats(this.entry.result.usage);
-		if (!usageStr) return;
-		items.push(new Text(this.theme.fg("dim", usageStr), 0, 0));
+	/** Make sure the span covers the whole visible window: grow upward when
+	 * the view reaches above the span start (offset compensated — position
+	 * is preserved while older items render). */
+	private growToWindow(windowHeight: number): void {
+		if (this.spanFrom > 0 && this.scrollOffset < 1) {
+			const added = this.growUpLines(windowHeight);
+			this.scrollOffset += added;
+		}
 	}
 }

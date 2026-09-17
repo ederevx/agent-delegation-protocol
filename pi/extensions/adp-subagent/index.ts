@@ -180,7 +180,7 @@ class SubagentToolHandler {
 class DetailViewSession {
 	private view: SubagentDetailView | undefined;
 
-	mount(ui: any, entry: RunningSubagent, sessionStats: string | undefined): Promise<null> {
+	mount(ui: any, entry: RunningSubagent, cwd: string, sessionStats: string | undefined): Promise<null> {
 		// Raw wheel support in regular mode: without terminal mouse tracking
 		// the wheel scrolls the terminal's own scrollback, dragging the pinned
 		// instruction block away with the content. attach() is a no-op in
@@ -194,7 +194,7 @@ class DetailViewSession {
 				// done, keybindings, sessionStats) — done comes BEFORE the
 				// keybindings manager here because ui.custom's factory passes
 				// the keybindings manager as its third argument.
-				this.view = new SubagentDetailView(entry, tui, theme, done, kb, sessionStats);
+				this.view = new SubagentDetailView(entry, tui, theme, done, kb, sessionStats, cwd);
 				this.view.open();
 				wheel.attach(tui, this.view);
 				return this.view;
@@ -211,13 +211,13 @@ class DetailViewSession {
 class SubagentsBrowser {
 	constructor(private readonly registry: SubagentRegistry) {}
 
-	async run(ui: any, sessionStats: string | undefined): Promise<void> {
+	async run(ui: any, cwd: string, sessionStats: string | undefined): Promise<void> {
 		const sessions = new DetailViewSession();
 		try {
 			while (true) {
 				const selected = await this.openList(ui);
 				if (!selected) return;
-				await sessions.mount(ui, selected, sessionStats);
+				await sessions.mount(ui, selected, cwd, sessionStats);
 			}
 		} catch {
 			/* selector or viewer unavailable/canceled mid-loop */
@@ -276,7 +276,7 @@ class SubagentExtension {
 			cmdCtx.model ? `${cmdCtx.model.provider}/${cmdCtx.model.id}` : undefined,
 			usage?.percent != null ? `ctx ${Math.round(usage.percent)}%` : undefined,
 		].filter(Boolean).join(" · ") || undefined;
-		await this.browser.run(cmdCtx.ui, sessionStats);
+		await this.browser.run(cmdCtx.ui, cmdCtx.cwd, sessionStats);
 	}
 }
 
