@@ -38,9 +38,10 @@ export function formatUsageStats(
 	},
 	model?: string,
 	turnLimit?: number,
+	opts?: { omitTurns?: boolean },
 ): string {
 	const parts: string[] = [];
-	if (usage.turns)
+	if (usage.turns && !opts?.omitTurns)
 		parts.push(
 			turnLimit
 				? `${usage.turns}/${turnLimit} turns`

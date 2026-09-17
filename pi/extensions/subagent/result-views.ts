@@ -157,7 +157,10 @@ export class SubagentResultViews {
 			const plural = turns === 1 ? "" : "s";
 			// Live usage stats ride below the one-liner: usage accumulates on
 			// every streamed partial, so tokens/cost track the child live.
-			const usageStr = formatUsageStats(r.usage, r.model, r.turnLimit);
+			// Turns are omitted — the one-liner already carries the counter.
+			const usageStr = formatUsageStats(r.usage, r.model, r.turnLimit, {
+				omitTurns: true,
+			});
 			return new Text(
 				theme.fg("toolTitle", theme.bold("subagent ")) +
 					theme.fg("accent", r.agent) +
