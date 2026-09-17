@@ -284,11 +284,11 @@ export class SubagentRun {
 			// Full informative set the tool row used to show: agent, tier,
 			// mode, turn budget, and a task-head preview (the single-agent
 			// call slot now renders empty, so this notification is the sole
-			// preview carrier). Never the full body. The turn budget is NOT
-			// repeated here: the running row's live usage line already shows
-			// the same counter (N/limit turns), so it would read twice.
+			// preview carrier). Never the full body. The turn LIMIT belongs
+			// here; the running row shows the live count, not the limit.
 			this.notifySpawn?.(
 				`Subagent spawned: ${agent.name}${this.result.tier ? ` (${this.result.tier})` : ""} · ${this.mode}` +
+					(agent.maxTurns ? ` · turns≤${agent.maxTurns}` : "") +
 					` — ${this.task.length > 80 ? `${this.task.slice(0, 80)}...` : this.task}`,
 			);
 
