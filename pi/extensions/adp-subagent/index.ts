@@ -1,5 +1,7 @@
 /**
- * Subagent Tool — Delegate tasks to specialized agents
+ * adp-subagent — the ADP-owned subagent extension.
+ *
+ * Delegate tasks to specialized agents in an isolated context.
  *
  * Spawns a separate `pi` process for each subagent invocation,
  * giving it an isolated context window.
@@ -10,6 +12,11 @@
  *   - Chain: { chain: [{ agent: "name", task: "... {previous} ..." }, ...] }
  *
  * Uses JSON mode to capture structured output from subagents.
+ *
+ * ADP coupling: this extension is the ADP-owned delegation vehicle and
+ * hosts the delegation enforcer (enforcer.ts, registered below). Behavior
+ * changes here must be mirrored in ~/.pi/agent/rules/delegation-protocol.md
+ * — an extension update without the matching ADP update is incomplete.
  *
  * Vendored from: @earendil-works/pi-coding-agent v0.85.1 (examples/extensions/subagent, MIT)
  * Upstream: https://www.npmjs.com/package/@earendil-works/pi-coding-agent
@@ -40,9 +47,10 @@
  *   tier, mode, turn budget, task preview) and the single-agent call slot
  *   renders empty so it no longer duplicates the notification
  *
- * This file is only the wiring: schema, tool, and command. The
- * logic is split by responsibility — see types.ts, registry.ts, run.ts,
- * dispatch.ts, result-views.ts, selector-view.ts, detail-view.ts. The
+ * This file is only the wiring: schema, tool, command, and the enforcer
+ * registration. The logic is split by responsibility — see types.ts,
+ * registry.ts, run.ts, dispatch.ts, result-views.ts, selector-view.ts,
+ * detail-view.ts, and enforcer.ts.
  * wiring itself is decomposed into single-responsibility classes
  * (SubagentToolHandler, SubagentsBrowser, DetailViewSession)
  * composed by SubagentExtension, so no callback body owns another's state.
@@ -56,6 +64,7 @@ import { Type } from "typebox";
 import type { AgentScope } from "./agents.ts";
 import { discoverAgents } from "./agents.ts";
 import { SubagentDispatch } from "./dispatch.ts";
+import { registerDelegationEnforcer } from "./enforcer.ts";
 import { SubagentDetailView } from "./detail-view.ts";
 import { DetailViewWheelBridge } from "./wheel-input.ts";
 import { SubagentRegistry, type RunningSubagent } from "./registry.ts";
@@ -171,15 +180,15 @@ class SubagentToolHandler {
 class DetailViewSession {
 	private view: SubagentDetailView | undefined;
 
-	mount(ui: any, entry: RunningSubagent): Promise<null> {
+	mount(ui: any, entry: RunningSubagent, sessionStats: string | undefined): Promise<null> {
 		// Raw wheel support in regular mode: without terminal mouse tracking
 		// the wheel scrolls the terminal's own scrollback, dragging the pinned
 		// instruction block away with the content. attach() is a no-op in
 		// fullscreen (handleMouse stays the path); detach runs exactly once.
 		const wheel = new DetailViewWheelBridge(ui);
 		return (ui.custom as (cb: (tui: any, theme: any, kb: any, done: any) => any) => Promise<null>)(
-			(tui, theme, _kb, done) => {
-				this.view = new SubagentDetailView(entry, tui, theme, done);
+			(tui, theme, kb, done) => {
+				this.view = new SubagentDetailView(entry, tui, theme, kb, done, sessionStats);
 				this.view.open();
 				wheel.attach(tui, this.view);
 				return this.view;
@@ -196,13 +205,13 @@ class DetailViewSession {
 class SubagentsBrowser {
 	constructor(private readonly registry: SubagentRegistry) {}
 
-	async run(ui: any): Promise<void> {
+	async run(ui: any, sessionStats: string | undefined): Promise<void> {
 		const sessions = new DetailViewSession();
 		try {
 			while (true) {
 				const selected = await this.openList(ui);
 				if (!selected) return;
-				await sessions.mount(ui, selected);
+				await sessions.mount(ui, selected, sessionStats);
 			}
 		} catch {
 			/* selector or viewer unavailable/canceled mid-loop */
@@ -210,8 +219,9 @@ class SubagentsBrowser {
 	}
 
 	private openList(ui: any): Promise<RunningSubagent | null> {
-		// Selector: settings-integrated — a plain non-overlay custom
-		// component mounts into the editor dock exactly like /settings.
+		// Selector: dock-integrates like /settings (non-overlay custom
+		// component); only the detail viewer takes over the full screen in
+		// fullscreen mode.
 		return ui.custom(
 			(tui: any, theme: any, _kb: any, done: any) =>
 				new SubagentSelectorView(this.registry, tui, theme, done),
@@ -253,11 +263,23 @@ class SubagentExtension {
 
 	async runCommand(_args: string, cmdCtx: any): Promise<void> {
 		if (cmdCtx.mode !== "tui") return;
-		await this.browser.run(cmdCtx.ui);
+		// Computed once before the browse loop: the model/context strip the
+		// detail viewer appends to its usage line (session-level stats).
+		const usage = cmdCtx.getContextUsage();
+		const sessionStats = [
+			cmdCtx.model ? `${cmdCtx.model.provider}/${cmdCtx.model.id}` : undefined,
+			usage?.percent != null ? `ctx ${Math.round(usage.percent)}%` : undefined,
+		].filter(Boolean).join(" · ") || undefined;
+		await this.browser.run(cmdCtx.ui, sessionStats);
 	}
 }
 
 export default function (pi: ExtensionAPI) {
+	// The delegation enforcer registers first: its tool_call gate must see
+	// every call, and its before_agent_start routing policy lands before
+	// this extension's own handlers.
+	registerDelegationEnforcer(pi);
+
 	const app = new SubagentExtension(
 		new SubagentRegistry(),
 		new SubagentResultViews(),

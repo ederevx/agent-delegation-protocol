@@ -2,9 +2,9 @@
  * SubagentSelectorView — /subagents entry list
  *
  * Settings-styled list mounted exactly like /settings: a non-overlay
- * `ctx.ui.custom()` component, so it integrates with the TUI (editor dock)
- * instead of opening a floating window. Border / body / border with the
- * settings row layout (→ cursor, aligned label column, muted value column,
+ * `ctx.ui.custom()` component, so it dock-integrates like /settings
+ * (non-overlay custom component) in both TUI modes. Border / body / border
+ * with the settings row layout (→ cursor, aligned label column, muted value column,
  * dim hint footer). Entries group
  * under Active/Inactive headers, active first; windowing over the flat
  * entry list mirrors SettingsList.getVisibleRange. Mouse+keyboard.
@@ -20,7 +20,6 @@ import {
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
-import { ConservativeWidth } from "./conservative-width.ts";
 	Container,
 	matchesKey,
 	Text,
@@ -31,6 +30,7 @@ import { ConservativeWidth } from "./conservative-width.ts";
 	type TUI,
 	type TuiMouseEvent,
 } from "@earendil-works/pi-tui";
+import { ConservativeWidth } from "./conservative-width.ts";
 import type { SubagentRegistry, RunningSubagent } from "./registry.ts";
 import { statusOf } from "./format.ts";
 
@@ -91,7 +91,8 @@ export class SubagentSelectorView {
 
 	render(width: number): string[] {
 		if (this.rows.length === 0) return this.empty.render(width);
-		return [...this.border.render(width), ...this.renderBody(width), ...this.border.render(width)];
+		const lines = [...this.border.render(width), ...this.renderBody(width), ...this.border.render(width)];
+		return lines;
 	}
 
 	invalidate(): void {}

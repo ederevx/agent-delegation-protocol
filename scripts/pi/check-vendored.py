@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check the vendored subagent extension against its upstream example.
 
-Compares pi/extensions/subagent/{index,agents}.ts against the upstream
+Compares pi/extensions/adp-subagent/{index,agents}.ts against the upstream
 examples/extensions/subagent/ files shipped in the installed
 @earendil-works/pi-coding-agent package. The documented vendored header
 block (the "Vendored from:" / "Upstream:" / "Maintained by:" /
@@ -36,7 +36,7 @@ DEFAULT_UPSTREAM = Path(
     "@earendil-works/pi-coding-agent/examples/extensions/subagent"
 )
 REPO_ROOT = Path(__file__).resolve().parents[2]
-LOCAL_DIR = REPO_ROOT / "pi" / "extensions" / "subagent"
+LOCAL_DIR = REPO_ROOT / "pi" / "extensions" / "adp-subagent"
 FILES = ("index.ts", "agents.ts")
 
 

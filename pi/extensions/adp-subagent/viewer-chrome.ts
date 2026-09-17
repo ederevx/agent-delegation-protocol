@@ -13,7 +13,7 @@
  * TAIL (the head is kept, so the first instruction lines stay visible).
  */
 
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 
 export class ViewerChrome {
@@ -64,6 +64,26 @@ export class ViewerChrome {
 		const dashes = this.theme.fg("border", "─");
 		out.push(truncateToWidth(
 			dashes.repeat(2) + instructions + dashes.repeat(Math.max(0, right)) + dashes.repeat(2),
+			width,
+		));
+	}
+
+	/** Bottom border rule with optional stats text embedded inline (the
+	 * bottom counterpart of appendTop's instruction border). An empty or
+	 * missing text yields a plain full-width rule. */
+	statsBorder(out: string[], width: number, text: string | undefined): void {
+		const info = text ? this.theme.fg("muted", ` ${text} `) : "";
+		const infoWidth = text ? visibleWidth(info) : 0;
+		if (infoWidth + 4 > width) {
+			out.push(truncateToWidth(this.theme.fg("border", "─".repeat(Math.max(1, width))), width));
+			return;
+		}
+		const visible = width - 4; // reserve 2 dashes on each side
+		const left = Math.floor((visible - infoWidth) / 2);
+		const right = visible - left - infoWidth;
+		const dashes = this.theme.fg("border", "─");
+		out.push(truncateToWidth(
+			dashes.repeat(2) + info + dashes.repeat(Math.max(0, right)) + dashes.repeat(2),
 			width,
 		));
 	}

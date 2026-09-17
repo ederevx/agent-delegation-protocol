@@ -33,7 +33,7 @@ def main():
   for name in ("rules/delegation-protocol.md", "agents/frontier-worker.md",
       "agents/balanced-worker.md", "agents/bulk-worker.md",
       "agents/quick-worker.md", ".delegation-protocol/delegation-enforcer.py",
-      "extensions/adp-enforcer.ts",
+      "extensions/adp-subagent/enforcer.ts",
       ".delegation-protocol/delegation-protocol.py" if False else
       ".delegation-protocol/delegation-classifier.py",
       ".delegation-protocol/hook_adapter.py", ".delegation-protocol/manifest.json"):
@@ -41,7 +41,7 @@ def main():
   manifest = json.loads((home / ".delegation-protocol/manifest.json").read_text())
   assert manifest["host"] == "pi" and manifest["version"] == 3, manifest
   assert ".delegation-protocol/delegation-enforcer.py" in " ".join(manifest["owned"])
-  assert "extensions/adp-enforcer.ts" in " ".join(manifest["owned"])
+  assert "extensions/adp-subagent/enforcer.ts" in " ".join(manifest["owned"])
 
   # Routing context and budget texts flow through the shared classifier.
   body = invoke("prompt", {"session_id": "route", "prompt": "Review this module."})
@@ -147,7 +147,7 @@ def main():
   assert uninstall.returncode == 0, uninstall.stderr
   assert not (home / "settings.json").exists()
   for name in ("agents/frontier-worker.md", "agents/quick-worker.md",
-      ".delegation-protocol/delegation-enforcer.py", "extensions/adp-enforcer.ts",
+      ".delegation-protocol/delegation-enforcer.py", "extensions/adp-subagent/enforcer.ts",
       ".delegation-protocol/manifest.json"):
     assert not (home / name).exists(), name
 

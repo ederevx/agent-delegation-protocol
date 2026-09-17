@@ -1,17 +1,16 @@
 /**
- * ADP delegation enforcer for Pi.
+ * Delegation enforcer — the ADP half of the adp-subagent extension.
  *
- * Adapted from the Agent Delegation Protocol host hooks: this extension only
- * adapts Pi lifecycle events to the shared adapter's normalized hook payloads.
- * Classification, state, worker budgets, and ledgers live in the installed
- * Python adapter, called through the delegation-enforcer bridge in the
- * protocol state directory (`.delegation-protocol/`, next to the adapter) so
- * no legacy `hooks/` directory exists and Pi's deprecation warning stays
- * silent. It never spawns subagents itself: delegation evidence is Pi's
- * native `subagent` tool (the ADP-owned subagent extension, vendored from
- * the official example and deployed by the installer), which this file does
- * not depend on or re-implement. When the bridge is absent the extension is
- * inert.
+ * Adapted from the Agent Delegation Protocol host hooks: this module only
+ * adapts Pi lifecycle events to the shared adapter's normalized hook
+ * payloads. Classification, state, worker budgets, and ledgers live in the
+ * installed Python adapter, called through the delegation-enforcer bridge
+ * in the protocol state directory (`.delegation-protocol/`, next to the
+ * adapter) so no legacy `hooks/` directory exists and Pi's deprecation
+ * warning stays silent. It never spawns subagents itself: delegation
+ * evidence is Pi's native `subagent` tool (registered by this same
+ * extension's index.ts) — this module does not depend on or re-implement
+ * that tool. When the bridge is absent the module is inert.
  *
  * Event mapping:
  *   before_agent_start          -> prompt         (classify; append routing policy)
@@ -388,7 +387,7 @@ class AdpEnforcer {
 	}
 }
 
-export default function (pi: ExtensionAPI) {
+export function registerDelegationEnforcer(pi: ExtensionAPI): void {
 	const worker = detectWorker(process.argv);
 	const bridgeFile = bridgePath();
 	if (!fs.existsSync(bridgeFile)) return; // not installed: stay inert

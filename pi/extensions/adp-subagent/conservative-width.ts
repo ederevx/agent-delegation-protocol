@@ -31,12 +31,13 @@ export class ConservativeWidth {
 	/** ANSI-aware truncation that also fits the conservative model: pi-tui's
 	 * truncateToWidth first (correct ellipsis handling), then trim by the
 	 * measured overflow, bounded rounds since each pass drops ≥1 visible
-	 * column. */
-	truncate(line: string, width: number): string {
-		let out = truncateToWidth(line, width);
+	 * column. Optional `ellipsis` passes through to truncateToWidth (empty
+	 * string disables the ellipsis, matching the settings-row callers). */
+	truncate(line: string, width: number, ellipsis?: string): string {
+		let out = truncateToWidth(line, width, ellipsis);
 		let over = this.measure(out) - width;
 		for (let round = 0; over > 0 && round < 4; round++) {
-			out = truncateToWidth(out, width - over, "");
+			out = truncateToWidth(out, width - over, ellipsis, false);
 			over = this.measure(out) - width;
 		}
 		return out;

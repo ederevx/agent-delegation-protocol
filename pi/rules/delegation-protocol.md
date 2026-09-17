@@ -33,14 +33,21 @@ Do not repeat completed work merely to obtain the same information; review,
 verify, or correct worker claims when needed.
 
 Delegation is proven only by Pi's native subagent lifecycle — the `subagent`
-tool of the ADP-owned subagent extension (vendored from the official
-example) — as observed by the delegation enforcer extension; there is no
+tool of the adp-subagent extension (vendored from the official example; the
+extension is named adp-subagent and is ADP-owned, but the tool keeps its
+native `subagent` name) — as observed by the delegation enforcer, which is
+registered by that same extension (adp-subagent/enforcer.ts); there is no
 alternative request format, launcher, or scheduler. ADP owns none of that
-spawning machinery and does not depend on the subagent extension for its own
+spawning machinery and does not depend on the subagent tool for its own
 resources: when the native subagent tool is unavailable, required delegation
 cannot be proven and the work is reported as blocked instead of being
 carried out in the parent.
-as blocked instead of being carried out in the parent.
+
+Maintenance coupling: this document describes the adp-subagent extension's
+delegation-facing behavior, and the extension's own header points back
+here. Any change to that extension's behavior — lifecycle, steering,
+budgets, or the worker cap — must update this document in the same change;
+an extension update without the matching ADP update is incomplete.
 
 ## Model tiers
 
@@ -113,6 +120,15 @@ different topic from the original deployment gets a fresh worker rather than a
 reuse. The `subagent` tool's parallel and chain modes are ordinary native
 spawning — every task inside one call counts as its own active slot against
 the cap, so concurrent spawns are admitted up to the full cap.
+
+Steering while workers are active: a user prompt delivered as steering
+(streamingBehavior "steer") queues through pi's own steer delivery behind
+the pending subagent tool result — the subagent extension does not kill
+workers on a typed message, so a steer waits for the running workers to
+finish before the parent's next LLM call. Workers are stopped only by the
+tool-level abort signal or an explicit user Esc. Alt+Enter (followUp)
+keeps its explicit queue-until-done meaning, and extension-injected
+messages pass through untouched.
 
 ## Worker budgets and routing
 

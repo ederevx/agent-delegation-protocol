@@ -28,6 +28,7 @@
 
 import {
 	getMarkdownTheme,
+	type KeybindingsManager,
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -74,6 +75,7 @@ export class SubagentDetailView {
 	private scrollOffset = 0;
 	private followTail = true;
 	private tookLayoutRoot = false;
+	private savedUserBindings: Record<string, unknown> | null = null;
 	private unsubscribe: (() => void) | undefined;
 	// Present only when the TUI is the fullscreen viewport variant; then
 	// this view can replace the whole screen via setLayoutRoot.
@@ -87,7 +89,14 @@ export class SubagentDetailView {
 		this.tui.requestRender();
 	};
 
-	constructor(entry: RunningSubagent, tui: TUI, theme: Theme, done: (result: null) => void) {
+	constructor(
+		entry: RunningSubagent,
+		tui: TUI,
+		theme: Theme,
+		done: (result: null) => void,
+		private readonly keybindings: KeybindingsManager,
+		private readonly sessionStats: string | undefined,
+	) {
 		this.entry = entry;
 		this.tui = tui;
 		this.theme = theme;
@@ -112,6 +121,18 @@ export class SubagentDetailView {
 			this.tookLayoutRoot = true;
 			this.viewportTui.setLayoutRoot(this);
 		}
+		// While this view owns the screen, the alt-screen scroll bindings
+		// (plain PgUp/PgDn/Home/End) would be consumed by TuiAltScreen before
+		// the focused component; unbind them so the viewer gets them, and
+		// restore the user's bindings on close.
+		this.savedUserBindings = this.keybindings.getUserBindings();
+		this.keybindings.setUserBindings({
+			...this.savedUserBindings,
+			"tui.altScreen.pageUp": [],
+			"tui.altScreen.pageDown": [],
+			"tui.altScreen.top": [],
+			"tui.altScreen.bottom": [],
+		} as Parameters<KeybindingsManager["setUserBindings"]>[0]);
 	}
 
 	/** Idempotent teardown: unsubscribe and hand the screen back. */
@@ -121,6 +142,10 @@ export class SubagentDetailView {
 		if (this.tookLayoutRoot) {
 			this.tookLayoutRoot = false;
 			this.viewportTui?.setLayoutRoot(undefined);
+		}
+		if (this.savedUserBindings) {
+			this.keybindings.setUserBindings(this.savedUserBindings as Parameters<KeybindingsManager["setUserBindings"]>[0]);
+			this.savedUserBindings = null;
 		}
 	}
 
@@ -138,7 +163,11 @@ export class SubagentDetailView {
 		out.push(this.widthSafe.truncate(this.titleLine(width, windowHeight), width));
 		this.chrome.appendTop(out, width, rows);
 		this.appendContentWindow(out, windowHeight);
-		out.push(this.widthSafe.truncate(this.statsLine(width), width));
+		if (this.tookLayoutRoot) {
+			this.chrome.statsBorder(out, width, this.statsLine(width));
+		} else {
+			out.push(this.widthSafe.truncate(this.statsLine(width), width));
+		}
 		return this.chrome.clipFrame(out, rows);
 	}
 
@@ -159,14 +188,16 @@ export class SubagentDetailView {
 			this.followTail = false;
 			this.scrollOffset = Math.max(0, this.scrollOffset - 1);
 		} else if (matchesKey(data, "down")) {
-			this.followTail = true;
-			this.scrollOffset += 1;
+			const maxOffset = Math.max(0, this.cachedLines.length - windowHeight);
+			this.scrollOffset = Math.min(this.scrollOffset + 1, maxOffset);
+			this.followTail = this.scrollOffset >= maxOffset;
 		} else if (matchesKey(data, "pageUp")) {
 			this.followTail = false;
 			this.scrollOffset = Math.max(0, this.scrollOffset - (windowHeight - 1));
 		} else if (matchesKey(data, "pageDown")) {
-			this.followTail = true;
-			this.scrollOffset += windowHeight - 1;
+			const maxOffset = Math.max(0, this.cachedLines.length - windowHeight);
+			this.scrollOffset = Math.min(this.scrollOffset + (windowHeight - 1), maxOffset);
+			this.followTail = this.scrollOffset >= maxOffset;
 		} else if (matchesKey(data, "home")) {
 			this.followTail = false;
 			this.scrollOffset = 0;
@@ -248,7 +279,9 @@ export class SubagentDetailView {
 	private statsLine(width: number): string {
 		const r = this.entry.result;
 		const usageStr = formatUsageStats(r.usage, r.model, r.turnLimit);
-		return this.theme.fg("muted", usageStr || "no usage yet");
+		const stats = this.theme.fg("muted", usageStr || "no usage yet") +
+			(this.sessionStats ? this.theme.fg("dim", ` · ${this.sessionStats}`) : "");
+		return stats;
 	}
 
 	// ------------------------------------------------------------------
