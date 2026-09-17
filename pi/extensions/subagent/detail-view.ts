@@ -55,9 +55,6 @@ import {
 } from "./format.ts";
 import { ViewerChrome } from "./viewer-chrome.ts";
 
-/** Dim viewer instructions, word-wrapped under the border rule. */
-const INSTRUCTION_TEXT =
-	"↑↓/PgUp/PgDn/Home/End scroll · wheel scroll · esc back";
 
 export class SubagentDetailView {
 	private readonly entry: RunningSubagent;
@@ -94,7 +91,7 @@ export class SubagentDetailView {
 		this.theme = theme;
 		this.done = done;
 		this.viewportTui = isViewportTUI(tui) ? tui : undefined;
-		this.chrome = new ViewerChrome(theme, INSTRUCTION_TEXT);
+		this.chrome = new ViewerChrome(theme);
 	}
 
 	// ------------------------------------------------------------------
@@ -132,8 +129,7 @@ export class SubagentDetailView {
 	render(width: number): string[] {
 		if (this.cachedWidth !== width || this.dirty) this.rebuild(width);
 		const rows = this.tui.terminal.rows;
-		const instructions = this.chrome.keptInstructions(rows);
-		const windowHeight = this.chrome.contentWindowHeight(rows, instructions.length);
+		const windowHeight = this.chrome.contentWindowHeight(rows);
 		this.clampScroll(windowHeight);
 
 		const out: string[] = [];

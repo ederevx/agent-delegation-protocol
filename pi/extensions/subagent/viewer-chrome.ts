@@ -13,26 +13,21 @@
  * TAIL (the head is kept, so the first instruction lines stay visible).
  */
 
-import { truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 
 export class ViewerChrome {
-	private wrappedInstructions: string[] = [];
 	private cachedWidth: number | null = null;
 
 	constructor(
 		private readonly theme: Theme,
-		// Already-styled instruction text: colors are applied once here in
-		// the constructor's caller; wrapTextWithAnsi preserves the spans.
-		private readonly instructionText: string,
 	) {}
 
 	/** Re-wrap the instruction text at `width`; a no-op while unchanged.
 	 * Callers run this before any height/kept-line query at that width. */
 	layout(width: number): void {
 		if (this.cachedWidth === width) return;
-		this.wrappedInstructions = wrapTextWithAnsi(
-			this.theme.fg("muted", this.instructionText), Math.max(8, width));
+		// Instructions are embedded in the border rule; no wrapping needed.
 		this.cachedWidth = width;
 	}
 
@@ -43,33 +38,34 @@ export class ViewerChrome {
 	 * to its floor of 1 first, then instruction lines drop from the TAIL
 	 * (the head is kept, so the first instruction lines stay visible);
 	 * clipFrame is a rows<3-only final safety. */
-	keptInstructions(rows: number): string[] {
-		const all = this.wrappedInstructions;
-		const budget = Math.max(0, rows - 3);
-		if (budget === 0) return [];
-		return all.length <= budget ? all : all.slice(0, budget);
-	}
-
 	/** Height of the scrollable content window: every row except the title,
 	 * the border rule, and the kept instruction lines (floored at 1). Single
 	 * source of truth shared by render(), handleInput() page math, and
 	 * handleMouse() clamping; derives from the cached wrapped instructions
 	 * (1 line assumed while cold), which render() may pass precomputed. */
-	contentWindowHeight(rows: number, instructionCount?: number): number {
-		const instructions = instructionCount ??
-			(this.cachedWidth === null ? 1 : this.keptInstructions(rows).length);
-		return Math.max(1, rows - 2 - instructions);
+	contentWindowHeight(rows: number): number {
+		return Math.max(1, rows - 2);
 	}
 
-	/** Append the pinned top block after the title: exactly the kept
-	 * instruction lines, then the dim border rule (consistent with the
-	 * height math above, so the assembled frame totals `rows` lines before
-	 * clipFrame). */
+	/** Append the pinned top block after the title: the border rule with
+	 * the instructions embedded inline. The border is a stable element
+	 * that stays during scrolling, so the instructions attached to it
+	 * stay too. */
 	appendTop(out: string[], width: number, rows: number): void {
-		for (const line of this.keptInstructions(rows)) {
-			out.push(truncateToWidth(line, width));
+		const instructions = this.theme.fg("muted", " esc back · ↑↓/PgUp/PgDn scroll ");
+		const infoWidth = 30; // visible width of the instruction text
+		if (infoWidth + 4 > width) {
+			out.push(truncateToWidth(this.theme.fg("border", "─".repeat(Math.max(1, width))), width));
+			return;
 		}
-		out.push(truncateToWidth(this.theme.fg("border", "─".repeat(Math.max(1, width))), width));
+		const visible = width - 4;
+		const left = Math.floor((visible - infoWidth) / 2);
+		const right = visible - left - infoWidth;
+		const dashes = this.theme.fg("border", "─");
+		out.push(truncateToWidth(
+			dashes.repeat(2) + instructions + dashes.repeat(Math.max(0, right)) + dashes.repeat(2),
+			width,
+		));
 	}
 
 	/** rows<3-only final safety: for rows ≥ 3 the layout above yields
@@ -83,6 +79,5 @@ export class ViewerChrome {
 	/** Drop the cached wrap so the next layout() re-wraps. */
 	invalidate(): void {
 		this.cachedWidth = null;
-		this.wrappedInstructions = [];
 	}
 }
