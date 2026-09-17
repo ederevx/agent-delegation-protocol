@@ -247,7 +247,13 @@ export class SubagentDetailView {
 		this.chrome.layout(width);
 		const lines: string[] = [];
 		for (const item of this.buildItems()) {
-			for (const line of item.render(width)) lines.push(line);
+			for (const line of item.render(width)) {
+				// ANSI-aware truncation: a line wider than the terminal would
+				// soft-wrap, shifting every row below down and pushing the
+				// border + instruction block off-screen. No frame line may
+				// exceed the render width.
+				lines.push(truncateToWidth(line, width));
+			}
 		}
 		this.cachedLines = lines;
 		this.cachedWidth = width;
