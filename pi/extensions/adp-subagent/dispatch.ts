@@ -111,12 +111,17 @@ export class SubagentDispatch {
 	// Shared helpers
 	// ------------------------------------------------------------------
 
-	private makeDetails(mode: "single" | "parallel" | "chain", results: SingleResult[]): SubagentDetails {
+	private makeDetails(
+		mode: "single" | "parallel" | "chain",
+		results: SingleResult[],
+		expectedTotal?: number,
+	): SubagentDetails {
 		return {
 			mode,
 			agentScope: this.agentScope,
 			projectAgentsDir: this.projectAgentsDir,
 			results,
+			expectedTotal,
 		};
 	}
 
@@ -200,7 +205,7 @@ export class SubagentDispatch {
 						if (currentResult) {
 							onUpdate({
 								content: partial.content,
-								details: this.makeDetails("chain", [...results, currentResult]),
+								details: this.makeDetails("chain", [...results, currentResult], chain.length),
 							});
 						}
 					}
@@ -214,7 +219,7 @@ export class SubagentDispatch {
 				signal,
 				onUpdate: chainUpdate,
 				mode: "chain-step",
-				makeDetails: (rs) => this.makeDetails("chain", rs),
+				makeDetails: (rs) => this.makeDetails("chain", rs, chain.length),
 			}).run();
 			results.push(result);
 
@@ -226,7 +231,7 @@ export class SubagentDispatch {
 							text: `Chain stopped at step ${i + 1} (${step.agent}): ${getResultOutput(result)}`,
 						},
 					],
-					details: this.makeDetails("chain", results),
+					details: this.makeDetails("chain", results, chain.length),
 					isError: true,
 				};
 			}
@@ -240,7 +245,7 @@ export class SubagentDispatch {
 		}
 		return {
 			content: [{ type: "text", text }],
-			details: this.makeDetails("chain", results),
+			details: this.makeDetails("chain", results, chain.length),
 		};
 	}
 
@@ -283,7 +288,7 @@ export class SubagentDispatch {
 			const done = allResults.length - running;
 			onUpdate({
 				content: [{ type: "text", text: `Parallel: ${done}/${allResults.length} done, ${running} running...` }],
-				details: this.makeDetails("parallel", [...allResults]),
+				details: this.makeDetails("parallel", [...allResults], tasks.length),
 			});
 		};
 
@@ -301,7 +306,7 @@ export class SubagentDispatch {
 					}
 				},
 				mode: "parallel-task",
-				makeDetails: (rs) => this.makeDetails("parallel", rs),
+				makeDetails: (rs) => this.makeDetails("parallel", rs, tasks.length),
 			}).run();
 			allResults[index] = result;
 			emitParallelUpdate();
@@ -328,7 +333,7 @@ export class SubagentDispatch {
 					text: `Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join("\n\n---\n\n")}`,
 				},
 			],
-			details: this.makeDetails("parallel", results),
+			details: this.makeDetails("parallel", results, tasks.length),
 		};
 	}
 

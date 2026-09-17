@@ -49,6 +49,10 @@ export interface SubagentDetails {
 	agentScope: AgentScope;
 	projectAgentsDir: string | null;
 	results: SingleResult[];
+	/** Requested task/step count. Live views use it as the counter's
+	 * denominator before every step's result exists (a chain reports
+	 * only completed + in-flight steps in results). */
+	expectedTotal?: number;
 }
 
 export interface DispatchDefaults {

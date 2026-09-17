@@ -57,7 +57,7 @@
  */
 
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
@@ -186,9 +186,15 @@ class DetailViewSession {
 		// instruction block away with the content. attach() is a no-op in
 		// fullscreen (handleMouse stays the path); detach runs exactly once.
 		const wheel = new DetailViewWheelBridge(ui);
-		return (ui.custom as (cb: (tui: any, theme: any, kb: any, done: any) => any) => Promise<null>)(
+		return (ui.custom as (
+			cb: (tui: any, theme: any, kb: KeybindingsManager, done: (result: null) => void) => any,
+		) => Promise<null>)(
 			(tui, theme, kb, done) => {
-				this.view = new SubagentDetailView(entry, tui, theme, kb, done, sessionStats);
+				// Order matters: the view's constructor is (entry, tui, theme,
+				// done, keybindings, sessionStats) — done comes BEFORE the
+				// keybindings manager here because ui.custom's factory passes
+				// the keybindings manager as its third argument.
+				this.view = new SubagentDetailView(entry, tui, theme, done, kb, sessionStats);
 				this.view.open();
 				wheel.attach(tui, this.view);
 				return this.view;
