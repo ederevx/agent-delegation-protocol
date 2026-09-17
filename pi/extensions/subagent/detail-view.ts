@@ -250,7 +250,7 @@ export class SubagentDetailView {
 	private statsLine(width: number): string {
 		const r = this.entry.result;
 		const usageStr = formatUsageStats(r.usage, r.model, r.turnLimit);
-		return this.theme.fg("dim", usageStr || "no usage yet");
+		return this.theme.fg("muted", usageStr || "no usage yet");
 	}
 
 	// ------------------------------------------------------------------

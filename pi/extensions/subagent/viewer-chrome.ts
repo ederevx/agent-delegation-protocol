@@ -31,7 +31,8 @@ export class ViewerChrome {
 	 * Callers run this before any height/kept-line query at that width. */
 	layout(width: number): void {
 		if (this.cachedWidth === width) return;
-		this.wrappedInstructions = wrapTextWithAnsi(this.instructionText, Math.max(8, width));
+		this.wrappedInstructions = wrapTextWithAnsi(
+			this.theme.fg("muted", this.instructionText), Math.max(8, width));
 		this.cachedWidth = width;
 	}
 
@@ -68,7 +69,7 @@ export class ViewerChrome {
 		for (const line of this.keptInstructions(rows)) {
 			out.push(truncateToWidth(line, width));
 		}
-		out.push(truncateToWidth(this.theme.fg("dim", "─".repeat(Math.max(1, width))), width));
+		out.push(truncateToWidth(this.theme.fg("border", "─".repeat(Math.max(1, width))), width));
 	}
 
 	/** rows<3-only final safety: for rows ≥ 3 the layout above yields
