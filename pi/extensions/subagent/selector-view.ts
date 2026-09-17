@@ -20,6 +20,7 @@ import {
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
+import { ConservativeWidth } from "./conservative-width.ts";
 	Container,
 	matchesKey,
 	Text,
@@ -44,6 +45,7 @@ export class SubagentSelectorView {
 	private readonly theme: Theme;
 	private readonly done: (entry: RunningSubagent | null) => void;
 	private readonly st = getSettingsListTheme();
+	private readonly widthSafe = new ConservativeWidth();
 	private readonly rows: SelectorRow[];
 	private readonly maxLabelWidth: number;
 	private readonly maxVisible: number;
@@ -151,7 +153,7 @@ export class SubagentSelectorView {
 			if (row.groupTitle !== prevGroup) {
 				if (prevGroup !== "") lines.push("");
 				lines.push(
-					truncateToWidth(
+					this.widthSafe.truncate(
 						this.theme.fg("accent", this.theme.bold(`${row.groupTitle} (${row.groupCount})`)),
 						width,
 					),
@@ -166,20 +168,20 @@ export class SubagentSelectorView {
 			const usedWidth = visibleWidth(prefix) + this.maxLabelWidth + visibleWidth(separator);
 			const valueMaxWidth = Math.max(0, width - usedWidth - 2);
 			const valueText = this.st.value(
-				truncateToWidth(statusOf(row.entry), valueMaxWidth, ""),
+				this.widthSafe.truncate(statusOf(row.entry), valueMaxWidth, ""),
 				isSelected,
 			);
 			lines.push(
-				truncateToWidth(prefix + this.st.label(labelPadded, isSelected) + separator + valueText, width),
+				this.widthSafe.truncate(prefix + this.st.label(labelPadded, isSelected) + separator + valueText, width),
 			);
 			this.rowMap.push({ y: lines.length, index: i });
 		}
 		if (startIndex > 0 || endIndex < this.rows.length) {
-			lines.push(this.st.hint(truncateToWidth(`  (${this.selected + 1}/${this.rows.length})`, width - 2, "")));
+			lines.push(this.st.hint(this.widthSafe.truncate(`  (${this.selected + 1}/${this.rows.length})`, width - 2, "")));
 		}
 		lines.push("");
 		lines.push(
-			this.st.hint(truncateToWidth("  ↑↓ navigate · Enter/Space to open · Esc to cancel", width, "")),
+			this.st.hint(this.widthSafe.truncate("  ↑↓ navigate · Enter/Space to open · Esc to cancel", width, "")),
 		);
 		return lines;
 	}

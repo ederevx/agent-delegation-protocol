@@ -53,6 +53,7 @@ import {
 	statusOf,
 	elapsedOf,
 } from "./format.ts";
+import { ConservativeWidth } from "./conservative-width.ts";
 import { ViewerChrome } from "./viewer-chrome.ts";
 
 
@@ -68,6 +69,7 @@ export class SubagentDetailView {
 	// listener event or width change; render() only slices it.
 	private cachedWidth: number | null = null;
 	private cachedLines: string[] = [];
+	private readonly widthSafe = new ConservativeWidth();
 	private dirty = true;
 	private scrollOffset = 0;
 	private followTail = true;
@@ -133,10 +135,10 @@ export class SubagentDetailView {
 		this.clampScroll(windowHeight);
 
 		const out: string[] = [];
-		out.push(truncateToWidth(this.titleLine(width, windowHeight), width));
+		out.push(this.widthSafe.truncate(this.titleLine(width, windowHeight), width));
 		this.chrome.appendTop(out, width, rows);
 		this.appendContentWindow(out, windowHeight);
-		out.push(truncateToWidth(this.statsLine(width), width));
+		out.push(this.widthSafe.truncate(this.statsLine(width), width));
 		return this.chrome.clipFrame(out, rows);
 	}
 
@@ -232,7 +234,7 @@ export class SubagentDetailView {
 				`lines ${this.scrollOffset + 1}–${Math.min(this.cachedLines.length, this.scrollOffset + windowHeight)} of ${this.cachedLines.length}`;
 			parts.push(this.theme.fg("dim", ` · ${position}`));
 		}
-		return truncateToWidth(parts.join(""), width);
+		return this.widthSafe.truncate(parts.join(""), width);
 	}
 
 	/** Push the visible slice, padded to exactly windowHeight rows. */
@@ -265,7 +267,7 @@ export class SubagentDetailView {
 				// soft-wrap, shifting every row below down and pushing the
 				// border + instruction block off-screen. No frame line may
 				// exceed the render width.
-				lines.push(truncateToWidth(line, width));
+				lines.push(this.widthSafe.truncate(line, width));
 			}
 		}
 		this.cachedLines = lines;
