@@ -20,8 +20,10 @@
  *   removal; expanded renderer restored with turn-budget markers; parallel
  *   fan-out (MAX_PARALLEL_TASKS) and child concurrency (MAX_CONCURRENCY)
  *   raised to 10 to match the ADP active-worker cap; steering Enter while
- *   workers are active interrupts the workers and delivers the message
- *   non-queued before the next LLM call; throttled parent updates (≤4/s);
+ *   workers are active is left to pi's own steer delivery (the message
+ *   queues behind the pending subagent tool result; workers are never
+ *   killed by a typed message - only the tool-level abort signal, an
+ *   explicit Esc, kills them); throttled parent updates (≤4/s);
  *   /subagents UI: settings-integrated (non-overlay, editor-dock mount
  *   exactly like /settings) selector grouping entries under Active/Inactive
  *   headers (active first); the detail viewer replaces the entire TUI in
@@ -38,11 +40,11 @@
  *   tier, mode, turn budget, task preview) and the single-agent call slot
  *   renders empty so it no longer duplicates the notification
  *
- * This file is only the wiring: schema, tool, command, and steering. The
+ * This file is only the wiring: schema, tool, and command. The
  * logic is split by responsibility — see types.ts, registry.ts, run.ts,
  * dispatch.ts, result-views.ts, selector-view.ts, detail-view.ts. The
  * wiring itself is decomposed into single-responsibility classes
- * (SteeringGate, SubagentToolHandler, SubagentsBrowser, DetailViewSession)
+ * (SubagentToolHandler, SubagentsBrowser, DetailViewSession)
  * composed by SubagentExtension, so no callback body owns another's state.
  */
 
@@ -101,30 +103,6 @@ function buildToolDescription(): string {
 		`Default agent scope is "user" (from ${getAgentDir()}/agents).`,
 		`To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
 	].join(" ");
-}
-
-/** The steering interrupt: a typed Enter (steering) while workers are
- *  active must not queue behind a long worker. Alt+Enter
- *  (streamingBehavior "followUp") keeps its explicit queue-until-done
- *  meaning, and extension-injected messages pass through untouched. */
-class SteeringGate {
-	constructor(
-		private readonly registry: SubagentRegistry,
-		private readonly sendUserMessage: (text: string) => void,
-	) {}
-
-	handle(event: { source?: string; streamingBehavior?: string; text: string }) {
-		if (event.source === "extension") return { action: "continue" as const };
-		if (event.streamingBehavior !== "steer") return { action: "continue" as const };
-		if (this.registry.activeWithProc().length === 0) {
-			return { action: "continue" as const };
-		}
-		this.registry.interruptActive();
-		// sendUserMessage is typed void but the runtime returns a promise;
-		// Promise.resolve absorbs either so a rejection cannot surface.
-		void Promise.resolve(this.sendUserMessage(event.text)).catch(() => {});
-		return { action: "handled" as const };
-	}
 }
 
 /** The subagent tool's execution: assembles per-call collaborators and
@@ -244,22 +222,15 @@ class SubagentsBrowser {
 /** Owns the long-lived collaborators and exposes the handlers the
  *  ExtensionAPI registration binds to. */
 class SubagentExtension {
-	private readonly steering: SteeringGate;
 	private readonly tool: SubagentToolHandler;
 	private readonly browser: SubagentsBrowser;
 
 	constructor(
 		private readonly registry: SubagentRegistry,
 		private readonly views: SubagentResultViews,
-		private readonly sendUserMessage: (text: string) => void,
 	) {
-		this.steering = new SteeringGate(registry, sendUserMessage);
 		this.tool = new SubagentToolHandler(registry, views);
 		this.browser = new SubagentsBrowser(registry);
-	}
-
-	handleInput(event: { source?: string; streamingBehavior?: string; text: string }) {
-		return this.steering.handle(event);
 	}
 
 	executeTool(
@@ -290,14 +261,7 @@ export default function (pi: ExtensionAPI) {
 	const app = new SubagentExtension(
 		new SubagentRegistry(),
 		new SubagentResultViews(),
-		(text: string) => {
-			// sendUserMessage is typed void but the runtime returns a
-			// promise; Promise.resolve absorbs either.
-			void Promise.resolve(pi.sendUserMessage(text, { deliverAs: "steer" })).catch(() => {});
-		},
 	);
-
-	pi.on("input", (event) => app.handleInput(event));
 
 	pi.registerTool({
 		name: "subagent",
