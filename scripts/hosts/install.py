@@ -255,6 +255,8 @@ def resources(repo: Path, home: Path, host: str) -> list[tuple[Path, Path, str]]
              home / "extensions/subagent/types.ts", "copy"),
             (repo / "pi/extensions/subagent/viewer-chrome.ts",
              home / "extensions/subagent/viewer-chrome.ts", "copy"),
+            (repo / "pi/extensions/subagent/conservative-width.ts",
+             home / "extensions/subagent/conservative-width.ts", "copy"),
             (repo / "pi/extensions/subagent/wheel-input.ts",
              home / "extensions/subagent/wheel-input.ts", "copy"),
             *common,
