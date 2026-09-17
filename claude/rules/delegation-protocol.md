@@ -138,8 +138,11 @@ checks it, so it never blocks a tool call. Before doing any work in a
 hook-supplying repo, confirm this checkout sits exactly on the latest `v1.x`
 tag reachable from `origin/main`, and check it for stale branches against
 `origin/main`; reconcile anything with unmerged value into `main` first, then
-drop the stale branch. Never push to or merge directly into `main` yourself —
-reconcile through a PR and let the user land it.
+drop the stale branch. Merging into `main` and force-pushing are allowed only
+under the explicit, single-use, text-based authorization of Owner bypass
+below, granted for that exact operation and consumed by it; without such
+authorization, never push to or merge directly into `main` — reconcile
+through a PR and let the user land it.
 
 Iterating on a change to hooks/rules may happen in an isolated test
 checkout that is not the one actually installed. That test environment
