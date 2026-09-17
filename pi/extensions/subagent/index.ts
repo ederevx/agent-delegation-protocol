@@ -55,6 +55,7 @@ import type { AgentScope } from "./agents.ts";
 import { discoverAgents } from "./agents.ts";
 import { SubagentDispatch } from "./dispatch.ts";
 import { SubagentDetailView } from "./detail-view.ts";
+import { DetailViewWheelBridge } from "./wheel-input.ts";
 import { SubagentRegistry, type RunningSubagent } from "./registry.ts";
 import { SubagentResultViews } from "./result-views.ts";
 import { SubagentSelectorView } from "./selector-view.ts";
@@ -193,13 +194,22 @@ class DetailViewSession {
 	private view: SubagentDetailView | undefined;
 
 	mount(ui: any, entry: RunningSubagent): Promise<null> {
+		// Raw wheel support in regular mode: without terminal mouse tracking
+		// the wheel scrolls the terminal's own scrollback, dragging the pinned
+		// instruction block away with the content. attach() is a no-op in
+		// fullscreen (handleMouse stays the path); detach runs exactly once.
+		const wheel = new DetailViewWheelBridge(ui);
 		return (ui.custom as (cb: (tui: any, theme: any, kb: any, done: any) => any) => Promise<null>)(
 			(tui, theme, _kb, done) => {
 				this.view = new SubagentDetailView(entry, tui, theme, done);
 				this.view.open();
+				wheel.attach(tui, this.view);
 				return this.view;
 			},
-		).finally(() => this.view?.close());
+		).finally(() => {
+			wheel.detach();
+			this.view?.close();
+		});
 	}
 }
 

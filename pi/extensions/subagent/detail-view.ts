@@ -183,18 +183,25 @@ export class SubagentDetailView {
 	handleMouse(event: TuiMouseEvent) {
 		if (event.type !== "wheel") return undefined;
 		if (this.cachedWidth === null) return undefined;
-		// pi-tui emits a negative wheelDelta on wheel-up ("Negative values
-		// scroll up"), so adding it moves the window toward earlier lines;
-		// wheel-up unpins the tail, wheel-down re-pins at the bottom.
+		return { handled: this.applyWheelDelta(event.wheelDelta ?? 0) };
+	}
+
+	/** Raw wheel input (regular TUI mode): same semantics as handleMouse —
+	 * pi-tui emits a negative delta on wheel-up, so adding it moves the
+	 * window toward earlier lines; wheel-up unpins the tail, wheel-down
+	 * re-pins at the bottom. No-op before the first render built the cache. */
+	applyWheelDelta(delta: number): boolean {
+		if (this.cachedWidth === null) return false;
 		const windowHeight = this.windowHeight();
 		const maxOffset = Math.max(0, this.cachedLines.length - windowHeight);
 		this.scrollOffset = Math.min(
-			Math.max(0, this.scrollOffset + (event.wheelDelta ?? 0)),
+			Math.max(0, this.scrollOffset + delta),
 			maxOffset,
 		);
+		const changed = this.followTail || this.scrollOffset !== maxOffset || delta !== 0;
 		this.followTail = this.scrollOffset >= maxOffset;
 		this.tui.requestRender();
-		return { handled: true };
+		return changed;
 	}
 
 	// ------------------------------------------------------------------
