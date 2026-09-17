@@ -238,7 +238,10 @@ export class SubagentResultViews {
 	// ------------------------------------------------------------------
 
 	private renderRunningMulti(details: SubagentDetails, theme: Theme): Component {
-		const total = details.results.length;
+		// The denominator is the requested count, not the results length:
+		// a chain's results only hold completed + in-flight steps, so the
+		// counter would read 0/1 for a 2-step chain before step 1 lands.
+		const total = details.expectedTotal ?? details.results.length;
 		const done = details.results.filter((r) => r.exitCode !== -1).length;
 		const failed = details.results.filter((r) => r.exitCode !== -1 && isFailedResult(r));
 		let text =
