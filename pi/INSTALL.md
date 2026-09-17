@@ -43,20 +43,23 @@ $PI_CODING_AGENT_DIR/agents/balanced-worker.md
 $PI_CODING_AGENT_DIR/agents/bulk-worker.md
 $PI_CODING_AGENT_DIR/agents/quick-worker.md
 $PI_CODING_AGENT_DIR/.delegation-protocol/delegation-enforcer.py
-$PI_CODING_AGENT_DIR/extensions/adp-enforcer.ts
-$PI_CODING_AGENT_DIR/extensions/subagent/index.ts
-$PI_CODING_AGENT_DIR/extensions/subagent/agents.ts
-$PI_CODING_AGENT_DIR/extensions/subagent/constants.ts
-$PI_CODING_AGENT_DIR/extensions/subagent/detail-view.ts
-$PI_CODING_AGENT_DIR/extensions/subagent/dispatch.ts
-$PI_CODING_AGENT_DIR/extensions/subagent/format.ts
-$PI_CODING_AGENT_DIR/extensions/subagent/registry.ts
-$PI_CODING_AGENT_DIR/extensions/subagent/result-views.ts
-$PI_CODING_AGENT_DIR/extensions/subagent/run.ts
-$PI_CODING_AGENT_DIR/extensions/subagent/selector-view.ts
-$PI_CODING_AGENT_DIR/extensions/subagent/types.ts
 $PI_CODING_AGENT_DIR/.delegation-protocol/delegation-classifier.py
 $PI_CODING_AGENT_DIR/.delegation-protocol/hook_adapter.py
+$PI_CODING_AGENT_DIR/extensions/adp-subagent/index.ts
+$PI_CODING_AGENT_DIR/extensions/adp-subagent/agents.ts
+$PI_CODING_AGENT_DIR/extensions/adp-subagent/constants.ts
+$PI_CODING_AGENT_DIR/extensions/adp-subagent/detail-view.ts
+$PI_CODING_AGENT_DIR/extensions/adp-subagent/dispatch.ts
+$PI_CODING_AGENT_DIR/extensions/adp-subagent/enforcer.ts
+$PI_CODING_AGENT_DIR/extensions/adp-subagent/format.ts
+$PI_CODING_AGENT_DIR/extensions/adp-subagent/registry.ts
+$PI_CODING_AGENT_DIR/extensions/adp-subagent/result-views.ts
+$PI_CODING_AGENT_DIR/extensions/adp-subagent/run.ts
+$PI_CODING_AGENT_DIR/extensions/adp-subagent/selector-view.ts
+$PI_CODING_AGENT_DIR/extensions/adp-subagent/types.ts
+$PI_CODING_AGENT_DIR/extensions/adp-subagent/viewer-chrome.ts
+$PI_CODING_AGENT_DIR/extensions/adp-subagent/conservative-width.ts
+$PI_CODING_AGENT_DIR/extensions/adp-subagent/wheel-input.ts
 ```
 
 The quick worker handles trivial, mechanical, single-step work through the
@@ -66,10 +69,11 @@ assignments where moderate reasoning is useful. The frontier worker overlaps
 the balanced tier for bounded work needing near-parent reasoning, without
 taking over parent architecture or integration. All four are ordinary native
 Pi agents; the protocol observes their lifecycle, it does not launch or route
-them. Spawning itself is Pi's native `subagent` tool from the official
-subagent extension, which the Pi installer now deploys as a vendored copy
-maintained in this repository; ADP provides no launcher and does not depend on
-that extension for its own resources — when the tool is absent, required
+them. Spawning is Pi's native `subagent` tool of the vendored adp-subagent
+extension, which the installer deploys under `extensions/adp-subagent/`;
+the tool keeps its native `subagent` name, and the delegation enforcer is
+folded into the same extension. ADP provides no launcher and does not depend
+on that extension for its own resources — when the tool is absent, required
 delegation is reported blocked rather than done in the parent.
 
 Each worker inherits the parent Pi host's tool access, including configured
