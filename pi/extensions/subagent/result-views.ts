@@ -155,11 +155,15 @@ export class SubagentResultViews {
 			const tierSuffix = r.tier ? theme.fg("muted", ` (${r.tier})`) : "";
 			const turns = r.usage.turns;
 			const plural = turns === 1 ? "" : "s";
+			// Live usage stats ride below the one-liner: usage accumulates on
+			// every streamed partial, so tokens/cost track the child live.
+			const usageStr = formatUsageStats(r.usage, r.model, r.turnLimit);
 			return new Text(
 				theme.fg("toolTitle", theme.bold("subagent ")) +
 					theme.fg("accent", r.agent) +
 					tierSuffix +
-					theme.fg("muted", ` running (${turns} turn${plural})`),
+					theme.fg("muted", ` running (${turns} turn${plural})`) +
+					(usageStr ? `\n${theme.fg("dim", usageStr)}` : ""),
 				0,
 				0,
 			);
@@ -247,6 +251,9 @@ export class SubagentResultViews {
 			const reason = firstLine(r.errorMessage || r.stderr || "(no output)");
 			text += theme.fg("error", ` — ${r.agent} failed: ${reason}`);
 		}
+		// Live aggregate usage: the same stats the finished views carry.
+		const usageStr = formatUsageStats(aggregateUsage(details.results));
+		if (usageStr) text += `\n${theme.fg("dim", usageStr)}`;
 		return new Text(text, 0, 0);
 	}
 
