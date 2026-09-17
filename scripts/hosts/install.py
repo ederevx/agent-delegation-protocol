@@ -238,6 +238,8 @@ def resources(repo: Path, home: Path, host: str) -> list[tuple[Path, Path, str]]
              home / "extensions/adp-subagent/constants.ts", "copy"),
             (repo / "pi/extensions/adp-subagent/detail-view.ts",
              home / "extensions/adp-subagent/detail-view.ts", "copy"),
+            (repo / "pi/extensions/adp-subagent/dispatch.ts",
+             home / "extensions/adp-subagent/dispatch.ts", "copy"),
             (repo / "pi/extensions/adp-subagent/enforcer.ts",
              home / "extensions/adp-subagent/enforcer.ts", "copy"),
             (repo / "pi/extensions/adp-subagent/format.ts",
