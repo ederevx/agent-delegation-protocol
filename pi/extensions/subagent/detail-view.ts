@@ -138,8 +138,9 @@ export class SubagentDetailView {
 
 		const out: string[] = [];
 		out.push(truncateToWidth(this.titleLine(width, windowHeight), width));
+		this.chrome.appendTop(out, width, rows);
 		this.appendContentWindow(out, windowHeight);
-		this.chrome.appendBottom(out, width, rows);
+		out.push(truncateToWidth(this.statsLine(width), width));
 		return this.chrome.clipFrame(out, rows);
 	}
 
@@ -209,9 +210,10 @@ export class SubagentDetailView {
 	// ------------------------------------------------------------------
 
 	/** Content-window height; one shared source of truth for render(),
-	 * handleInput() page math, and handleMouse() clamping. */
+	 * handleInput() page math, and handleMouse() clamping. One row below
+	 * the chrome's budget is reserved for the stats line at the bottom. */
 	private windowHeight(): number {
-		return this.chrome.contentWindowHeight(this.tui.terminal.rows);
+		return Math.max(1, this.chrome.contentWindowHeight(this.tui.terminal.rows) - 1);
 	}
 
 	/** Sticky bottom until the user scrolls up; clamp inside [0, maxOffset]. */
@@ -241,6 +243,14 @@ export class SubagentDetailView {
 	private appendContentWindow(out: string[], windowHeight: number): void {
 		const slice = this.cachedLines.slice(this.scrollOffset, this.scrollOffset + windowHeight);
 		for (let i = 0; i < windowHeight; i++) out.push(slice[i] ?? "");
+	}
+
+	/** Dim model-usage line pinned at the frame's bottom edge, below the
+	 * content window: turns, tokens, cache, cost, and model. */
+	private statsLine(width: number): string {
+		const r = this.entry.result;
+		const usageStr = formatUsageStats(r.usage, r.model, r.turnLimit);
+		return this.theme.fg("dim", usageStr || "no usage yet");
 	}
 
 	// ------------------------------------------------------------------
@@ -279,7 +289,6 @@ export class SubagentDetailView {
 		this.addStreamedPartial(items);
 		this.addBudgetWarning(items);
 		this.addError(items);
-		this.addUsage(items);
 		return items;
 	}
 
