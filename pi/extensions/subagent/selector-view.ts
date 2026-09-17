@@ -78,6 +78,8 @@ export class SubagentSelectorView {
 		this.empty = new Container();
 		this.empty.addChild(new DynamicBorder((s: string) => theme.fg("border", s)));
 		this.empty.addChild(new Text(this.st.hint("  No subagents spawned this session."), 0, 0));
+		this.empty.addChild(new Text(this.st.hint("  Runs spawned via the subagent tool appear here."), 0, 0));
+		this.empty.addChild(new Text(this.st.hint("  ↑↓/mouse select · Enter/Space open · Esc closes"), 0, 0));
 		this.empty.addChild(new DynamicBorder((s: string) => theme.fg("border", s)));
 	}
 
