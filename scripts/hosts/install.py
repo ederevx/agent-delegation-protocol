@@ -29,17 +29,12 @@ except ImportError:
 
 VERSION = 3
 
-# Per-host runtime facts. The settings file name is None for a host with no
-# hook-configuration JSON; its integration is deployed as plain resources.
-# First entry may be empty, meaning the home root itself (Codex's AGENTS.md
-# policy lives at the root; Claude's rules live under rules/).
+# Per-host runtime facts. First entry may be empty, meaning the home root
+# itself (Codex's AGENTS.md policy lives at the root; Claude's rules live
+# under rules/).
 HOST_DIRECTORIES = {
     "claude": ("rules", "agents", "hooks", ".delegation-protocol"),
     "codex": ("", "agents", "hooks", ".delegation-protocol"),
-    # Pi enforces through a discovered extension, and its bridge lives in the
-    # shared state directory: no hooks/ directory exists, so pi never emits
-    # pi's "hooks/ directory found" deprecation warning.
-    "pi": ("agents", "extensions", ".delegation-protocol"),
 }
 
 # Codex caps concurrently open spawned-agent threads per session through an
@@ -219,47 +214,6 @@ def resources(repo: Path, home: Path, host: str) -> list[tuple[Path, Path, str]]
             (repo / "claude/agents/bulk-worker.md", home / "agents/bulk-worker.md", "copy"),
             (repo / "claude/agents/quick-worker.md", home / "agents/quick-worker.md", "copy"),
             (repo / "claude/hooks/delegation-enforcer.py", home / "hooks/delegation-enforcer.py", "copy"),
-            *common,
-        ]
-    if host == "pi":
-        return [
-            (repo / "pi/rules/delegation-protocol.md", home / "rules/delegation-protocol.md", "copy"),
-            (repo / "pi/agents/frontier-worker.md", home / "agents/frontier-worker.md", "copy"),
-            (repo / "pi/agents/balanced-worker.md", home / "agents/balanced-worker.md", "copy"),
-            (repo / "pi/agents/bulk-worker.md", home / "agents/bulk-worker.md", "copy"),
-            (repo / "pi/agents/quick-worker.md", home / "agents/quick-worker.md", "copy"),
-            (repo / "pi/.delegation-protocol/delegation-enforcer.py",
-             state / "delegation-enforcer.py", "copy"),
-            (repo / "pi/extensions/adp-subagent/index.ts",
-             home / "extensions/adp-subagent/index.ts", "copy"),
-            (repo / "pi/extensions/adp-subagent/agents.ts",
-             home / "extensions/adp-subagent/agents.ts", "copy"),
-                        (repo / "pi/extensions/adp-subagent/constants.ts",
-             home / "extensions/adp-subagent/constants.ts", "copy"),
-            (repo / "pi/extensions/adp-subagent/detail-view.ts",
-             home / "extensions/adp-subagent/detail-view.ts", "copy"),
-            (repo / "pi/extensions/adp-subagent/dispatch.ts",
-             home / "extensions/adp-subagent/dispatch.ts", "copy"),
-            (repo / "pi/extensions/adp-subagent/enforcer.ts",
-             home / "extensions/adp-subagent/enforcer.ts", "copy"),
-            (repo / "pi/extensions/adp-subagent/format.ts",
-             home / "extensions/adp-subagent/format.ts", "copy"),
-            (repo / "pi/extensions/adp-subagent/registry.ts",
-             home / "extensions/adp-subagent/registry.ts", "copy"),
-            (repo / "pi/extensions/adp-subagent/result-views.ts",
-             home / "extensions/adp-subagent/result-views.ts", "copy"),
-            (repo / "pi/extensions/adp-subagent/run.ts",
-             home / "extensions/adp-subagent/run.ts", "copy"),
-            (repo / "pi/extensions/adp-subagent/selector-view.ts",
-             home / "extensions/adp-subagent/selector-view.ts", "copy"),
-            (repo / "pi/extensions/adp-subagent/types.ts",
-             home / "extensions/adp-subagent/types.ts", "copy"),
-            (repo / "pi/extensions/adp-subagent/viewer-chrome.ts",
-             home / "extensions/adp-subagent/viewer-chrome.ts", "copy"),
-            (repo / "pi/extensions/adp-subagent/conservative-width.ts",
-             home / "extensions/adp-subagent/conservative-width.ts", "copy"),
-            (repo / "pi/extensions/adp-subagent/wheel-input.ts",
-             home / "extensions/adp-subagent/wheel-input.ts", "copy"),
             *common,
         ]
     return [
