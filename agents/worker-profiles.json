@@ -1,129 +1,98 @@
 {
-  "schema_version": 2,
-  "template": "agents/worker-common.md.tmpl",
-  "hosts": {
+ "schema_version": 2,
+ "template": "agents/worker-common.md.tmpl",
+ "hosts": {
+  "claude": {
+   "escalation_contract": [
+    "Native shared-workspace workers can see current working-tree changes; isolated\nworkers cannot see uncommitted parent changes. Ask the parent before any work\noutside assigned ownership, repository-wide version-control action, work on\nanother worker's files,\ndependency change, branch or index change, operation leaving the machine, or\nmaterial architectural, security-sensitive, destructive, or deeply ambiguous\ndecision. Use `SendMessage` (use `ListAgents` to identify the parent) and wait for the answer; only the parent may\ntake questions to the user. If the parent channel is unavailable, stop and\nreport instead of guessing."
+   ],
+   "lifecycle_contract": [
+    "Return the evidence report through the foreground Agent result or `SendMessage` for a named background teammate. Claude automatically releases a foreground Agent when its result returns; do not issue a stop operation for that completed worker."
+   ],
+   "output": {
+    "format": "claude-markdown"
+   }
+  },
+  "codex": {
+   "escalation_contract": [
+    "Native shared-workspace workers can see current working-tree changes; isolated\nworkers cannot see uncommitted parent changes. Ask the parent before any work\noutside assigned ownership, repository-wide version-control action, work on\nanother worker's files,\ndependency change, branch or index change, operation leaving the machine, or\nmaterial architectural, security-sensitive, destructive, or deeply ambiguous\ndecision. Use the collaboration channel available to the worker and wait for the answer; only the parent may\ntake questions to the user. If the parent channel is unavailable, stop and\nreport instead of guessing."
+   ],
+   "lifecycle_contract": [
+    "Return the evidence report and stop. The host session lifecycle releases the worker; no nonexistent post-result worker action is required."
+   ],
+   "output": {
+    "format": "codex-toml"
+   }
+  }
+ },
+ "tiers": {
+  "bulk": {
+   "description": "Default worker for routine bounded implementation, commands, and tests needing little interpretation.",
+   "profiles": {
     "claude": {
-      "escalation_contract": [
-        "Native shared-workspace workers can see current working-tree changes; isolated\nworkers cannot see uncommitted parent changes. Ask the parent before any work\noutside assigned ownership, repository-wide version-control action, work on\nanother worker's files,\ndependency change, branch or index change, operation leaving the machine, or\nmaterial architectural, security-sensitive, destructive, or deeply ambiguous\ndecision. Use `SendMessage` (use `ListAgents` to identify the parent) and wait for the answer; only the parent may\ntake questions to the user. If the parent channel is unavailable, stop and\nreport instead of guessing."
-      ],
-      "lifecycle_contract": [
-        "Return the evidence report through the foreground Agent result or `SendMessage` for a named background teammate. Claude automatically releases a foreground Agent when its result returns; do not issue a stop operation for that completed worker."
-      ],
-      "output": {
-        "format": "claude-markdown"
-      }
+     "path": "claude/agents/bulk-worker.md",
+     "name": "bulk-worker",
+     "model": "sonnet",
+     "effort": "medium"
     },
     "codex": {
-      "escalation_contract": [
-        "Native shared-workspace workers can see current working-tree changes; isolated\nworkers cannot see uncommitted parent changes. Ask the parent before any work\noutside assigned ownership, repository-wide version-control action, work on\nanother worker's files,\ndependency change, branch or index change, operation leaving the machine, or\nmaterial architectural, security-sensitive, destructive, or deeply ambiguous\ndecision. Use the collaboration channel available to the worker and wait for the answer; only the parent may\ntake questions to the user. If the parent channel is unavailable, stop and\nreport instead of guessing."
-      ],
-      "lifecycle_contract": [
-        "Return the evidence report and stop. The host session lifecycle releases the worker; no nonexistent post-result worker action is required."
-      ],
-      "output": {
-        "format": "codex-toml"
-      }
-    },
-    "pi": {
-      "escalation_contract": [
-        "Pi runs every worker as an isolated `pi --mode json -p --no-session` process\nin the parent's working directory: a worker sees current working-tree changes\nbut never the parent's conversation, and workers cannot message the parent\nmid-task. Raise anything outside assigned ownership, any repository-wide\nversion-control action, work on another worker's files, a dependency change,\na branch or index change, any operation leaving the machine, or any material\narchitectural, security-sensitive, destructive, or deeply ambiguous decision\nin your final evidence report and stop; only the parent may take questions\nto the user, and it reads your report when you finish."
-      ],
-      "lifecycle_contract": [
-        "Return the evidence report as your final output and end. Pi releases a foreground subagent automatically when its result returns; do not issue any stop operation for that completed worker."
-      ],
-      "output": {
-        "format": "pi-markdown"
-      }
+     "path": "codex/agents/bulk_worker.toml",
+     "name": "bulk_worker",
+     "model": "gpt-5.6-terra",
+     "reasoning_effort": "medium"
     }
+   }
   },
-  "tiers": {
-    "bulk": {
-      "description": "Default worker for routine bounded implementation, commands, and tests needing little interpretation.",
-      "profiles": {
-        "claude": {
-          "path": "claude/agents/bulk-worker.md",
-          "name": "bulk-worker",
-          "model": "sonnet",
-          "effort": "medium"
-        },
-        "codex": {
-          "path": "codex/agents/bulk_worker.toml",
-          "name": "bulk_worker",
-          "model": "gpt-5.6-terra",
-          "reasoning_effort": "medium"
-        },
-        "pi": {
-          "path": "pi/agents/bulk-worker.md",
-          "name": "bulk-worker",
-          "thinking": "medium"
-        }
-      }
+  "quick": {
+   "description": "Preferred worker for trivial, mechanical, single-step work using the least adequate compute.",
+   "profiles": {
+    "claude": {
+     "path": "claude/agents/quick-worker.md",
+     "name": "quick-worker",
+     "model": "haiku",
+     "effort": "low"
     },
-    "quick": {
-      "description": "Preferred worker for trivial, mechanical, single-step work using the least adequate compute.",
-      "profiles": {
-        "claude": {
-          "path": "claude/agents/quick-worker.md",
-          "name": "quick-worker",
-          "model": "haiku",
-          "effort": "low"
-        },
-        "codex": {
-          "path": "codex/agents/quick_worker.toml",
-          "name": "quick_worker",
-          "model": "gpt-5.6-luna",
-          "reasoning_effort": "low"
-        },
-        "pi": {
-          "path": "pi/agents/quick-worker.md",
-          "name": "quick-worker",
-          "thinking": "low"
-        }
-      }
-    },
-    "balanced": {
-      "description": "Analysis-first worker that can also execute; use when lower tiers need more reasoning.",
-      "profiles": {
-        "claude": {
-          "path": "claude/agents/balanced-worker.md",
-          "name": "balanced-worker",
-          "model": "opus",
-          "effort": "high"
-        },
-        "codex": {
-          "path": "codex/agents/balanced-worker.toml",
-          "name": "balanced_worker",
-          "model": "gpt-5.6-sol",
-          "reasoning_effort": "high"
-        },
-        "pi": {
-          "path": "pi/agents/balanced-worker.md",
-          "name": "balanced-worker",
-          "thinking": "high"
-        }
-      }
-    },
-    "frontier": {
-      "description": "Highest-cost worker for difficult reasoning or execution when lower tiers are insufficient; shortest runtime budget.",
-      "profiles": {
-        "claude": {
-          "path": "claude/agents/frontier-worker.md",
-          "name": "frontier-worker",
-          "model": "fable",
-          "effort": "xhigh"
-        },
-        "codex": {
-          "path": "codex/agents/frontier_worker.toml",
-          "name": "frontier_worker",
-          "model": "gpt-6-astra",
-          "reasoning_effort": "xhigh"
-        },
-        "pi": {
-          "path": "pi/agents/frontier-worker.md",
-          "name": "frontier-worker",
-          "thinking": "xhigh"
-        }
-      }
+    "codex": {
+     "path": "codex/agents/quick_worker.toml",
+     "name": "quick_worker",
+     "model": "gpt-5.6-luna",
+     "reasoning_effort": "low"
     }
+   }
+  },
+  "balanced": {
+   "description": "Analysis-first worker that can also execute; use when lower tiers need more reasoning.",
+   "profiles": {
+    "claude": {
+     "path": "claude/agents/balanced-worker.md",
+     "name": "balanced-worker",
+     "model": "opus",
+     "effort": "high"
+    },
+    "codex": {
+     "path": "codex/agents/balanced-worker.toml",
+     "name": "balanced_worker",
+     "model": "gpt-5.6-sol",
+     "reasoning_effort": "high"
+    }
+   }
+  },
+  "frontier": {
+   "description": "Highest-cost worker for difficult reasoning or execution when lower tiers are insufficient; shortest runtime budget.",
+   "profiles": {
+    "claude": {
+     "path": "claude/agents/frontier-worker.md",
+     "name": "frontier-worker",
+     "model": "fable",
+     "effort": "xhigh"
+    },
+    "codex": {
+     "path": "codex/agents/frontier_worker.toml",
+     "name": "frontier_worker",
+     "model": "gpt-6-astra",
+     "reasoning_effort": "xhigh"
+    }
+   }
   }
+ }
 }

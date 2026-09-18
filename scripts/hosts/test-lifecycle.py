@@ -180,10 +180,6 @@ def main() -> None:
     test_windows_lock_contention_retries_eacces()
     test_legacy_locks_fail_closed_with_actionable_feedback()
     test_exhausted_budget_denies_with_wind_down_order()
-    test_pi_budget_check_denies_at_limit_without_charging()
-    test_pi_budget_check_below_limit_passes_without_charging()
-    test_pi_budget_charges_on_post_tool_use_and_dedupes()
-    test_pi_budget_charges_to_limit_then_check_denies()
     test_codex_pre_mutation_still_charges_each_attempt()
     print("Host lock tests: PASS")
 
@@ -219,132 +215,6 @@ def test_exhausted_budget_denies_with_wind_down_order() -> None:
                 os.environ.pop("CODEX_HOME", None)
             else:
                 os.environ["CODEX_HOME"] = previous_home
-
-
-def test_pi_budget_check_denies_at_limit_without_charging() -> None:
-    """Pi's pre-mutation check denies a spent ledger and never increments."""
-    import json as _json
-
-    with tempfile.TemporaryDirectory(prefix="protocol-budget-") as raw:
-        home = Path(raw)
-        previous_home = os.environ.get("PI_CODING_AGENT_DIR")
-        os.environ["PI_CODING_AGENT_DIR"] = str(home)
-        try:
-            ledger_path, _ = _paths(home, "worker-tool-budget:pi-check-spent")
-            ledger_path.parent.mkdir(parents=True)
-            ledger_path.write_text(_json.dumps(
-                {"tier": "bulk-worker", "limit": 2, "used": 2,
-                 "seen": ["call-0"]}))
-            denial = run("pi", "pre-mutation", {
-                "agent_id": "pi-check-spent", "agent_type": "bulk-worker",
-                "tool_name": "bash", "tool_input": {"command": "echo hi"},
-                "tool_use_id": "call-1",
-            })
-            output = denial["hookSpecificOutput"]
-            assert output["permissionDecision"] == "deny", denial
-            assert output["terminal"] is True
-            reason = output["permissionDecisionReason"]
-            assert "exhausted (2/2; 0 remaining)" in reason
-            assert "Do not call any further tools" in reason
-            assert "final evidence report" in reason
-            ledger = _json.loads(ledger_path.read_text())
-            assert ledger == {"tier": "bulk-worker", "limit": 2, "used": 2,
-                              "seen": ["call-0"]}, ledger
-        finally:
-            if previous_home is None:
-                os.environ.pop("PI_CODING_AGENT_DIR", None)
-            else:
-                os.environ["PI_CODING_AGENT_DIR"] = previous_home
-
-
-def test_pi_budget_check_below_limit_passes_without_charging() -> None:
-    """Pi's pre-mutation check below the limit neither denies nor charges."""
-    import json as _json
-
-    with tempfile.TemporaryDirectory(prefix="protocol-budget-") as raw:
-        home = Path(raw)
-        previous_home = os.environ.get("PI_CODING_AGENT_DIR")
-        os.environ["PI_CODING_AGENT_DIR"] = str(home)
-        try:
-            ledger_path, _ = _paths(home, "worker-tool-budget:pi-check-open")
-            ledger_path.parent.mkdir(parents=True)
-            ledger_path.write_text(_json.dumps(
-                {"tier": "bulk-worker", "limit": 2, "used": 1, "seen": []}))
-            assert run("pi", "pre-mutation", {
-                "agent_id": "pi-check-open", "agent_type": "bulk-worker",
-                "tool_name": "bash", "tool_input": {"command": "echo hi"},
-                "tool_use_id": "call-1",
-            }) is None
-            ledger = _json.loads(ledger_path.read_text())
-            assert ledger["used"] == 1 and ledger["seen"] == [], ledger
-        finally:
-            if previous_home is None:
-                os.environ.pop("PI_CODING_AGENT_DIR", None)
-            else:
-                os.environ["PI_CODING_AGENT_DIR"] = previous_home
-
-
-def test_pi_budget_charges_on_post_tool_use_and_dedupes() -> None:
-    """Pi charges an executed call once per tool-use id at post-tool-use."""
-    import json as _json
-
-    with tempfile.TemporaryDirectory(prefix="protocol-budget-") as raw:
-        home = Path(raw)
-        previous_home = os.environ.get("PI_CODING_AGENT_DIR")
-        os.environ["PI_CODING_AGENT_DIR"] = str(home)
-        try:
-            worker = {
-                "agent_id": "pi-charge-once", "agent_type": "bulk-worker",
-                "tool_name": "bash", "tool_input": {"command": "echo hi"},
-            }
-            assert run("pi", "post-tool-use", dict(worker, tool_use_id="call-1")) is None
-            assert run("pi", "post-tool-use", dict(worker, tool_use_id="call-1")) is None
-            assert run("pi", "post-tool-use", dict(worker, tool_use_id="call-2")) is None
-            ledger_path, _ = _paths(home, "worker-tool-budget:pi-charge-once")
-            ledger = _json.loads(ledger_path.read_text())
-            assert ledger["used"] == 2, ledger
-            assert ledger["seen"] == ["call-1", "call-2"], ledger
-            assert ledger["limit"] == 64 and ledger["tier"] == "bulk-worker", ledger
-        finally:
-            if previous_home is None:
-                os.environ.pop("PI_CODING_AGENT_DIR", None)
-            else:
-                os.environ["PI_CODING_AGENT_DIR"] = previous_home
-
-
-def test_pi_budget_charges_to_limit_then_check_denies() -> None:
-    """Charges alone can reach the limit; the next check then denies."""
-    import json as _json
-
-    with tempfile.TemporaryDirectory(prefix="protocol-budget-") as raw:
-        home = Path(raw)
-        previous_home = os.environ.get("PI_CODING_AGENT_DIR")
-        os.environ["PI_CODING_AGENT_DIR"] = str(home)
-        try:
-            ledger_path, _ = _paths(home, "worker-tool-budget:pi-spend-up")
-            ledger_path.parent.mkdir(parents=True)
-            ledger_path.write_text(_json.dumps(
-                {"tier": "bulk-worker", "limit": 2, "used": 0, "seen": []}))
-            worker = {
-                "agent_id": "pi-spend-up", "agent_type": "bulk-worker",
-                "tool_name": "bash", "tool_input": {"command": "echo hi"},
-            }
-            assert run("pi", "post-tool-use", dict(worker, tool_use_id="call-1")) is None
-            assert run("pi", "post-tool-use", dict(worker, tool_use_id="call-2")) is None
-            denial = run("pi", "pre-mutation", dict(worker, tool_use_id="call-3"))
-            output = denial["hookSpecificOutput"]
-            assert output["permissionDecision"] == "deny", denial
-            assert output["terminal"] is True
-            assert "exhausted (2/2; 0 remaining)" in output[
-                "permissionDecisionReason"]
-            ledger = _json.loads(ledger_path.read_text())
-            assert ledger["used"] == 2 and ledger["seen"] == [
-                "call-1", "call-2"], ledger
-        finally:
-            if previous_home is None:
-                os.environ.pop("PI_CODING_AGENT_DIR", None)
-            else:
-                os.environ["PI_CODING_AGENT_DIR"] = previous_home
 
 
 def test_codex_pre_mutation_still_charges_each_attempt() -> None:
@@ -430,80 +300,6 @@ def test_stale_concurrent_entries_are_swept_at_cap_check() -> None:
                 os.environ.pop("CODEX_HOME", None)
             else:
                 os.environ["CODEX_HOME"] = previous_home
-
-
-def test_pi_host_sweeps_at_its_shorter_ceiling() -> None:
-    """pi's 30-minute ceiling sweeps entries the shared 6h one would keep."""
-    import json as _json
-    import time as _time
-
-    with tempfile.TemporaryDirectory(prefix="protocol-sweep-pi-") as raw:
-        home = Path(raw)
-        previous = (os.environ.get("PI_CODING_AGENT_DIR"),
-                    os.environ.get("CLAUDE_CONFIG_DIR"))
-        os.environ["PI_CODING_AGENT_DIR"] = str(home)
-        os.environ["CLAUDE_CONFIG_DIR"] = str(home)
-        try:
-            classifier = _classifier(home)
-            cap = classifier.MAX_ACTIVE_WORKERS
-            path, _ = _paths(home, "pi-sweep-session")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            hour_old = _time.time() - 60 * 60
-            entries = [{"id": f"pi-stale-{n}", "started_at": hour_old}
-                       for n in range(cap - 1)]
-            entries.append({"id": "fresh-worker", "started_at": _time.time()})
-            path.write_text(_json.dumps({
-                "schema_version": 3, "concurrent": entries,
-                "pending_spawns": [], "denied_spawns": [], "observed": [],
-                "peak_active": cap, "requires_delegation": False,
-                "requires_multi": False, "min_agents": 0,
-                "completed": False, "pending_authorization": False,
-            }))
-            # pi's ceiling sweeps the hour-old entries at the cap check.
-            denied = run("pi", "pre-mutation", {
-                "session_id": "pi-sweep-session", "tool_name": "subagent",
-                "tool_use_id": "spawn-pi-1",
-                "tool_input": {"agent": "bulk-worker",
-                               "subagent_type": "bulk-worker"},
-            })
-            assert denied is None, denied
-            state = _json.loads(path.read_text())
-            assert not any(
-                e["id"].startswith("pi-stale-") for e in state["concurrent"]
-            )
-            assert any(e["id"] == "fresh-worker" for e in state["concurrent"])
-            assert "spawn-pi-1" in state["pending_spawns"]
-            # The same age under the shared ceiling (claude) still counts
-            # against the cap: the sweep is host-keyed, not global.
-            other = _paths(home, "claude-sweep-session")[0]
-            claude_state = _json.loads(path.read_text())
-            # Reset spawn bookkeeping so the denial rests purely on the
-            # hour-old concurrent entries, not the pi run's reservation.
-            claude_state["pending_spawns"] = []
-            claude_state["denied_spawns"] = []
-            hour_old_entries = [{"id": f"stale-{n}", "started_at": hour_old}
-                                for n in range(cap - 1)]
-            fresh = [e for e in claude_state["concurrent"]
-                     if e["id"] == "fresh-worker"]
-            claude_state["concurrent"] = hour_old_entries + fresh
-            other.write_text(_json.dumps(claude_state))
-            denied = run("claude", "pre-mutation", {
-                "session_id": "claude-sweep-session", "tool_name": "Agent",
-                "tool_use_id": "spawn-claude-1",
-                "tool_input": {"subagent_type": "bulk-worker"},
-            })
-            assert denied is not None and "cap" in denied["hookSpecificOutput"][
-                "permissionDecisionReason"
-            ], denied
-        finally:
-            if previous[0] is None:
-                os.environ.pop("PI_CODING_AGENT_DIR", None)
-            else:
-                os.environ["PI_CODING_AGENT_DIR"] = previous[0]
-            if previous[1] is None:
-                os.environ.pop("CLAUDE_CONFIG_DIR", None)
-            else:
-                os.environ["CLAUDE_CONFIG_DIR"] = previous[1]
 
 
 def test_fresh_workers_still_count_against_the_cap() -> None:
@@ -599,8 +395,8 @@ def test_parallel_fanout_reserves_and_releases_per_task_slots() -> None:
 
     with tempfile.TemporaryDirectory(prefix="protocol-fanout-") as raw:
         home = Path(raw)
-        previous_home = os.environ.get("PI_CODING_AGENT_DIR")
-        os.environ["PI_CODING_AGENT_DIR"] = str(home)
+        previous_home = os.environ.get("CODEX_HOME")
+        os.environ["CODEX_HOME"] = str(home)
         real_classifier_loader = hook_adapter._classifier
         # A cap of 3 keeps the fan-out arithmetic small; run() re-loads the
         # classifier for every event, so the loader itself is patched.
@@ -615,8 +411,8 @@ def test_parallel_fanout_reserves_and_releases_per_task_slots() -> None:
                 "tasks": [{"agent": "bulk-worker", "task": f"t{n}"}
                           for n in range(3)],
             }
-            admitted = run("pi", "pre-mutation", {
-                "session_id": "fanout-session", "tool_name": "subagent",
+            admitted = run("codex", "pre-mutation", {
+                "session_id": "fanout-session", "tool_name": "Agent",
                 "tool_use_id": "fan-1", "tool_input": fan_input,
             })
             assert admitted is None, admitted
@@ -624,7 +420,7 @@ def test_parallel_fanout_reserves_and_releases_per_task_slots() -> None:
             # The admit-time reservation carries the whole fan-out footprint.
             assert state["pending_spawns"] == [{"id": "fan-1", "fan_out": 3}]
             # The start consumes the reservation and takes all three slots.
-            run("pi", "worker-start", {
+            run("codex", "worker-start", {
                 "session_id": "fanout-session",
                 "agent_id": "fan-1", "tool_use_id": "fan-1",
             })
@@ -637,8 +433,8 @@ def test_parallel_fanout_reserves_and_releases_per_task_slots() -> None:
             }]
             assert state["peak_active"] == 3
             # A further single spawn would exceed the cap of 3.
-            denied = run("pi", "pre-mutation", {
-                "session_id": "fanout-session", "tool_name": "subagent",
+            denied = run("codex", "pre-mutation", {
+                "session_id": "fanout-session", "tool_name": "Agent",
                 "tool_use_id": "fan-2",
                 "tool_input": {"agent": "bulk-worker",
                                "subagent_type": "bulk-worker"},
@@ -653,14 +449,14 @@ def test_parallel_fanout_reserves_and_releases_per_task_slots() -> None:
                 "more requested); wait for running workers to finish or use "
                 "a smaller fan-out.")
             # Completion releases the whole fan-out record at once.
-            run("pi", "worker-complete", {
+            run("codex", "worker-complete", {
                 "session_id": "fanout-session",
                 "agent_id": "fan-1", "tool_use_id": "fan-1",
             })
             state = _json.loads(path.read_text())
             assert state["concurrent"] == []
-            retried = run("pi", "pre-mutation", {
-                "session_id": "fanout-session", "tool_name": "subagent",
+            retried = run("codex", "pre-mutation", {
+                "session_id": "fanout-session", "tool_name": "Agent",
                 "tool_use_id": "fan-2",
                 "tool_input": {"agent": "bulk-worker",
                                "subagent_type": "bulk-worker"},
@@ -669,9 +465,9 @@ def test_parallel_fanout_reserves_and_releases_per_task_slots() -> None:
         finally:
             hook_adapter._classifier = real_classifier_loader
             if previous_home is None:
-                os.environ.pop("PI_CODING_AGENT_DIR", None)
+                os.environ.pop("CODEX_HOME", None)
             else:
-                os.environ["PI_CODING_AGENT_DIR"] = previous_home
+                os.environ["CODEX_HOME"] = previous_home
 
 
 def test_fanout_replay_reuses_its_reservation() -> None:
@@ -680,8 +476,8 @@ def test_fanout_replay_reuses_its_reservation() -> None:
 
     with tempfile.TemporaryDirectory(prefix="protocol-fanout-replay-") as raw:
         home = Path(raw)
-        previous_home = os.environ.get("PI_CODING_AGENT_DIR")
-        os.environ["PI_CODING_AGENT_DIR"] = str(home)
+        previous_home = os.environ.get("CODEX_HOME")
+        os.environ["CODEX_HOME"] = str(home)
         real_classifier_loader = hook_adapter._classifier
         # A cap of exactly the fan-out size means a replay that fails to
         # match its existing reservation would be falsely denied for cap,
@@ -693,7 +489,7 @@ def test_fanout_replay_reuses_its_reservation() -> None:
             path, _ = _paths(home, "replay-session")
             path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
-                "session_id": "replay-session", "tool_name": "subagent",
+                "session_id": "replay-session", "tool_name": "Agent",
                 "tool_use_id": "fan-replay-1",
                 "tool_input": {
                     "agent": "bulk-worker", "subagent_type": "bulk-worker",
@@ -701,17 +497,17 @@ def test_fanout_replay_reuses_its_reservation() -> None:
                               for n in range(3)],
                 },
             }
-            assert run("pi", "pre-mutation", payload) is None
+            assert run("codex", "pre-mutation", payload) is None
             # The replayed delivery is recognized as the reservation it
             # already holds: admitted again, one 3-slot record, not two.
-            assert run("pi", "pre-mutation", payload) is None
+            assert run("codex", "pre-mutation", payload) is None
             state = _json.loads(path.read_text())
             assert state["pending_spawns"] == [
                 {"id": "fan-replay-1", "fan_out": 3}]
             assert hook_adapter._ledger_slots(
                 state["pending_spawns"]) == 3
             # The start consumes the reservation once, taking all 3 slots.
-            run("pi", "worker-start", {
+            run("codex", "worker-start", {
                 "session_id": "replay-session",
                 "agent_id": "fan-replay-1", "tool_use_id": "fan-replay-1",
             })
@@ -725,9 +521,9 @@ def test_fanout_replay_reuses_its_reservation() -> None:
         finally:
             hook_adapter._classifier = real_classifier_loader
             if previous_home is None:
-                os.environ.pop("PI_CODING_AGENT_DIR", None)
+                os.environ.pop("CODEX_HOME", None)
             else:
-                os.environ["PI_CODING_AGENT_DIR"] = previous_home
+                os.environ["CODEX_HOME"] = previous_home
 
 
 def test_chain_call_reserves_a_single_slot() -> None:
@@ -736,8 +532,8 @@ def test_chain_call_reserves_a_single_slot() -> None:
 
     with tempfile.TemporaryDirectory(prefix="protocol-chain-") as raw:
         home = Path(raw)
-        previous_home = os.environ.get("PI_CODING_AGENT_DIR")
-        os.environ["PI_CODING_AGENT_DIR"] = str(home)
+        previous_home = os.environ.get("CODEX_HOME")
+        os.environ["CODEX_HOME"] = str(home)
         real_classifier_loader = hook_adapter._classifier
         classifier = _classifier(home)
         classifier.MAX_ACTIVE_WORKERS = 3
@@ -750,8 +546,8 @@ def test_chain_call_reserves_a_single_slot() -> None:
                 "chain": [{"agent": "bulk-worker", "task": f"step{n}"}
                           for n in range(5)],
             }
-            admitted = run("pi", "pre-mutation", {
-                "session_id": "chain-session", "tool_name": "subagent",
+            admitted = run("codex", "pre-mutation", {
+                "session_id": "chain-session", "tool_name": "Agent",
                 "tool_use_id": "chain-1", "tool_input": chain_input,
             })
             # Five sequential steps fit under a cap of 3: a chain charges
@@ -759,7 +555,7 @@ def test_chain_call_reserves_a_single_slot() -> None:
             assert admitted is None, admitted
             state = _json.loads(path.read_text())
             assert state["pending_spawns"] == ["chain-1"]
-            run("pi", "worker-start", {
+            run("codex", "worker-start", {
                 "session_id": "chain-session",
                 "agent_id": "chain-1", "tool_use_id": "chain-1",
             })
@@ -770,7 +566,7 @@ def test_chain_call_reserves_a_single_slot() -> None:
                 "started_at": state["concurrent"][0]["started_at"],
                 "fan_out": 1,
             }]
-            run("pi", "worker-complete", {
+            run("codex", "worker-complete", {
                 "session_id": "chain-session",
                 "agent_id": "chain-1", "tool_use_id": "chain-1",
             })
@@ -779,9 +575,9 @@ def test_chain_call_reserves_a_single_slot() -> None:
         finally:
             hook_adapter._classifier = real_classifier_loader
             if previous_home is None:
-                os.environ.pop("PI_CODING_AGENT_DIR", None)
+                os.environ.pop("CODEX_HOME", None)
             else:
-                os.environ["PI_CODING_AGENT_DIR"] = previous_home
+                os.environ["CODEX_HOME"] = previous_home
 
 
 def test_worker_session_nested_spawn_releases_its_slot() -> None:

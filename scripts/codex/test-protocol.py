@@ -332,10 +332,11 @@ def test_budget_failures(home):
   assert results == [None]*8, results
   path, _ = adapter._paths(home, 'worker-tool-budget:concurrent-ledger')
   assert json.loads(path.read_text())['used'] == 1
-  # The combined path must check and charge atomically, not delegate to the
-  # separate charge wrapper between two lock acquisitions.
+  # The combined path must check and charge atomically, never through the
+  # separate check()/charge() split (charge() was removed with the Pi
+  # bridge); a split path would trip this.
   payload = dict(payload, agent_id='atomic-combined')
-  with patch.object(adapter, '_worker_tool_charge',
+  with patch.object(adapter.WorkerToolLedger, 'check',
                     side_effect=AssertionError('split check/charge path used')):
     assert adapter._worker_tool_budget(home, payload, classifier) is None
   path, _ = adapter._paths(home, 'worker-tool-budget:atomic-combined')

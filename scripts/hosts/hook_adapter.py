@@ -20,17 +20,12 @@ from typing import Any, Iterator
 # A concurrent worker whose start event is older than this is treated as
 # leaked: its slot is freed at the next cap check even if no completion
 # event ever arrives (host crash, kill -9, abort mid-fan-out).
+# The Pi host runs its own shorter ceiling (30 minutes) in pi-delegation.
 STALE_WORKER_SECONDS = 6 * 60 * 60
-# pi has no failure event either, and a user abort of a subagent tool call
-# never emits a completion, so leaked slots wedge the cap until swept. Its
-# workers are one-shot processes that rarely run for hours, so a shorter
-# ceiling bounds the leak while Codex keeps the shared default.
-STALE_WORKER_SECONDS_BY_HOST = {"pi": 30 * 60}
 
 HOST_ENVIRONMENT = {
     "claude": ("CLAUDE_CONFIG_DIR", ".claude"),
     "codex": ("CODEX_HOME", ".codex"),
-    "pi": ("PI_CODING_AGENT_DIR", ".pi/agent"),
 }
 
 
@@ -388,17 +383,16 @@ def _normalize_concurrent(state: dict[str, Any]) -> list[dict[str, Any]]:
             for worker in sorted(earliest)]
 
 
-def _sweep_stale_workers(state: dict[str, Any], host: str = "") -> None:
+def _sweep_stale_workers(state: dict[str, Any]) -> None:
     """Free slots of workers whose start event predates the staleness ceiling.
 
-    Claude papers over the common leak with a failure event; Codex and pi
-    have none, so a crashed host could otherwise consume cap slots forever:
-    nothing else ever removes a `concurrent` entry whose SubagentStop never
-    arrives. Sweeping here means every spawn attempt pays the check while
-    only genuinely stale entries pay the removal.
+    Claude papers over the common leak with a failure event; Codex has none,
+    so a crashed host could otherwise consume cap slots forever: nothing
+    else ever removes a `concurrent` entry whose SubagentStop never arrives.
+    Sweeping here means every spawn attempt pays the check while only
+    genuinely stale entries pay the removal.
     """
-    cutoff = time.time() - STALE_WORKER_SECONDS_BY_HOST.get(
-        host, STALE_WORKER_SECONDS)
+    cutoff = time.time() - STALE_WORKER_SECONDS
     kept = [
         entry for entry in state.get("concurrent", [])
         if isinstance(entry, dict)
@@ -410,7 +404,7 @@ def _sweep_stale_workers(state: dict[str, Any], host: str = "") -> None:
 
 
 def _active_cap_violation(state: dict[str, Any], classifier: Any,
-                          payload: dict[str, Any], host: str = "") -> str | None:
+                          payload: dict[str, Any]) -> str | None:
     """Reason a further worker spawn must be denied for an over-full session.
 
     `concurrent` holds the workers genuinely in flight right now, so a
@@ -436,7 +430,7 @@ def _active_cap_violation(state: dict[str, Any], classifier: Any,
     """
     if _holds_reservation(state, payload):
         return None
-    _sweep_stale_workers(state, host)
+    _sweep_stale_workers(state)
     running = (_ledger_slots(state.get("concurrent", []))
                + _ledger_slots(state.get("pending_spawns", [])))
     cap = classifier.MAX_ACTIVE_WORKERS
@@ -574,9 +568,6 @@ def _deny(reason: str, *, terminal: bool = False) -> dict[str, Any]:
 HOST_CONTEXT_ENVIRONMENT = {
     "claude": ("CLAUDE_CODE_MAX_CONTEXT_TOKENS",),
     "codex": ("CODEX_MAX_CONTEXT_TOKENS",),
-    # The Pi enforcer extension sets this from the session model's context
-    # window when it shells out to the adapter.
-    "pi": ("PI_CONTEXT_TOKENS",),
 }
 
 
@@ -703,7 +694,7 @@ class TurnEventHandler:
         delegating = _delegating(payload, self.classifier)
         if reason is None and delegating:
             reason = _active_cap_violation(
-                self.state, self.classifier, payload, self.host)
+                self.state, self.classifier, payload)
         if reason is None and _mutating(payload, self.classifier):
             reason = _unmet(self.state)
         if reason is not None:
@@ -809,18 +800,6 @@ class WorkerToolLedger:
         except (OSError, ValueError, TypeError) as error:
             return _worker_tool_error(error)
 
-    def charge(self) -> dict[str, Any] | None:
-        """Charge one hook-covered tool call against the lifetime ledger."""
-        try:
-            worker = self._worker_id()
-            if not worker:
-                return None
-            path, lock = _paths(self.home, "worker-tool-budget:" + worker)
-            with _locked(lock):
-                return self._charge_state(path)
-        except (OSError, ValueError, TypeError) as error:
-            return _worker_tool_error(error)
-
     def _worker_id(self) -> str | None:
         worker = self.payload.get("agent_id") or self.payload.get("agentId")
         if not isinstance(worker, str) or not worker.strip():
@@ -862,9 +841,9 @@ class WorkerToolLedger:
                 "Worker tool-call budget ledger is unreadable or corrupt; "
                 "report this to the parent without continuing tool calls.",
                 terminal=True)
-        # `used` has no upper bound: Pi charges at post-tool-use, so a
-        # final parallel tool batch that all passed the pre-mutation check
-        # can push the count past the limit by at most that batch's size.
+        # `used` has no upper bound: a final parallel tool batch that all
+        # passed the pre-mutation check can push the count past the limit
+        # by at most that batch's size.
         if (not isinstance(ledger, dict) or type(ledger.get("limit")) is not int
                 or ledger["limit"] <= 0 or type(ledger.get("used")) is not int
                 or ledger["used"] < 0
@@ -932,12 +911,6 @@ def _worker_tool_check(home: Path, payload: dict[str, Any],
         deny_at_limit=deny_at_limit)
 
 
-def _worker_tool_charge(home: Path, payload: dict[str, Any],
-                        classifier: Any) -> dict[str, Any] | None:
-    """Charge one hook-covered tool call against the lifetime ledger."""
-    return WorkerToolLedger(home, payload, classifier).charge()
-
-
 def _state_error(event: str, error: Exception) -> dict[str, Any]:
     reason = (
         "Protocol state could not be verified or saved; "
@@ -966,31 +939,18 @@ class WorkerSessionHandler:
     def handle(self, event):
         if event == "prompt":
             return _routing_context("UserPromptSubmit", self.classifier)
-        if event == "post-tool-use":
-            return self._tool_result()
         if event == "pre-mutation":
             return self._pre_mutation()
         return None
 
-    def _tool_result(self):
-        # Pi only: the call reached its tool_result, so it executed;
-        # charge it here. No feedback -- the call already ran.
-        if self.host == "pi":
-            _worker_tool_charge(self.home, self.payload, self.classifier)
-        return None
-
     def _pre_mutation(self):
-        # Both enforce the hard hook-covered tool-call budget here, but
-        # Codex charges each attempt at admission (it has no post-execution
-        # hook), while Pi only checks: Pi fires pre-mutation before other
-        # extensions may block the call, and blocked calls never reach
-        # tool_result, so Pi charges there.
-        if self.host == "codex":
-            denial = _worker_tool_budget(self.home, self.payload, self.classifier)
-        elif self.host == "pi":
-            denial = _worker_tool_check(self.home, self.payload, self.classifier)
-        else:
-            denial = None
+        # Codex charges each intercepted attempt at admission (it has no
+        # post-execution hook); Pi's in-process extension keeps its own
+        # budget ledger and charges at tool_result.
+        denial = (
+            _worker_tool_budget(self.home, self.payload, self.classifier)
+            if self.host == "codex" else None
+        )
         if denial:
             return denial
         reason = _spawn_budget_violation(self.payload, self.classifier)
@@ -1013,7 +973,7 @@ class WorkerSessionHandler:
                 parent_state = _load(path)
                 if reason is None:
                     reason = _active_cap_violation(
-                        parent_state, self.classifier, self.payload, self.host)
+                        parent_state, self.classifier, self.payload)
                 if reason is None:
                     _reserve_spawn(parent_state, self.payload)
                     _save(path, parent_state)
@@ -1031,13 +991,12 @@ class WorkerSessionHandler:
 
 def run(host: str, event: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     """Apply one normalized hook event and return host-compatible feedback."""
-    if host not in {"claude", "codex", "pi"} or not isinstance(payload, dict):
+    if host not in {"claude", "codex"} or not isinstance(payload, dict):
         return None
     session = _session(payload)
     home = _home(host)
     classifier = _classifier(home)
-    if event in {"prompt", "pre-mutation", "turn-stop",
-                 "post-tool-use"} and _is_worker_session(host, payload):
+    if event in {"prompt", "pre-mutation", "turn-stop"} and _is_worker_session(host, payload):
         # Worker activity does not rewrite parent obligations. Tool budgets
         # have their own persistent ledger and never block final completion.
         return WorkerSessionHandler(

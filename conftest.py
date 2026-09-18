@@ -1,7 +1,6 @@
 """Repository-wide pytest configuration for the hyphenated test suites.
 
-`scripts/claude/test-protocol.py`, `scripts/codex/test-protocol.py`, and
-`scripts/pi/test-protocol.py` are
+`scripts/claude/test-protocol.py` and `scripts/codex/test-protocol.py` are
 direct-run harnesses: their test functions take their fixtures as arguments
 from their own `main()`, so pytest must not collect them (the harnesses stay
 covered through scripts/hosts/test-harnesses.py).
@@ -18,7 +17,6 @@ from pathlib import Path
 collect_ignore_glob = [
     "scripts/claude/test-protocol.py",
     "scripts/codex/test-protocol.py",
-    "scripts/pi/test-protocol.py",
 ]
 
 sys.path.insert(0, str(Path(__file__).parent / "scripts" / "hosts"))
